@@ -46,7 +46,7 @@ touching the vaults or the backups. A systemd example:
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/docker run --rm --env-file /etc/vault-mirror.env \
-  -v /var/lib/vault-mirror:/data ghcr.io/nikitamgrimm/vault-mirror:0.1
+  -v /var/lib/vault-mirror:/data ghcr.io/nikitamgrimm/vault-mirror:0.2
 
 # /etc/systemd/system/vault-mirror.timer
 [Timer]
