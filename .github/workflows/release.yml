@@ -74,7 +74,7 @@ jobs:
       - name: Package
         run: |
           out/vault-mirror --version
-          file out/vault-mirror | tee /dev/stderr | grep -q 'statically linked'
+          file out/vault-mirror | tee /dev/stderr | grep -Eq 'static(ally|-pie) linked'
           name="vault-mirror-$VERSION-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp out/vault-mirror LICENSE README.md "dist/$name/"
