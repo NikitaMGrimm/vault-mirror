@@ -7,10 +7,11 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::Serialize;
 
 use crate::{
-    mirror::{Endpoint, Reporter, refused},
+    mirror::{Endpoint, Reporter, Tally, refused},
     node::Node,
     snapshot::{Restorable, RestorableItem},
     store::Store,
+    text::count,
     vault::{Draft, Scope},
 };
 
@@ -60,7 +61,8 @@ pub async fn restore(
     let live = existing.items.iter().filter(|item| !item.in_trash).count();
     if live > 0 && !options.allow_non_empty {
         bail!(
-            "the target vault already holds {live} item(s); pass --allow-non-empty to add the snapshot to them"
+            "the target vault already holds {}; pass --allow-non-empty to add the snapshot to them",
+            count(live, "item")
         );
     }
 
@@ -90,10 +92,10 @@ pub async fn restore(
     report.items_left_out = left_out.len();
     if !left_out.is_empty() {
         reporter.warn(&format!(
-            "{} item(s) are not restored because the target server would not show them: \
+            "Left {} out of the restore because the target server would not show them: \
              bank accounts, driver's licences and passports are not shown yet, and organization \
              items must be in a collection.",
-            left_out.len()
+            count(left_out.len(), "item")
         ));
     }
     // Snapshot container id -> target container id, matched by name.
@@ -176,8 +178,11 @@ pub async fn restore(
     let concurrency = options.concurrency.max(1);
     // Bitwarden accepts attachments only from premium accounts.
     let attachments_allowed = *scope != Scope::Personal || account.premium;
+    let writes = Tally::new(reporter, "Restoring", drafts.len(), "items");
     let created = account
-        .create_items(scope, &drafts, &folder_names, concurrency)
+        .create_items(scope, &drafts, &folder_names, concurrency, &|n| {
+            writes.add(n)
+        })
         .await?;
 
     let outcomes: Vec<(bool, String, usize, usize)> = stream::iter(items.iter().zip(&created).map(
@@ -226,8 +231,8 @@ pub async fn restore(
             return Err(error.context("archiving restored items"));
         }
         reporter.warn(&format!(
-            "The server refused to archive {} restored item(s); they were restored unarchived: {error:#}",
-            archived.len()
+            "The server refused to archive {}, so they stay unarchived: {error:#}",
+            count(archived.len(), "restored item")
         ));
     }
     let visible: HashSet<String> = account
@@ -244,8 +249,8 @@ pub async fn restore(
         .count();
     if invisible > 0 {
         bail!(
-            "{invisible} restored item(s) were accepted by the server but are not shown in the \
-             target vault"
+            "the server accepted {} but does not show them in the target vault",
+            count(invisible, "restored item")
         );
     }
     report.items = outcomes.len();
@@ -256,15 +261,15 @@ pub async fn restore(
     }
     if report.attachments_skipped > 0 {
         reporter.warn(&format!(
-            "{} attachment(s) are not restored because the account has no premium subscription, \
-             which Bitwarden requires for attachments.",
-            report.attachments_skipped
+            "Skipped {}: the account has no premium subscription, which Bitwarden requires \
+             for attachments.",
+            count(report.attachments_skipped, "attachment")
         ));
     }
     if report.attachments_missing > 0 {
         reporter.warn(&format!(
-            "{} attachment(s) are listed in the snapshot but their content is not in the backup.",
-            report.attachments_missing
+            "The backup lacks the content of {} listed in the snapshot.",
+            count(report.attachments_missing, "attachment")
         ));
     }
     Ok(report)

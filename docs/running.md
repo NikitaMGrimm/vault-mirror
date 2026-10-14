@@ -17,6 +17,19 @@
 A dry run makes backups and prints the plan, but does not change the
 destination.
 
+## Output
+
+At a terminal, each step is one line with a coloured verb, and long steps
+show a progress bar. Elsewhere, such as in container logs or under systemd,
+each line has a UTC timestamp and a level instead:
+
+```text
+2026-10-14T03:00:12Z INFO Created 9 items
+2026-10-14T03:00:13Z WARN The destination refused to change the archive state of 1 item: ...
+```
+
+Set `NO_COLOR` to turn colours off.
+
 ## Scheduling
 
 Either let the container run `daemon`, as in the [quick start](../README.md#quick-start), or have your

@@ -16,4 +16,5 @@ pub mod restore;
 pub mod schedule;
 pub mod snapshot;
 pub mod store;
+pub mod text;
 pub mod vault;

@@ -18,6 +18,7 @@ use crate::{
     mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto},
     plan::{Safety, Summary},
     store::{Keys, Store},
+    text::count,
     vault::{Account, Scope},
 };
 
@@ -279,8 +280,8 @@ async fn execute(
     now: OffsetDateTime,
 ) -> Result<()> {
     if !config.ignored.is_empty() {
-        reporter.info(&format!(
-            "These settings are no longer used and are ignored: {}.",
+        reporter.warn(&format!(
+            "Ignoring settings that are no longer used: {}.",
             config.ignored.join(", ")
         ));
     }
@@ -300,7 +301,7 @@ async fn execute(
     let source_scope = scope_of(&config.source);
     if let (Some(keys), Some(options)) = (&keys, &backup_options) {
         progress.stage = "source backup";
-        reporter.info("Backing up the source vault.");
+        reporter.status("Backing up", "the source vault");
         let store = Store::open(&config.backups_dir, "source", keys)?;
         progress.status.source_backup = Some(
             backup(&source, &source_scope, &store, options, reporter)
@@ -322,7 +323,7 @@ async fn execute(
     let mut dest_vault = None;
     if let (Some(keys), Some(options)) = (&keys, &backup_options) {
         progress.stage = "destination backup";
-        reporter.info("Backing up the destination vault before changing it.");
+        reporter.status("Backing up", "the destination vault");
         let store = Store::open(&config.backups_dir, "dest", keys)?;
         let vault = dest.load(&dest_scope).await.context("reading the vault")?;
         progress.status.dest_backup = Some(
@@ -419,7 +420,7 @@ pub fn describe(status: &Status) -> String {
         parts.push(format!("during {stage}: {error}"));
     }
     if !status.warnings.is_empty() {
-        parts.push(format!("{} warning(s)", status.warnings.len()));
+        parts.push(count(status.warnings.len(), "warning"));
     }
     parts.join("; ")
 }
@@ -472,8 +473,8 @@ pub fn health(
     let age = now - finished;
     if age > max_age {
         return Err(format!(
-            "the last successful run finished {} hour(s) ago",
-            age.whole_hours()
+            "the last successful run finished {} ago",
+            count(age.whole_hours().unsigned_abs() as usize, "hour")
         ));
     }
     Ok(())
@@ -512,7 +513,7 @@ mod tests {
     struct Quiet;
 
     impl Reporter for Quiet {
-        fn info(&self, _: &str) {}
+        fn status(&self, _: &str, _: &str) {}
         fn warn(&self, _: &str) {}
     }
 

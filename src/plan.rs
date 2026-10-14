@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     node::Node,
+    text::count,
     vault::{Collection, Draft, Folder, Item, Vault},
 };
 
@@ -676,23 +677,25 @@ impl Default for Safety {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SafetyViolation {
     #[error(
-        "{0} source item(s) carry a `__source` marker, so the source looks like a mirror destination; \
-         check that the source and destination are not swapped"
+        "the source has {} with a `__source` marker, so it looks like a mirror destination. \
+         Check that the source and destination are not swapped",
+        count(*.0, "item")
     )]
     SourceLooksLikeMirror(usize),
     #[error(
-        "the destination holds {0} item(s) that this tool did not create and none that it did; \
-         a first run would delete them. Pass --allow-initial-overwrite to confirm"
+        "the destination holds {} that this tool did not create and none that it did, so a \
+         first run would delete them. Pass --allow-initial-overwrite to confirm",
+        count(*.0, "item")
     )]
     InitialOverwrite(usize),
     #[error(
-        "the run would delete all {0} item(s) it mirrored before and keep none, so the source \
+        "the run would delete every item it mirrored before ({0}) and keep none, so the source \
          looks empty or like a different vault. Pass --allow-mass-delete if this is expected"
     )]
     ReplacesEverything(usize),
     #[error(
-        "the run would delete {deleting} of {total} destination items ({percent}%), above the {limit}% limit; \
-         pass --allow-mass-delete if this is expected"
+        "the run would delete {deleting} of {total} destination items ({percent}%), above the \
+         {limit}% limit. Pass --allow-mass-delete if this is expected"
     )]
     MassDelete {
         deleting: usize,

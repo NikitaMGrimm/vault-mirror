@@ -341,7 +341,7 @@ async fn collections_the_account_is_not_assigned_to_stop_the_run() -> Result<()>
         .await
         .expect_err("an unassigned collection must stop the run");
     assert!(
-        format!("{error:#}").contains("1 collection(s) and 0 item(s)"),
+        format!("{error:#}").contains("1 collection and 0 items"),
         "{error:#}"
     );
     Ok(())
@@ -387,7 +387,7 @@ async fn items_in_no_collection_are_never_lost_silently() -> Result<()> {
             .await
             .expect_err("an item hidden from the owner must stop the run");
         assert!(
-            format!("{error:#}").contains("0 collection(s) and 1 item(s)"),
+            format!("{error:#}").contains("0 collections and 1 item"),
             "{error:#}"
         );
         return Ok(());
@@ -488,7 +488,7 @@ async fn a_restore_leaves_out_items_the_target_would_hide() -> Result<()> {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|line| line.starts_with("warn:") && line.contains("1 item(s)")),
+                .any(|line| line.starts_with("warn:") && line.contains("1 item ")),
         );
     } else {
         assert_eq!((report.items, report.items_left_out), (2, 0));

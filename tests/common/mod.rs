@@ -209,8 +209,11 @@ pub async fn seed_extra(account: &Account, count: usize) -> Result<()> {
 pub struct Capture(pub Mutex<Vec<String>>);
 
 impl Reporter for Capture {
-    fn info(&self, message: &str) {
-        self.0.lock().unwrap().push(format!("info: {message}"));
+    fn status(&self, verb: &str, detail: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("info: {verb} {detail}"));
     }
     fn warn(&self, message: &str) {
         self.0.lock().unwrap().push(format!("warn: {message}"));

@@ -1,8 +1,10 @@
 use std::{
     collections::HashMap,
     fs,
+    io::IsTerminal,
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -18,6 +20,7 @@ use vault_mirror::{
     schedule::Timetable,
     snapshot,
     store::{Keys, Store},
+    text::count,
 };
 
 /// Mirror and back up a Bitwarden or Vaultwarden vault.
@@ -136,26 +139,58 @@ impl Role {
     }
 }
 
+/// Writes progress for people at a terminal, in the style of Cargo: a
+/// right-aligned verb, then the rest of the sentence. Elsewhere, such as in
+/// container logs, each line is a timestamped log line instead.
 struct Console;
 
+const VERB: Style = AnsiColor::Green.on_default().bold();
+const PROGRESS: Style = AnsiColor::Cyan.on_default().bold();
 const WARNING: Style = AnsiColor::Yellow.on_default().bold();
 const ERROR: Style = AnsiColor::Red.on_default().bold();
-const SUCCESS: Style = AnsiColor::Green.on_default().bold();
+
+/// Whether a progress bar occupies the terminal's last line.
+static PROGRESS_SHOWN: AtomicBool = AtomicBool::new(false);
 
 impl Console {
-    fn line(level: &str, message: &str) {
-        // People at a terminal know the time; logs need it. anstream drops the
-        // colours when NO_COLOR is set.
-        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            match level {
-                "WARN" => anstream::println!("{WARNING}warning:{WARNING:#} {message}"),
-                "ERROR" => anstream::println!("{ERROR}error:{ERROR:#} {message}"),
-                "DONE" => anstream::println!("{SUCCESS}{message}{SUCCESS:#}"),
-                _ => println!("{message}"),
-            }
-            return;
+    fn terminal() -> bool {
+        std::io::stdout().is_terminal()
+    }
+
+    /// Removes the progress bar so that a line can take its place.
+    fn clear_progress() {
+        if PROGRESS_SHOWN.swap(false, Ordering::Relaxed) {
+            // Written directly: anstream would strip the control sequence
+            // along with colours when NO_COLOR is set.
+            eprint!("\r\x1b[K");
         }
-        let level = if level == "DONE" { "INFO" } else { level };
+    }
+
+    fn status(verb: &str, detail: &str) {
+        if !Self::terminal() {
+            return Self::log("INFO", &format!("{verb} {detail}"));
+        }
+        Self::clear_progress();
+        anstream::println!("{VERB}{verb:>12}{VERB:#} {detail}");
+    }
+
+    fn warning(message: &str) {
+        if !Self::terminal() {
+            return Self::log("WARN", message);
+        }
+        Self::clear_progress();
+        anstream::println!("{WARNING}warning:{WARNING:#} {message}");
+    }
+
+    fn error(message: &str) {
+        if !Self::terminal() {
+            return Self::log("ERROR", message);
+        }
+        Self::clear_progress();
+        anstream::println!("{ERROR}error:{ERROR:#} {message}");
+    }
+
+    fn log(level: &str, message: &str) {
         let now = OffsetDateTime::now_utc();
         println!(
             "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z {level} {message}",
@@ -170,11 +205,25 @@ impl Console {
 }
 
 impl Reporter for Console {
-    fn info(&self, message: &str) {
-        Self::line("INFO", message);
+    fn status(&self, verb: &str, detail: &str) {
+        Self::status(verb, detail);
     }
     fn warn(&self, message: &str) {
-        Self::line("WARN", message);
+        Self::warning(message);
+    }
+    fn progress(&self, verb: &str, done: usize, total: usize, unit: &str) {
+        const WIDTH: usize = 25;
+        if !Self::terminal() || !std::io::stderr().is_terminal() {
+            return;
+        }
+        if done >= total {
+            return Self::clear_progress();
+        }
+        let filled = WIDTH * done / total;
+        let bar = format!("{}>{}", "=".repeat(filled), " ".repeat(WIDTH - filled - 1));
+        eprint!("\r\x1b[K");
+        anstream::eprint!("{PROGRESS}{verb:>12}{PROGRESS:#} [{bar}] {done}/{total} {unit}");
+        PROGRESS_SHOWN.store(true, Ordering::Relaxed);
     }
 }
 
@@ -193,6 +242,7 @@ fn main() -> ExitCode {
     match runtime.block_on(dispatch(cli)) {
         Ok(code) => code,
         Err(error) => {
+            Console::clear_progress();
             anstream::eprintln!("{ERROR}error:{ERROR:#} {error:#}");
             ExitCode::FAILURE
         }
@@ -229,11 +279,37 @@ fn flags(args: RunArgs) -> RunFlags {
 async fn run_and_report(config: &Config, flags: RunFlags) -> bool {
     let status = app::run_once(config, flags, &Console).await;
     if status.succeeded() {
-        Console::line("DONE", &app::describe(&status));
+        Console::status("Finished", &finished(&status));
     } else {
-        Console::line("ERROR", &app::describe(&status));
+        Console::error(&app::describe(&status));
     }
     status.succeeded()
+}
+
+/// What a successful run did, in a few words.
+fn finished(status: &app::Status) -> String {
+    let mut text = String::new();
+    if status.dry_run {
+        text.push_str("dry run: ");
+    }
+    match &status.mirror {
+        Some(mirror) => text.push_str(&format!(
+            "{} created, {} updated, {} deleted, {} unchanged",
+            mirror.items_created,
+            mirror.items_updated,
+            mirror.items_deleted,
+            mirror.items_unchanged
+        )),
+        None => text.push_str("backup"),
+    }
+    text.push_str(&format!(" in {:.1}s", status.duration_seconds));
+    if !status.warnings.is_empty() {
+        text.push_str(&format!(
+            " with {}",
+            count(status.warnings.len(), "warning")
+        ));
+    }
+    text
 }
 
 async fn run(args: RunArgs) -> Result<ExitCode> {
@@ -260,10 +336,13 @@ async fn daemon() -> Result<ExitCode> {
     }
     loop {
         let next = timetable.next(chrono::Utc::now())?;
-        Console.info(&format!(
-            "Next run at {}.",
-            next.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        ));
+        Console::status(
+            "Waiting",
+            &format!(
+                "for the next run at {}",
+                next.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            ),
+        );
         let wait = (next - chrono::Utc::now())
             .to_std()
             .unwrap_or(Duration::ZERO);
@@ -276,7 +355,7 @@ async fn daemon() -> Result<ExitCode> {
         // only looked at between runs.
         run_and_report(&config, RunFlags::default()).await;
     }
-    Console.info("Stopping.");
+    Console::status("Stopping", "the daemon");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -287,30 +366,43 @@ async fn check() -> Result<ExitCode> {
     let source_scope = app::scope_of(&config.source);
     let describe = |vault: &vault_mirror::vault::Vault| {
         let live: Vec<_> = vault.items.iter().filter(|item| !item.in_trash).collect();
-        format!(
-            "{} item(s), {} folder(s), {} collection(s), {} attachment(s)",
-            live.len(),
-            vault.folders.len(),
-            vault.collections.len(),
-            live.iter()
-                .map(|item| item.attachments.len())
-                .sum::<usize>()
-        )
+        let attachments = live.iter().map(|item| item.attachments.len()).sum();
+        // Counts of nothing are noise, except for items.
+        let mut parts = vec![count(live.len(), "item")];
+        for (n, noun) in [
+            (vault.folders.len(), "folder"),
+            (vault.collections.len(), "collection"),
+            (attachments, "attachment"),
+        ] {
+            if n > 0 {
+                parts.push(count(n, noun));
+            }
+        }
+        parts.join(", ")
     };
-    Console.info(&format!(
-        "Source login works: {}.",
-        describe(&source.load(&source_scope).await?)
-    ));
+    Console::status(
+        "Logged in",
+        &format!(
+            "to the source: {}",
+            describe(&source.load(&source_scope).await?)
+        ),
+    );
     let Some(dest_config) = &config.dest else {
-        Console.info("No destination is configured; runs only back up the source.");
+        Console::status(
+            "Finished",
+            "check; no destination is configured, so runs only back up the source",
+        );
         return Ok(ExitCode::SUCCESS);
     };
     let dest = app::open_account(&config, &http, dest_config, "dest").await?;
     let dest_scope = app::scope_of(dest_config);
-    Console.info(&format!(
-        "Destination login works: {}.",
-        describe(&dest.load(&dest_scope).await?)
-    ));
+    Console::status(
+        "Logged in",
+        &format!(
+            "to the destination: {}",
+            describe(&dest.load(&dest_scope).await?)
+        ),
+    );
 
     let options = MirrorOptions {
         dry_run: true,
@@ -357,9 +449,9 @@ fn snapshots(vault: Role) -> Result<ExitCode> {
     for snapshot in list {
         let detail = match &snapshot.meta {
             Some(meta) => format!(
-                "{} item(s), {} attachment file(s)",
-                meta.items,
-                meta.attachments.len()
+                "{}, {}",
+                count(meta.items, "item"),
+                count(meta.attachments.len(), "attachment file")
             ),
             None => "no metadata".to_string(),
         };
@@ -408,11 +500,14 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
     let store = Store::open(&config.backups_dir, args.snapshot.from.name(), &keys)?;
     let path = locate_snapshot(&store, args.snapshot.from, &args.snapshot.snapshot)?;
     let restorable = snapshot::parse(&store.read_snapshot(&path)?)?;
-    Console.info(&format!(
-        "Restoring {} item(s) from {}.",
-        restorable.items.len(),
-        path.display()
-    ));
+    Console::status(
+        "Reading",
+        &format!(
+            "{} from {}",
+            count(restorable.items.len(), "item"),
+            path.display()
+        ),
+    );
 
     let http = app::http_client(&config)?;
     let target_config = vault_config(&config, args.to)?;
@@ -426,13 +521,16 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
         concurrency: config.concurrency,
     };
     let report = restore(&target, &restorable, Some(&store), &options, &Console).await?;
-    Console.info(&format!(
-        "Restored {} item(s) and {} attachment(s); created {} folder(s) and {} collection(s).",
-        report.items,
-        report.attachments_restored,
-        report.folders_created,
-        report.collections_created
-    ));
+    Console::status(
+        "Restored",
+        &format!(
+            "{} and {}; created {} and {}",
+            count(report.items, "item"),
+            count(report.attachments_restored, "attachment"),
+            count(report.folders_created, "folder"),
+            count(report.collections_created, "collection")
+        ),
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -483,15 +581,20 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
             written += 1;
         }
     }
-    println!(
-        "Wrote {} item(s) and {written} attachment(s) to {}, unencrypted. export.json can be imported by any Bitwarden client.",
-        restorable.items.len(),
-        output.display()
+    Console::status(
+        "Exported",
+        &format!(
+            "{} and {} to {}, unencrypted. Any Bitwarden client can import export.json",
+            count(restorable.items.len(), "item"),
+            count(written, "attachment"),
+            output.display()
+        ),
     );
     if missing > 0 {
-        println!(
-            "{missing} attachment(s) are listed in the snapshot but their content is not in the backup."
-        );
+        Console::warning(&format!(
+            "The backup lacks the content of {} listed in the snapshot.",
+            count(missing, "attachment")
+        ));
     }
     Ok(ExitCode::SUCCESS)
 }
