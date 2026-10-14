@@ -283,6 +283,9 @@ your env file.
   them once you no longer need them.
 - **Point `BACKUPS_DIR` at the same directory if you like.** New backups go to
   `source/snapshots` and `dest/snapshots` inside it, next to the old files.
+- **`PUID` and `PGID` no longer apply.** The image runs as user 65532. Either
+  give that user the backup directory, or start the container as the
+  directory's owner, for example with `--user 1000:1000`.
 - **Going back is costly.** If you switch back to the Python tool afterwards,
   it does not recognise the new markers and recreates every destination item.
 
