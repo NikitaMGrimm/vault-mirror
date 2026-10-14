@@ -29,10 +29,11 @@ flowchart LR
    here and the destination is untouched.
 4. **Change the destination.** It creates folders or collections, creates and
    updates items, copies new or changed attachments, and finally deletes the
-   items that no longer belong. Because item deletions come last, a run that
-   fails partway hasn't deleted any items. A changed attachment is the
-   exception: the old file is removed before the new one is uploaded, and the
-   backup from step 2 holds it.
+   items that no longer belong. Item deletions come after every create and
+   update, so a run that fails while writing hasn't deleted any items yet. A
+   changed attachment is the exception: the old file is removed before the new
+   one is uploaded. Whatever a failed run did change, the backup from step 2
+   holds the earlier state.
 5. **Verify.** It reads the destination back and compares it with the source
    again. If anything still differs, the run fails. Attachments are checked as
    they're copied: each one is downloaded again and its SHA-256 hash compared.
