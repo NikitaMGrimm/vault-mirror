@@ -400,9 +400,10 @@ writable by that user, for example after `chown 65532:65532
   does not, items are mirrored unarchived, and the run reports a warning.
 - Tested against Vaultwarden 1.37, Bitwarden's self-hosted server 2026.9,
   and Bitwarden's cloud.
-- Bitwarden accepts attachments only from premium accounts. Into a personal
-  vault without premium, everything else is mirrored and attachments are left
-  out with a warning, until the account has premium.
+- Bitwarden accepts new attachments only from premium accounts. Into a
+  personal vault without premium, everything else is mirrored, new attachments
+  are left out with a warning, and attachments already mirrored stay. They
+  follow once the account has premium.
 - Bitwarden's cloud limits how fast a client may write: about 60 single item
   creations a minute. vault-mirror imports large numbers of new items in bulk
   and waits out rate limits, so a large first run takes longer but completes.
