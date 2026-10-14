@@ -3,9 +3,8 @@
 [← Documentation](README.md)
 
 vault-mirror makes one vault, the **destination**, match another, the
-**source**. Each time it does this is called a **run**. A run either finishes
-the whole job or stops with an error, and the next run picks up where a failed
-one left off.
+**source**. Each time it does this is a **run**. If a run fails, the next run
+picks up where it left off.
 
 ## A run, step by step
 
@@ -18,89 +17,85 @@ flowchart LR
     mirror -- "4. change, 5. verify" --> dest
 ```
 
-1. **Back up the source.** It writes an encrypted **snapshot** of the source and
-   stores any attachments it hasn't stored before. If the vault hasn't changed
-   since the newest snapshot, no new snapshot is written.
-2. **Back up the destination.** The destination is backed up too, before anything
-   in it is deleted or replaced. If a run ever removes something you wanted, it's
+1. **Back up the source.** It saves an encrypted **snapshot** of the source,
+   plus any attachments it hasn't stored yet. If nothing changed since the last
+   snapshot, it skips the snapshot.
+2. **Back up the destination**, the same way. Anything the run removes later is
    in this backup.
-3. **Compare.** It works out what to create, update and delete, prints that plan,
-   and runs the [safety checks](#safety-checks). If a check fails, the run stops
-   here and the destination is untouched.
-4. **Change the destination.** It creates folders or collections, creates and
-   updates items, copies new or changed attachments, and finally deletes the
-   items that no longer belong. Item deletions come after every create and
-   update, so a run that fails while writing hasn't deleted any items yet. A
-   changed attachment is the exception: the old file is removed before the new
-   one is uploaded. Whatever a failed run did change, the backup from step 2
-   holds the earlier state.
-5. **Verify.** It reads the destination back and compares it with the source
-   again. If anything still differs, the run fails. Attachments are checked as
-   they're copied: each one is downloaded again and its SHA-256 hash compared.
-6. **Report.** It records the result in `last-run.json` and, if you set one,
-   sends a one-line summary to your notification URL.
+3. **Compare.** It works out what to create, update and delete, prints that
+   plan, and runs the [safety checks](#safety-checks). If a check fails, the run
+   stops here.
+4. **Change the destination**, in this order:
+   - create folders or collections,
+   - create and update items,
+   - copy new or changed attachments,
+   - delete items that no longer belong.
+5. **Verify.** It reads the destination back and compares it with the source.
+   Each copied attachment was already downloaded again and checked by its
+   SHA-256 hash.
+6. **Report.** It writes the result to `last-run.json` and sends it to your
+   notification URL, if you set one.
 
-If backups are switched off, steps 1 and 2 are skipped. If no destination is
-configured, the run stops after step 1, which makes vault-mirror a scheduled
-backup tool for a single vault. A failed backup stops the run before the
-destination is changed.
+A failed backup stops the run before the destination changes. Without backups,
+steps 1 and 2 are skipped. Without a destination, the run stops after step 1.
+
+Because item deletions come last, a run that fails while writing hasn't deleted
+any items. Changed attachments are the exception: the old file is removed before
+the new one is uploaded. Either way, the backup from step 2 has the earlier
+state.
 
 ## How copies are recognized
 
-Every item vault-mirror creates in the destination is a **copy**, and every copy
-carries a **marker**: an extra custom field called `__source`. It's an ordinary
-**Hidden** field, so Bitwarden apps show it masked until you reveal it. The
-marker holds:
+Each item vault-mirror creates in the destination is a **copy**. Each copy has a
+**marker**: a hidden custom field called `__source`. It holds:
 
-- the id of the source item it was copied from,
-- a hash of the item's content, and
-- a hash that identifies the source's attachments and their copies.
+- the id of the source item,
+- a hash of the item's content,
+- a hash of its attachments.
 
-The marker contains no secrets. It's what lets later runs pair each copy with
-its source item, so an edited item is updated in place rather than deleted and
-created again.
+The marker holds no secrets. It lets the next run update a copy in place instead
+of deleting and recreating it.
 
-The marker isn't trusted blindly: vault-mirror also compares the decrypted
-content of both items. If you edit a copy directly, the next run puts the source
-version back. If you remove a copy's marker, vault-mirror no longer recognizes
-it, and the next run deletes it and creates a fresh copy.
+vault-mirror also compares the content itself, so:
+
+- if you edit a copy, the next run puts the source version back;
+- if you delete a copy's marker, the next run deletes the copy and makes a new
+  one.
 
 ## Safety checks
 
 Before it changes anything, vault-mirror checks the plan. If a check fails, the
-run stops with an error and the destination is left exactly as it was.
+run stops and the destination stays as it was.
 
-| The run stops when… | Because… | To go ahead anyway |
+| The run stops when | Likely cause | To go ahead anyway |
 | --- | --- | --- |
-| Items in the source have `__source` fields. | The source looks like a mirror, so the settings are probably swapped. | Fix the settings. There's no override. |
-| The source and destination are the same vault. | The run would delete everything in it. | Fix the settings. There's no override. |
-| The destination has items, and none of them are copies. | `DEST_*` probably points at an account you already use. The first run would delete its items. | `run --allow-initial-overwrite` |
-| The run would delete every copy it made before. | That's what an empty or wrong source looks like: a server error, the wrong account, or a filter that matches nothing. | `run --allow-mass-delete` |
-| The run would delete more than `MAX_DELETE_PERCENT` of the destination (only if you set it, above 10 deletions, once the destination has copies). | You asked for a limit. | `run --allow-mass-delete` |
+| Source items have a `__source` field | Source and destination are swapped. | Fix the settings. |
+| Source and destination are the same vault | A settings mistake. | Fix the settings. |
+| The destination has items, but no copies | `DEST_*` points at an account you already use. | `run --allow-initial-overwrite` |
+| The run would delete every copy | The source is empty, the wrong account, or filtered to nothing. | `run --allow-mass-delete` |
+| The run would delete more than `MAX_DELETE_PERCENT` | You set a limit. | `run --allow-mass-delete` |
 
-Duplicate copies of one source item are always removed, and don't count towards
-`MAX_DELETE_PERCENT` or its 10-deletion threshold.
+`MAX_DELETE_PERCENT` is off unless you set it. It applies only above 10
+deletions, and only once the destination has copies. Extra copies of the same
+source item are always deleted and don't count towards it.
 
-The `--allow` flags apply to one run. Scheduled runs after it are checked as
-usual. With Docker Compose, run one with:
+A flag applies to one run. Later runs are checked as usual. With Docker Compose:
 
-```console
-$ docker compose run --rm vault-mirror run --allow-mass-delete
+```sh
+docker compose run --rm vault-mirror run --allow-mass-delete
 ```
+
+> [!WARNING]
+> Deleted destination items don't go to the trash. After an override, only your
+> backups can bring them back.
 
 ### Why there's no default deletion limit
 
-Many sync tools refuse to delete more than some fixed share of items, such as
-half. vault-mirror doesn't, because the number would be arbitrary: deleting 40%
-of a vault by mistake isn't safer than deleting 60%. Instead it stops on the
-situation that's almost never intended, losing every copy at once, and relies on
-the backup taken at the start of every run for smaller mistakes. If you'd like a
-limit anyway, set `MAX_DELETE_PERCENT`.
-
-> [!WARNING]
-> vault-mirror deletes destination items permanently; they don't go to the
-> trash. If you override a safety check, recovery depends on your backups, and
-> for attachments on `BACKUP_ATTACHMENTS` being on (it is by default).
+Any fixed limit would be arbitrary: deleting 40% of a vault by mistake isn't
+safer than deleting 60%. So vault-mirror only stops on the case that's almost
+never intended, losing every copy at once. For smaller mistakes, there's the
+backup from the start of each run. To set a limit anyway, use
+`MAX_DELETE_PERCENT`.
 
 ## Compared with other approaches
 
