@@ -81,12 +81,18 @@ fn causes(error: &reqwest::Error) -> impl Iterator<Item = &(dyn std::error::Erro
 
 /// A certificate the client does not trust stays untrusted, so retrying is pointless.
 fn is_certificate_error(error: &reqwest::Error) -> bool {
-    causes(error).any(|cause| {
-        matches!(
-            cause.downcast_ref::<rustls::Error>(),
-            Some(rustls::Error::InvalidCertificate(_))
-        )
-    })
+    fn invalid(cause: &(dyn std::error::Error + 'static)) -> bool {
+        if let Some(tls) = cause.downcast_ref::<rustls::Error>() {
+            return matches!(tls, rustls::Error::InvalidCertificate(_));
+        }
+        // TLS failures travel inside I/O errors, sometimes nested, and an
+        // I/O error's `source` skips over what it wraps.
+        cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+            .is_some_and(|inner| invalid(inner))
+    }
+    causes(error).any(invalid)
 }
 
 /// Names what went wrong without repeating the URL.
