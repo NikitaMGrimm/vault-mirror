@@ -243,9 +243,10 @@ Set `SOURCE_ORGANIZATION_ID` and `DEST_ORGANIZATION_ID` to mirror one
 organization into another. The organization id is in the web vault's address
 when the organization is open. Bitwarden's servers show an owner only the
 collections they are assigned to, and no item outside a collection. So that
-nothing looks deleted, the run stops if anything is hidden:
+nothing looks deleted, the run stops unless the account can see everything:
 
-- Assign the account to every collection, with **Can manage** permission.
+- Make the account an **owner** or **admin** of both organizations.
+- Assign it to every collection, with **Can manage** permission.
 - Put every item in a collection.
 
 Members, groups, permissions, favorites, and folders are not mirrored.

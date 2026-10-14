@@ -267,17 +267,12 @@ impl Account {
     pub async fn load(&self, scope: &Scope) -> Result<Vault> {
         let sync = self.session.get("/sync?excludeDomains=true").await?;
         let scope_key = self.scope_key(scope)?;
-        let list = |name: &str| {
-            sync.get(name)
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let list = |name: &str| sync_list(&sync, name);
 
         let mut vault = Vault::default();
         match scope {
             Scope::Personal => {
-                for folder in list("folders") {
+                for folder in list("folders")? {
                     vault.folders.push(Folder {
                         id: required_str(&folder, "id", "folder")?,
                         name: scope_key
@@ -287,9 +282,10 @@ impl Account {
                 }
             }
             Scope::Organization(org) => {
-                self.check_organization_visible(org, &list("collections"), &list("ciphers"))
+                let collections = list("collections")?;
+                self.check_organization_visible(org, &collections, &list("ciphers")?)
                     .await?;
-                for collection in list("collections") {
+                for collection in collections {
                     if collection.get("organizationId").and_then(Value::as_str) != Some(org) {
                         continue;
                     }
@@ -307,7 +303,7 @@ impl Account {
                 }
             }
         }
-        for cipher in list("ciphers") {
+        for cipher in list("ciphers")? {
             let owner = cipher.get("organizationId").and_then(Value::as_str);
             if owner != scope.organization_id() {
                 continue;
@@ -567,51 +563,25 @@ impl Account {
         Ok(())
     }
 
-    /// Fails when the organization holds collections or items this account
-    /// cannot see. Bitwarden's server shows an owner only the collections the
-    /// owner is assigned to, and no item that is in no collection. Hidden
-    /// items would look deleted, and their copies would be deleted.
     async fn check_organization_visible(
         &self,
         org: &str,
         synced_collections: &[Value],
         synced_items: &[Value],
     ) -> Result<()> {
-        // Members who may not list everything get errors here; the check is
-        // then skipped.
         let collections_path = format!("/organizations/{org}/collections");
         let items_path = format!("/ciphers/organization-details?organizationId={org}");
-        let (Ok(collections), Ok(items)) = tokio::join!(
+        let (collections, items) = tokio::join!(
             self.session.get(&collections_path),
             self.session.get(&items_path),
-        ) else {
-            return Ok(());
-        };
-        let hidden = |all: &Value, synced: &[Value]| {
-            let visible: HashSet<&str> = synced
-                .iter()
-                .filter_map(|entry| entry.get("id").and_then(Value::as_str))
-                .collect();
-            all.get("data")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| entry.get("id").and_then(Value::as_str))
-                .filter(|id| !visible.contains(id))
-                .count()
-        };
-        let (collections, items) = (
-            hidden(&collections, synced_collections),
-            hidden(&items, synced_items),
         );
-        if collections + items > 0 {
-            bail!(
-                "organization {org} holds {collections} collection(s) and {items} item(s) this \
-                 account cannot see; assign the account to every collection with Can manage \
-                 permission, and put every item in a collection"
-            );
-        }
-        Ok(())
+        check_organization_visible(
+            org,
+            collections.map_err(Into::into),
+            items.map_err(Into::into),
+            synced_collections,
+            synced_items,
+        )
     }
 
     /// What the server accepts and shows, as far as mirroring depends on it.
@@ -740,6 +710,63 @@ fn sorted(ids: &[String]) -> Vec<&String> {
 /// Known scalar and list fields are content. So is every object, because that
 /// is where each item type keeps its data, including types that do not exist
 /// yet. Unknown scalars are left out: servers add per-account flags there.
+/// A missing list must not read as an empty vault, which would have every
+/// mirrored item deleted.
+fn sync_list(sync: &Value, name: &str) -> Result<Vec<Value>> {
+    sync.get(name)
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| anyhow!("the server's sync response has no {name} list"))
+}
+
+/// Fails when the organization holds collections or items this account
+/// cannot see. Bitwarden's server shows an owner only the collections the
+/// owner is assigned to, and no item that is in no collection. Hidden items
+/// would look deleted, and their copies would be deleted.
+fn check_organization_visible(
+    org: &str,
+    all_collections: Result<Value>,
+    all_items: Result<Value>,
+    synced_collections: &[Value],
+    synced_items: &[Value],
+) -> Result<()> {
+    // Only owners and admins may list everything. Without the lists, items
+    // hidden from this account could not be told from deleted ones.
+    let context = || {
+        format!(
+            "listing everything in organization {org}; the account must be an owner or admin of it"
+        )
+    };
+    let (all_collections, all_items) = (
+        all_collections.with_context(context)?,
+        all_items.with_context(context)?,
+    );
+    let hidden = |name: &str, all: &Value, synced: &[Value]| -> Result<usize> {
+        let all = all.get("data").and_then(Value::as_array).ok_or_else(|| {
+            anyhow!("the server's list of all {name} in organization {org} is malformed")
+        })?;
+        let visible: HashSet<&str> = synced
+            .iter()
+            .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+            .collect();
+        Ok(all
+            .iter()
+            .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+            .filter(|id| !visible.contains(id))
+            .count())
+    };
+    let collections = hidden("collections", &all_collections, synced_collections)?;
+    let items = hidden("items", &all_items, synced_items)?;
+    if collections + items > 0 {
+        bail!(
+            "organization {org} holds {collections} collection(s) and {items} item(s) this \
+             account cannot see; assign the account to every collection with Can manage \
+             permission, and put every item in a collection"
+        );
+    }
+    Ok(())
+}
+
 pub fn is_content_key(name: &str, node: &Node) -> bool {
     if META_KEYS.contains(&name) {
         return false;
@@ -866,6 +893,33 @@ fn server_traits(config: &Value) -> ServerTraits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sync_response_without_a_list_is_an_error_not_an_empty_vault() {
+        let sync = json!({ "ciphers": [], "folders": null });
+        assert!(sync_list(&sync, "ciphers").unwrap().is_empty());
+        assert!(sync_list(&sync, "folders").is_err());
+        assert!(sync_list(&sync, "collections").is_err());
+    }
+
+    #[test]
+    fn an_organization_this_account_cannot_list_fully_is_refused() {
+        let synced = [json!({ "id": "c1" })];
+        let all = || Ok(json!({ "data": [{ "id": "c1" }] }));
+        let check = |collections, items| {
+            check_organization_visible("org", collections, items, &synced, &synced)
+        };
+        assert!(check(all(), all()).is_ok());
+        let refused = check(Err(anyhow!("403 Forbidden")), all()).unwrap_err();
+        assert!(format!("{refused:#}").contains("owner or admin"));
+        assert!(check(all(), Err(anyhow!("404 Not Found"))).is_err());
+        assert!(check(all(), Ok(json!({}))).is_err());
+        let hidden = check(
+            all(),
+            Ok(json!({ "data": [{ "id": "c1" }, { "id": "i2" }] })),
+        );
+        assert!(format!("{:#}", hidden.unwrap_err()).contains("1 item(s)"));
+    }
 
     #[test]
     fn server_traits_tell_bitwarden_from_vaultwarden() {
