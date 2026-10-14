@@ -86,9 +86,13 @@ impl Env<'_> {
 
     /// Reads `NAME`, or the content of the file named by `NAME_FILE`, which
     /// is how container secrets are usually delivered.
+    ///
+    /// The value is taken verbatim: spaces at either end of a password are
+    /// part of it.
     fn secret(&self, name: &str) -> Result<Option<String>> {
         let file_var = format!("{name}_FILE");
-        match (self.get(name), self.get(&file_var)) {
+        let inline = self.0.get(name).filter(|value| !value.is_empty()).cloned();
+        match (inline, self.get(&file_var)) {
             (Some(_), Some(_)) => Err(ConfigError(format!(
                 "set either {name} or {file_var}, not both"
             ))),
@@ -398,7 +402,7 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(config.source.server, "https://vault.bitwarden.com");
-        assert_eq!(config.source.password, "source password");
+        assert_eq!(config.source.password, " source password ");
         assert_eq!(config.dest.as_ref().unwrap().client_id, "user.dest");
         let backup = config.backup.unwrap();
         assert!(
@@ -508,6 +512,25 @@ mod tests {
         vars.remove("SOURCE_PASSWORD");
         vars.insert("SOURCE_PASSWORD_FILE".into(), "/nonexistent/secret".into());
         assert!(error(vars).contains("cannot read"));
+    }
+
+    #[test]
+    fn secrets_from_the_environment_keep_their_spaces() {
+        let config = Config::from_env(&with(&[
+            ("DEST_SERVER", " https://vw.example.com/ "),
+            ("DEST_PASSWORD", "  "),
+            ("ENCRYPTION_PASSWORD", ""),
+            ("BACKUP_PASSPHRASE", " backup passphrase\t"),
+        ]))
+        .unwrap();
+        assert_eq!(config.source.password, " source password ");
+        let dest = config.dest.unwrap();
+        assert_eq!(dest.password, "  ");
+        assert_eq!(dest.server, "https://vw.example.com/");
+        assert!(
+            matches!(config.backup.unwrap().protection, Protection::Passphrase(ref p) if p == " backup passphrase\t")
+        );
+        assert!(error(with(&[("DEST_PASSWORD", "")])).contains("DEST_PASSWORD is not set"));
     }
 
     #[test]
