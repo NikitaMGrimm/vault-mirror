@@ -300,16 +300,22 @@ impl Run<'_> {
         self.stage = "setting archive state";
         let mut to_archive: Vec<String> = Vec::new();
         let mut to_unarchive: Vec<String> = Vec::new();
-        for (entry_index, item) in &created {
-            if source_vault.items[plan.entries[*entry_index].source].archived {
-                to_archive.push(item.id.clone());
-            }
-        }
-        for (index, item) in &updated {
-            match plan.updates[*index].set_archived {
-                Some(true) => to_archive.push(item.id.clone()),
-                Some(false) => to_unarchive.push(item.id.clone()),
-                None => {}
+        // Decided from what the server reports after the writes, not from the
+        // plan: servers differ in what a write does to an item's archive state.
+        let written = created
+            .iter()
+            .map(|(entry_index, item)| (*entry_index, item))
+            .chain(
+                updated
+                    .iter()
+                    .map(|(index, item)| (plan.updates[*index].entry, item)),
+            );
+        for (entry_index, item) in written {
+            let wanted = source_vault.items[plan.entries[entry_index].source].archived;
+            match (wanted, item.archived) {
+                (true, false) => to_archive.push(item.id.clone()),
+                (false, true) => to_unarchive.push(item.id.clone()),
+                _ => {}
             }
         }
         for (ids, archived) in [(to_archive, true), (to_unarchive, false)] {
@@ -441,11 +447,21 @@ impl Run<'_> {
                 let folder = folder_name(&dest_vault, dest_item, mode);
                 let collections = collection_names(&dest_vault, dest_item, mode);
                 let found = comparable(dest_item, folder.as_deref(), &collections);
-                details.push(format!(
-                    "item {} differs at [{}]",
-                    dest_item.id,
-                    differing_paths(&wanted, &found).join(", ")
-                ));
+                // Paths only, never values: this ends up in logs and the status file.
+                let mut reasons = Vec::new();
+                let paths = differing_paths(&wanted, &found);
+                if !paths.is_empty() {
+                    reasons.push(format!("content differs at [{}]", paths.join(", ")));
+                } else if update.write_content {
+                    reasons.push("its marker is out of date".to_string());
+                }
+                if update.sync_attachments {
+                    reasons.push("its attachments differ".to_string());
+                }
+                if update.set_archived.is_some() {
+                    reasons.push("its archive state differs".to_string());
+                }
+                details.push(format!("item {}: {}", dest_item.id, reasons.join(", ")));
             }
             let summary = again.summary(source_vault);
             bail!(

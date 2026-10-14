@@ -368,6 +368,8 @@ impl Account {
             existing.wrapped_key.as_deref(),
         )?;
         cipher["lastKnownRevisionDate"] = json!(existing.revision_date);
+        // A replacement that leaves this out un-archives the item.
+        cipher["archivedDate"] = json!(existing.archived_date);
         let path = format!("/ciphers/{}", existing.id);
         let updated = self
             .session

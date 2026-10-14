@@ -417,3 +417,49 @@ async fn an_emptied_source_does_not_empty_the_mirror() -> Result<()> {
     assert!(dest.load(&PERSONAL).await?.items.is_empty());
     Ok(())
 }
+
+#[tokio::test]
+async fn editing_an_archived_item_keeps_it_archived() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    seed(&source).await?;
+    run(&source, &dest, &options()).await?;
+
+    let vault = source.load(&PERSONAL).await?;
+    let archived = by_name(&vault, "Archived note");
+    let mut draft = Draft {
+        content: archived.content.clone(),
+        folder_id: archived.folder_id.clone(),
+        collection_ids: vec![],
+    };
+    draft
+        .content
+        .insert("notes".into(), Node::secret("edited while archived"));
+    let edited = source.update_item(&PERSONAL, archived, &draft).await?;
+    assert!(
+        edited.archived,
+        "an edit must not un-archive the source item either"
+    );
+
+    let outcome = run(&source, &dest, &options()).await?;
+    assert_eq!(outcome.summary.items_updated, 1);
+    let mirrored = dest.load(&PERSONAL).await?;
+    let note = by_name(&mirrored, "Archived note");
+    assert!(note.archived);
+    assert_eq!(
+        note.content["notes"].as_str(),
+        Some("edited while archived")
+    );
+
+    // Taking an item out of the archive is carried over as well.
+    source
+        .set_archived(std::slice::from_ref(&edited.id), false)
+        .await?;
+    let outcome = run(&source, &dest, &options()).await?;
+    assert_eq!(outcome.summary.items_updated, 1);
+    assert!(!by_name(&dest.load(&PERSONAL).await?, "Archived note").archived);
+    assert!(!run(&source, &dest, &options()).await?.changed);
+    Ok(())
+}

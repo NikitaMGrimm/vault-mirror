@@ -27,11 +27,12 @@ pub enum ApiError {
         status: StatusCode,
         message: String,
     },
-    #[error("{context}: {source}")]
+    #[error("{context}: {}", describe_transport(cause))]
     Transport {
         context: String,
-        #[source]
-        source: reqwest::Error,
+        // Deliberately not exposed as the error's source: its own message
+        // includes the request URL, and download URLs carry access tokens.
+        cause: reqwest::Error,
     },
     #[error("{context}: unexpected response: {detail}")]
     Unexpected { context: String, detail: String },
@@ -51,7 +52,7 @@ impl ApiError {
     fn not_applied(&self) -> bool {
         match self {
             Self::Status { status, .. } => *status == StatusCode::TOO_MANY_REQUESTS,
-            Self::Transport { source, .. } => source.is_connect(),
+            Self::Transport { cause, .. } => cause.is_connect() && !is_certificate_error(cause),
             _ => false,
         }
     }
@@ -65,11 +66,43 @@ impl ApiError {
                     | StatusCode::SERVICE_UNAVAILABLE
                     | StatusCode::GATEWAY_TIMEOUT
             ),
-            Self::Transport { source, .. } => {
-                source.is_connect() || source.is_timeout() || source.is_request()
+            Self::Transport { cause, .. } => {
+                (cause.is_connect() || cause.is_timeout() || cause.is_request())
+                    && !is_certificate_error(cause)
             }
             _ => false,
         }
+    }
+}
+
+fn causes(error: &reqwest::Error) -> impl Iterator<Item = &(dyn std::error::Error + 'static)> {
+    std::iter::successors(std::error::Error::source(error), |cause| cause.source())
+}
+
+/// A certificate the client does not trust stays untrusted, so retrying is pointless.
+fn is_certificate_error(error: &reqwest::Error) -> bool {
+    causes(error).any(|cause| {
+        matches!(
+            cause.downcast_ref::<rustls::Error>(),
+            Some(rustls::Error::InvalidCertificate(_))
+        )
+    })
+}
+
+/// Names what went wrong without repeating the URL.
+fn describe_transport(error: &reqwest::Error) -> String {
+    let kind = if error.is_timeout() {
+        "the request timed out"
+    } else if error.is_connect() {
+        "could not connect"
+    } else if error.is_body() || error.is_decode() {
+        "the response could not be read"
+    } else {
+        "the request failed"
+    };
+    match causes(error).last() {
+        Some(root) => format!("{kind} ({root})"),
+        None => kind.to_string(),
     }
 }
 
@@ -158,7 +191,7 @@ pub fn build_http_client(options: &ClientOptions) -> Result<reqwest::Client> {
     for pem in &options.extra_root_certs {
         let transport = |source| ApiError::Transport {
             context: "loading extra root certificate".to_string(),
-            source,
+            cause: source,
         };
         for cert in reqwest::Certificate::from_pem_bundle(pem).map_err(transport)? {
             builder = builder.add_root_certificate(cert);
@@ -166,7 +199,7 @@ pub fn build_http_client(options: &ClientOptions) -> Result<reqwest::Client> {
     }
     builder.build().map_err(|source| ApiError::Transport {
         context: "building HTTP client".to_string(),
-        source,
+        cause: source,
     })
 }
 
@@ -294,7 +327,7 @@ impl Session {
     async fn download_once(&self, url: &str, context: &str) -> Result<Vec<u8>> {
         let transport = |source| ApiError::Transport {
             context: context.to_string(),
-            source,
+            cause: source,
         };
         let response = self.http.get(url).send().await.map_err(transport)?;
         let status = response.status();
@@ -353,7 +386,7 @@ impl Session {
 fn transport(context: &str, source: reqwest::Error) -> ApiError {
     ApiError::Transport {
         context: context.to_string(),
-        source,
+        cause: source,
     }
 }
 
@@ -380,7 +413,7 @@ fn backoff(attempt: u32) -> Duration {
 async fn send(request: reqwest::RequestBuilder, context: &str) -> Result<Value> {
     let response = request.send().await.map_err(|source| ApiError::Transport {
         context: context.to_string(),
-        source,
+        cause: source,
     })?;
     let status = response.status();
     let text = response
@@ -388,7 +421,7 @@ async fn send(request: reqwest::RequestBuilder, context: &str) -> Result<Value> 
         .await
         .map_err(|source| ApiError::Transport {
             context: context.to_string(),
-            source,
+            cause: source,
         })?;
     if !status.is_success() {
         return Err(ApiError::Status {

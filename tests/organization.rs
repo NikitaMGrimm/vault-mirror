@@ -275,7 +275,12 @@ async fn a_server_behind_a_private_certificate_authority_needs_that_authority() 
     .await
     .err()
     .expect("an unknown authority must be rejected");
-    assert!(format!("{error:#}").contains("logging in"), "{error:#}");
+    let message = format!("{error:#}");
+    assert!(message.contains("certificate"), "{message}");
+    assert!(
+        !message.contains("127.0.0.1"),
+        "the URL is not repeated: {message}"
+    );
 
     let options = ClientOptions {
         extra_root_certs: vec![std::fs::read(&sandbox.ca_file)?],
