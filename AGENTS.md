@@ -46,7 +46,8 @@ which item types and collections they show, and what they accept.
 - Write code that reads like the code around it. Comments explain why, not
   what.
 - Every bug fix comes with a test that fails without it.
-- User-facing text is plain and specific: say what happened and what to do.
+- Follow the design rules in CONTRIBUTING.md for output, safety checks and
+  documentation.
 - Update the README or `docs/` when users would notice the change.
   CHANGELOG.md is generated from commit messages at release time; do not edit
   it.

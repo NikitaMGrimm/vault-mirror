@@ -8,7 +8,7 @@ use std::{
         OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 mod wizard;
@@ -191,6 +191,17 @@ impl Console {
         anstream::println!("{WARNING}warning:{WARNING:#} {message}");
     }
 
+    /// The last line of a command. Its verb turns yellow when the command
+    /// printed warnings, which are on the lines above.
+    fn finished(detail: &str, warned: bool) {
+        if !Self::terminal() {
+            return Self::log("INFO", &format!("Finished {detail}"));
+        }
+        Self::clear_progress();
+        let style = if warned { WARNING } else { VERB };
+        anstream::println!("{style}{:>12}{style:#} {detail}", "Finished");
+    }
+
     fn note(message: &str) {
         if !Self::terminal() {
             return Self::log("INFO", message);
@@ -341,37 +352,32 @@ fn flags(args: RunArgs) -> RunFlags {
 async fn run_and_report(config: &Config, flags: RunFlags) -> bool {
     let status = app::run_once(config, flags, &Console).await;
     if status.succeeded() {
-        Console::status("Finished", &finished(&status));
+        Console::finished(&finished(&status), !status.warnings.is_empty());
     } else {
-        Console::error(&app::describe(&status));
+        Console::error(&match (&status.failure_stage, &status.error) {
+            (Some(stage), Some(error)) => format!("the run failed during {stage}: {error}"),
+            _ => app::describe(&status),
+        });
     }
     status.succeeded()
 }
 
-/// What a successful run did, in a few words.
+/// What a successful run did. Each kind of run has one fixed shape, so the
+/// last line reads the same every time; details such as the snapshot name
+/// are on the lines above.
 fn finished(status: &app::Status) -> String {
-    let mut text = String::new();
-    if status.dry_run {
-        text.push_str("dry run: ");
-    }
+    let seconds = status.duration_seconds;
     match &status.mirror {
-        Some(mirror) => text.push_str(&format!(
-            "{} created, {} updated, {} deleted, {} unchanged",
+        _ if status.dry_run => format!("dry run in {seconds:.1}s; the destination is unchanged"),
+        Some(mirror) => format!(
+            "{} created, {} updated, {} deleted, {} unchanged in {seconds:.1}s",
             mirror.items_created,
             mirror.items_updated,
             mirror.items_deleted,
             mirror.items_unchanged
-        )),
-        None => text.push_str("backup"),
+        ),
+        None => format!("backup in {seconds:.1}s"),
     }
-    text.push_str(&format!(" in {:.1}s", status.duration_seconds));
-    if !status.warnings.is_empty() {
-        text.push_str(&format!(
-            " with {}",
-            count(status.warnings.len(), "warning")
-        ));
-    }
-    text
 }
 
 async fn run(args: RunArgs) -> Result<ExitCode> {
@@ -447,6 +453,7 @@ fn describe_vault(vault: &vault_mirror::vault::Vault) -> String {
 /// Logs in to the configured vaults and reports what a run would do.
 /// `init` has reported the logins already.
 async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
+    let started = Instant::now();
     let http = app::http_client(config)?;
     let source = app::open_account(config, &http, &config.source, "source").await?;
     let source_scope = app::scope_of(&config.source);
@@ -460,10 +467,8 @@ async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
         );
     }
     let Some(dest_config) = &config.dest else {
-        Console::status(
-            "Finished",
-            "check; no destination is configured, so runs only back up the source",
-        );
+        Console::note("no destination is configured, so runs only back up the source");
+        Console::finished(&checked(started), false);
         return Ok(());
     };
     let dest = app::open_account(config, &http, dest_config, "dest").await?;
@@ -492,8 +497,16 @@ async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
         account: &dest,
         scope: dest_scope,
     };
-    mirror(&source, &dest, &options, &Console).await?;
+    let outcome = mirror(&source, &dest, &options, &Console).await?;
+    Console::finished(&checked(started), !outcome.warnings.is_empty());
     Ok(())
+}
+
+fn checked(started: Instant) -> String {
+    format!(
+        "check in {:.1}s; nothing was written",
+        started.elapsed().as_secs_f64()
+    )
 }
 
 fn backup_keys(config: &Config, identity: Option<&Path>) -> Result<Keys> {
@@ -566,6 +579,7 @@ fn vault_config(config: &Config, role: Role) -> Result<&VaultConfig> {
 }
 
 async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
+    let started = Instant::now();
     let config = config()?;
     // A run at the same time could prune the snapshot being restored, or
     // mirror into the vault being restored to.
@@ -595,15 +609,19 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
         concurrency: config.concurrency,
     };
     let report = restore(&target, &restorable, Some(&store), &options, &Console).await?;
-    Console::status(
-        "Restored",
+    let warned = report.items_left_out > 0
+        || report.attachments_skipped > 0
+        || report.attachments_missing > 0;
+    Console::finished(
         &format!(
-            "{} and {}; created {} and {}",
+            "restore of {}, {}, {} and {} in {:.1}s",
             count(report.items, "item"),
             count(report.attachments_restored, "attachment"),
-            count(report.folders_created, "folder"),
-            count(report.collections_created, "collection")
+            count(report.folders_created, "new folder"),
+            count(report.collections_created, "new collection"),
+            started.elapsed().as_secs_f64()
         ),
+        warned,
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -655,21 +673,25 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
             written += 1;
         }
     }
-    Console::status(
-        "Exported",
-        &format!(
-            "{} and {} to {}, unencrypted. Any Bitwarden client can import export.json",
-            count(restorable.items.len(), "item"),
-            count(written, "attachment"),
-            output.display()
-        ),
-    );
     if missing > 0 {
         Console::warning(&format!(
             "The backup lacks the content of {} listed in the snapshot.",
             count(missing, "attachment")
         ));
     }
+    Console::warning(&format!(
+        "{} is not encrypted. Any Bitwarden client can import its export.json. Delete it when you are done.",
+        output.display()
+    ));
+    Console::finished(
+        &format!(
+            "export of {} and {} to {}",
+            count(restorable.items.len(), "item"),
+            count(written, "attachment"),
+            output.display()
+        ),
+        true,
+    );
     Ok(ExitCode::SUCCESS)
 }
 

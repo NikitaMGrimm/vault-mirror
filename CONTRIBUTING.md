@@ -77,6 +77,55 @@ docker compose -f sandbox/compose.yaml --profile official down
 `cargo test --release --test scale -- --ignored --nocapture` mirrors a vault
 of 2000 items. Set `VAULT_MIRROR_SCALE_ITEMS` to change the size.
 
+## Design rules
+
+These rules keep the tool predictable for people and for scripts. Follow them
+in code, output and documentation. To change a rule, change it here in the
+same pull request and give the reason.
+
+### Terminal output
+
+- Show each step as one line: a verb right-aligned in 12 columns, then the
+  rest of the sentence. Use `Reporter::status`. Outside a terminal, the same
+  line gets a UTC timestamp and a level.
+- End every command with one `Finished` line. Give each kind of run one fixed
+  shape that never gains or loses parts. Put changing details, such as a
+  snapshot name or a warning, on the lines above it.
+- Give each colour one meaning. Green: a step that happened. Cyan: progress
+  and notes. Yellow: a warning, or a `Finished` line after warnings. Red: an
+  error. Never let colour carry the only signal, because `NO_COLOR` removes it.
+- Send progress bars to stderr, only at a terminal. Clear a bar before the
+  next line.
+- Write counts with `text::count`: "1 item", "2 items". Never write
+  `item(s)`.
+- Put counts, file names and server-side ids in messages. Never put item
+  names, passwords or other vault content in them.
+- In a warning, say what happened and what the user can do. In an error, say
+  what failed and the next step, such as the flag that allows a refused run.
+
+### Safety checks
+
+- Refuse only a state that is almost never intended: swapped vaults, one
+  vault twice, a first run onto items that vault-mirror did not make, or a
+  run that deletes every earlier copy.
+- Do not add a default percentage or count limit. A number like that is
+  arbitrary, and a smaller mistake is not safer. A limit that the user sets,
+  such as `MAX_DELETE_PERCENT`, is fine.
+- Name the flag that allows a refused run once.
+
+### Documentation
+
+- Write in Simplified Technical English. Keep a procedure step to 20 words
+  and a descriptive sentence to 25. Use the active voice and one instruction
+  per step.
+- Use one term for one meaning: source, destination, run, snapshot, copy (a
+  destination item that vault-mirror made), marker (the `__source` field),
+  settings file (`vault-mirror.env`).
+- Do not use marketing words, idioms or hedges, such as "simply", "seamless"
+  or "robust".
+- Keep the README to an overview, installation, a quick start and links. Put
+  details in `docs/`.
+
 ## Pull requests
 
 - Keep each pull request to one change, with a test that fails without it.
@@ -88,6 +137,9 @@ of 2000 items. Set `VAULT_MIRROR_SCALE_ITEMS` to change the size.
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` with the sandbox running.
 - Update the README or `docs/` when behaviour or configuration changes.
+- The maintainer turns on auto-merge after review. A pull request merges as
+  soon as the required checks pass. Fix a problem found later in a new pull
+  request.
 - Title the pull request as a [Conventional Commit](https://www.conventionalcommits.org),
   for example `fix: keep archive state on edit`. Pull requests are squashed,
   and the release notes are generated from these titles: `feat`, `fix` and
