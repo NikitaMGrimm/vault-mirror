@@ -115,16 +115,18 @@ same pull request and give the reason.
 
 ### Documentation
 
-- Write in Simplified Technical English. Keep a procedure step to 20 words
-  and a descriptive sentence to 25. Use the active voice and one instruction
-  per step.
+- Write for someone setting vault-mirror up for the first time: plain
+  English, addressed to "you", with short sentences and an example where one
+  helps. Say why as well as what.
 - Use one term for one meaning: source, destination, run, snapshot, copy (a
   destination item that vault-mirror made), marker (the `__source` field),
   settings file (`vault-mirror.env`).
-- Do not use marketing words, idioms or hedges, such as "simply", "seamless"
-  or "robust".
+- Do not use marketing words or filler, such as "simply", "seamless" or
+  "robust".
 - Keep the README to an overview, installation, a quick start and links. Put
-  details in `docs/`.
+  details and walkthroughs in `docs/`, starting with
+  [Getting started](docs/getting-started.md).
+- Keep sample output in the docs the same as what the command prints.
 
 ## Pull requests
 

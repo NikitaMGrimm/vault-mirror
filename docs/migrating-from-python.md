@@ -1,32 +1,34 @@
-# Migrating from the Python vault-mirror
+# Migrating from the Python version
 
 [← Documentation](README.md)
 
-vault-mirror accepts the Python version's environment variable names.
-You can keep the settings file when replacing the image.
+vault-mirror started as a Python tool. This version reads the same environment
+variables, so you can keep your settings file and swap the image.
 
-The first run recognizes older `__source` markers in existing copies.
-The tool updates matching copies in place and keeps their destination item ids.
-It rewrites each marker in the new format.
+## What happens on the first run
 
-It copies attachments again because the Python version did not record attachment state.
-Later runs make no changes until the source changes or a copy differs.
-The usual [filters and safety checks](how-it-works.md#safety-checks) still apply.
+The first run recognizes the `__source` markers the Python version wrote. It
+updates those copies in place, keeping their destination ids, and rewrites each
+marker in the new format. The usual [safety checks](how-it-works.md#safety-checks)
+apply.
 
-vault-mirror does not read or prune old `*.json.enc` backups.
-
-1. Decrypt these files with `openssl`, as before.
-2. Delete these files only when you no longer need them.
-
-You can keep the same `BACKUPS_DIR`.
-New snapshots go to `source/snapshots` and `dest/snapshots` inside that directory.
-
-`PUID` and `PGID` have no effect.
-The image runs as user 65532.
-Give user 65532 write access to the backup directory, or run the container as the directory owner.
-
-For example, use `--user 1000:1000` when the owner's user id and group id are both 1000.
+Attachments are copied once more, because the Python version didn't record which
+attachments it had copied. After that, runs change nothing until the source does.
 
 > [!WARNING]
-> The Python version does not recognize the new markers.
-> Switching back to Python recreates every destination item.
+> The Python version doesn't understand the new markers. If you switch back to
+> it, it recreates every item in the destination.
+
+## Backups
+
+The old `*.json.enc` backups are neither read nor pruned. Decrypt them with
+`openssl` as before, and delete them once you no longer need them.
+
+You can keep the same `BACKUPS_DIR`. New snapshots go into `source/snapshots`
+and `dest/snapshots` inside it.
+
+## File ownership
+
+`PUID` and `PGID` no longer do anything. The image runs as user 65532, so either
+give that user write access to the backup directory or run the container as the
+directory's owner, for example with `--user 1000:1000`.
