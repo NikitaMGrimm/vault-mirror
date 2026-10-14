@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use anstyle::{AnsiColor, Style};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use time::OffsetDateTime;
@@ -137,16 +138,24 @@ impl Role {
 
 struct Console;
 
+const WARNING: Style = AnsiColor::Yellow.on_default().bold();
+const ERROR: Style = AnsiColor::Red.on_default().bold();
+const SUCCESS: Style = AnsiColor::Green.on_default().bold();
+
 impl Console {
     fn line(level: &str, message: &str) {
-        // People at a terminal know the time; logs need it.
+        // People at a terminal know the time; logs need it. anstream drops the
+        // colours when NO_COLOR is set.
         if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
             match level {
-                "INFO" => println!("{message}"),
-                _ => println!("{}: {message}", level.to_lowercase()),
+                "WARN" => anstream::println!("{WARNING}warning:{WARNING:#} {message}"),
+                "ERROR" => anstream::println!("{ERROR}error:{ERROR:#} {message}"),
+                "DONE" => anstream::println!("{SUCCESS}{message}{SUCCESS:#}"),
+                _ => println!("{message}"),
             }
             return;
         }
+        let level = if level == "DONE" { "INFO" } else { level };
         let now = OffsetDateTime::now_utc();
         println!(
             "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z {level} {message}",
@@ -177,14 +186,14 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("Error: could not start the runtime: {error}");
+            anstream::eprintln!("{ERROR}error:{ERROR:#} could not start the runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
     match runtime.block_on(dispatch(cli)) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("Error: {error:#}");
+            anstream::eprintln!("{ERROR}error:{ERROR:#} {error:#}");
             ExitCode::FAILURE
         }
     }
@@ -220,7 +229,7 @@ fn flags(args: RunArgs) -> RunFlags {
 async fn run_and_report(config: &Config, flags: RunFlags) -> bool {
     let status = app::run_once(config, flags, &Console).await;
     if status.succeeded() {
-        Console.info(&app::describe(&status));
+        Console::line("DONE", &app::describe(&status));
     } else {
         Console::line("ERROR", &app::describe(&status));
     }

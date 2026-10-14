@@ -3875,6 +3875,8 @@ name = "vault-mirror"
 version = "0.1.0"
 dependencies = [
  "age",
+ "anstream",
+ "anstyle",
  "anyhow",
  "base64 0.23.1",
  "bitwarden-crypto",

@@ -28,6 +28,8 @@ bin-dir = "vault-mirror-{ version }-aarch64-unknown-linux-musl/{ bin }{ binary-e
 
 [dependencies]
 age = { version = "0.12.1", features = ["armor"] }
+anstream = "1.0.0"
+anstyle = "1.0.14"
 anyhow = "1.0.104"
 base64 = "0.23.1"
 bitwarden-crypto = "4.0.0"
