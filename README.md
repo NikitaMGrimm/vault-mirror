@@ -147,7 +147,7 @@ which suits Docker and systemd credentials.
 | `SOURCE_SERVER` | required | Server URL. `https://vault.bitwarden.com` and `https://vault.bitwarden.eu` select Bitwarden's cloud. |
 | `SOURCE_CLIENT_ID`, `SOURCE_CLIENT_SECRET` | required | Personal API key. |
 | `SOURCE_PASSWORD` | required | Master password. |
-| `SOURCE_ORGANIZATION_ID` | — | Mirror this organization's vault instead of the personal vault. |
+| `SOURCE_ORGANIZATION_ID` | — | Mirror this organization's vault instead of the personal vault. The account must be assigned to every collection: Bitwarden's servers hide collections an owner is not assigned to, so the run stops if there are any. |
 | `DEST_SERVER`, `DEST_CLIENT_ID`, `DEST_CLIENT_SECRET`, `DEST_PASSWORD`, `DEST_ORGANIZATION_ID` | — | The destination, in the same form as the source. Without a destination, runs only back up the source. Organizations are mirrored to organizations: set both organization ids or neither. |
 | `BACKUP_PASSPHRASE` | — | Passphrase that protects the backup key. Either this or `BACKUP_RECIPIENTS` is required while backups are on. `ENCRYPTION_PASSWORD` is accepted as an older name. |
 | `BACKUP_RECIPIENTS` | — | age public keys (`age1…`), separated by commas or spaces, to encrypt backups to instead. Restoring then needs `--identity`. |
@@ -305,9 +305,8 @@ your env file.
   Bitwarden's cloud runs the same server code but has not been tested yet. The
   cloud stores attachments in Azure, and that upload path is tested against
   Microsoft's Azurite emulator.
-- Organization mode is tested against Vaultwarden only. A self-hosted
-  Bitwarden server creates organizations only from a license file, which the
-  test setup does not have.
+- In organization mode, favorites and folders are not mirrored: Bitwarden
+  keeps them per member.
 - Attachments are held in memory while they are copied, so a large attachment
   needs a few times its size in free memory.
 

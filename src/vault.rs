@@ -1,6 +1,6 @@
 //! A decrypted view of one account's vault, and the operations that change it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::Method;
@@ -149,10 +149,14 @@ struct Keys {
     organizations: HashMap<String, SymKey>,
 }
 
+/// Membership ids by organization id.
+type Memberships = HashMap<String, String>;
+
 /// One unlocked account on one server.
 pub struct Account {
     session: Session,
     keys: Keys,
+    memberships: Memberships,
     pub user_id: String,
     pub email: String,
 }
@@ -194,6 +198,7 @@ impl Account {
         let user = master.unlock_user_key(&text("key")?)?;
 
         let mut organizations = HashMap::new();
+        let mut member_ids = Memberships::new();
         let memberships = profile.get("organizations").and_then(Value::as_array);
         if memberships.is_some_and(|list| !list.is_empty()) {
             let private = user.unwrap_private_key(&text("privateKey")?)?;
@@ -205,6 +210,9 @@ impl Account {
                     continue;
                 };
                 organizations.insert(id.to_string(), private.unwrap_shared_key(key)?);
+                if let Some(member) = membership.get("organizationUserId").and_then(Value::as_str) {
+                    member_ids.insert(id.to_string(), member.to_string());
+                }
             }
         }
 
@@ -214,6 +222,7 @@ impl Account {
                 user,
                 organizations,
             },
+            memberships: member_ids,
             user_id,
             email,
         })
@@ -265,6 +274,8 @@ impl Account {
                 }
             }
             Scope::Organization(org) => {
+                self.check_collections_visible(org, &list("collections"))
+                    .await?;
                 for collection in list("collections") {
                     if collection.get("organizationId").and_then(Value::as_str) != Some(org) {
                         continue;
@@ -319,12 +330,23 @@ impl Account {
         external_id: Option<&str>,
     ) -> Result<Collection> {
         let key = self.scope_key(&Scope::Organization(org.to_string()))?;
+        // Bitwarden's server shows owners only the collections they are
+        // assigned to, so the creating account assigns itself, as Bitwarden's
+        // clients do. Vaultwarden shows owners every collection either way.
+        let users = match self.memberships.get(org) {
+            Some(member) => json!([{
+                "id": member,
+                "readOnly": false,
+                "hidePasswords": false,
+                "manage": true,
+            }]),
+            None => json!([]),
+        };
         let body = json!({
             "name": key.encrypt_str(name)?,
             "externalId": external_id,
             "groups": [],
-            // Grant the creating account access, or it could not see what it mirrors.
-            "users": [],
+            "users": users,
         });
         let path = format!("/organizations/{org}/collections");
         let created = self
@@ -449,6 +471,41 @@ impl Account {
             self.session
                 .send_idempotent(Method::PUT, "/ciphers/delete", Some(&body))
                 .await?;
+        }
+        Ok(())
+    }
+
+    /// Fails when the organization has collections this account is not
+    /// assigned to. Bitwarden's server leaves those, and their items, out of
+    /// the account's syncs, so they would look deleted or missing.
+    async fn check_collections_visible(&self, org: &str, synced: &[Value]) -> Result<()> {
+        // Members who may not list every collection get an error here; the
+        // check is then skipped.
+        let Ok(all) = self
+            .session
+            .get(&format!("/organizations/{org}/collections"))
+            .await
+        else {
+            return Ok(());
+        };
+        let visible: HashSet<&str> = synced
+            .iter()
+            .filter_map(|collection| collection.get("id").and_then(Value::as_str))
+            .collect();
+        let hidden = all
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|collection| collection.get("id").and_then(Value::as_str))
+            .filter(|id| !visible.contains(id))
+            .count();
+        if hidden > 0 {
+            bail!(
+                "{hidden} collection(s) of organization {org} are not assigned to this account, \
+                 so their items cannot be read or written; assign the account to every collection \
+                 with Can manage permission"
+            );
         }
         Ok(())
     }
