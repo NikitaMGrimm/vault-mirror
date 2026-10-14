@@ -1,6 +1,6 @@
 //! Writes a snapshot back into a vault.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, TryStreamExt, stream};
@@ -8,7 +8,8 @@ use serde::Serialize;
 
 use crate::{
     mirror::{Endpoint, Reporter},
-    snapshot::Restorable,
+    node::Node,
+    snapshot::{Restorable, RestorableItem},
     store::Store,
     vault::{Draft, Scope},
 };
@@ -16,6 +17,8 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct RestoreReport {
     pub items: usize,
+    /// Items left out because the target server would not show them.
+    pub items_left_out: usize,
     pub folders_created: usize,
     pub collections_created: usize,
     pub attachments_restored: usize,
@@ -62,6 +65,33 @@ pub async fn restore(
     }
 
     let mut report = RestoreReport::default();
+    // Items the server would accept but not show could not be found, and
+    // a second restore would create them again.
+    let traits = account
+        .server_traits()
+        .await
+        .context("reading the target server's settings")?;
+    let item_type = |item: &RestorableItem| match item.content.get("type") {
+        Some(Node::Number(number)) => number.as_u64(),
+        _ => None,
+    };
+    let hidden = |item: &&RestorableItem| {
+        item_type(item).is_some_and(|kind| traits.hidden_item_types.contains(&kind))
+            || (snapshot.organization
+                && traits.items_need_collections
+                && item.collection_ids.is_empty())
+    };
+    let (left_out, items): (Vec<&RestorableItem>, Vec<&RestorableItem>) =
+        snapshot.items.iter().partition(hidden);
+    report.items_left_out = left_out.len();
+    if !left_out.is_empty() {
+        reporter.warn(&format!(
+            "{} item(s) are not restored because the target server would not show them: \
+             bank accounts, driver's licences and passports are not shown yet, and organization \
+             items must be in a collection.",
+            left_out.len()
+        ));
+    }
     // Snapshot container id -> target container id, matched by name.
     let mut folder_ids: HashMap<&str, String> = HashMap::new();
     let mut collection_ids: HashMap<&str, String> = HashMap::new();
@@ -112,8 +142,7 @@ pub async fn restore(
         }
     }
 
-    let drafts: Vec<Draft> = snapshot
-        .items
+    let drafts: Vec<Draft> = items
         .iter()
         .map(|item| Draft {
             content: item.content.clone(),
@@ -147,40 +176,35 @@ pub async fn restore(
         .create_items(scope, &drafts, &folder_names, concurrency)
         .await?;
 
-    let outcomes: Vec<(bool, String, usize, usize)> = stream::iter(
-        snapshot
-            .items
-            .iter()
-            .zip(&created)
-            .map(|(item, created)| async move {
-                let (mut restored, mut missing) = (0, 0);
-                if !attachments_allowed {
-                    return anyhow::Ok((item.archived, created.id.clone(), 0, 0));
-                }
-                for attachment in &item.attachments {
-                    let data = match store {
-                        Some(store)
-                            if attachment.stored
-                                && store.has_attachment(&attachment.attachment_id) =>
-                        {
-                            store.read_attachment(&attachment.attachment_id)?
-                        }
-                        _ => {
-                            missing += 1;
-                            continue;
-                        }
-                    };
-                    account
-                        .upload_attachment(scope, created, &attachment.file_name, &data)
-                        .await
-                        .with_context(|| {
-                            format!("restoring an attachment of snapshot item {}", item.id)
-                        })?;
-                    restored += 1;
-                }
-                anyhow::Ok((item.archived, created.id.clone(), restored, missing))
-            }),
-    )
+    let outcomes: Vec<(bool, String, usize, usize)> = stream::iter(items.iter().zip(&created).map(
+        |(item, created)| async move {
+            let (mut restored, mut missing) = (0, 0);
+            if !attachments_allowed {
+                return anyhow::Ok((item.archived, created.id.clone(), 0, 0));
+            }
+            for attachment in &item.attachments {
+                let data = match store {
+                    Some(store)
+                        if attachment.stored && store.has_attachment(&attachment.attachment_id) =>
+                    {
+                        store.read_attachment(&attachment.attachment_id)?
+                    }
+                    _ => {
+                        missing += 1;
+                        continue;
+                    }
+                };
+                account
+                    .upload_attachment(scope, created, &attachment.file_name, &data)
+                    .await
+                    .with_context(|| {
+                        format!("restoring an attachment of snapshot item {}", item.id)
+                    })?;
+                restored += 1;
+            }
+            anyhow::Ok((item.archived, created.id.clone(), restored, missing))
+        },
+    ))
     .buffer_unordered(concurrency)
     .try_collect()
     .await?;
@@ -198,15 +222,29 @@ pub async fn restore(
                 archived.len()
             ));
     }
+    let visible: HashSet<String> = account
+        .load(scope)
+        .await
+        .context("reading the target vault again")?
+        .items
+        .into_iter()
+        .map(|item| item.id)
+        .collect();
+    let invisible = created
+        .iter()
+        .filter(|item| !visible.contains(&item.id))
+        .count();
+    if invisible > 0 {
+        bail!(
+            "{invisible} restored item(s) were accepted by the server but are not shown in the \
+             target vault"
+        );
+    }
     report.items = outcomes.len();
     report.attachments_restored = outcomes.iter().map(|(_, _, restored, _)| restored).sum();
     report.attachments_missing = outcomes.iter().map(|(_, _, _, missing)| missing).sum();
     if !attachments_allowed {
-        report.attachments_skipped = snapshot
-            .items
-            .iter()
-            .map(|item| item.attachments.len())
-            .sum();
+        report.attachments_skipped = items.iter().map(|item| item.attachments.len()).sum();
     }
     if report.attachments_skipped > 0 {
         reporter.warn(&format!(

@@ -5,9 +5,11 @@ use common::*;
 use vault_mirror::{
     crypto::KdfParams,
     fixtures,
-    mirror::MirrorOptions,
+    mirror::{Endpoint, MirrorOptions},
     node::Node,
-    vault::{Account, Draft, Scope, Vault},
+    restore::{RestoreOptions, restore},
+    snapshot::{Restorable, RestorableItem},
+    vault::{Account, Collection, Draft, Scope, Vault},
 };
 
 async fn organization(sandbox: &Sandbox, server: &str) -> Result<(Account, Scope, String)> {
@@ -420,5 +422,76 @@ async fn items_in_no_collection_are_never_lost_silently() -> Result<()> {
             .await?
             .changed
     );
+    Ok(())
+}
+
+/// A restore leaves out what the target server would accept but not show,
+/// and says so, instead of reporting items that cannot be found.
+#[tokio::test]
+async fn a_restore_leaves_out_items_the_target_would_hide() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
+    let note = |id: &str, name: &str, collection_ids: Vec<String>| RestorableItem {
+        id: id.to_string(),
+        folder_id: None,
+        collection_ids,
+        archived: false,
+        content: [
+            ("type".to_string(), Node::Number(2.into())),
+            ("name".to_string(), Node::secret(name)),
+            (
+                "secureNote".to_string(),
+                Node::Map([("type".to_string(), Node::Number(0.into()))].into()),
+            ),
+        ]
+        .into(),
+        attachments: vec![],
+    };
+    let snapshot = Restorable {
+        organization: true,
+        collections: vec![Collection {
+            id: "c1".to_string(),
+            name: "Shared".to_string(),
+            external_id: None,
+        }],
+        items: vec![
+            note("i1", "Loose note", vec![]),
+            note("i2", "Shared note", vec!["c1".to_string()]),
+        ],
+        ..Restorable::default()
+    };
+    let capture = Capture::default();
+    let report = restore(
+        &Endpoint {
+            account: &dest,
+            scope: dest_scope.clone(),
+        },
+        &snapshot,
+        None,
+        &RestoreOptions {
+            allow_non_empty: false,
+            concurrency: 1,
+        },
+        &capture,
+    )
+    .await?;
+
+    let restored = dest.load(&dest_scope).await?;
+    assert_eq!(restored.items.len(), report.items);
+    if dest.server_traits().await?.items_need_collections {
+        assert_eq!((report.items, report.items_left_out), (1, 1));
+        assert!(
+            capture
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.starts_with("warn:") && line.contains("1 item(s)")),
+        );
+    } else {
+        assert_eq!((report.items, report.items_left_out), (2, 0));
+    }
     Ok(())
 }
