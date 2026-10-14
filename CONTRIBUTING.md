@@ -140,6 +140,8 @@ same pull request and give the reason.
   commit it.
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` with the sandbox running.
+- CI skips the build and tests when a change only touches Markdown files,
+  `docs/` or `assets/`.
 - Update the README or `docs/` when behaviour or configuration changes.
 - The maintainer turns on auto-merge after review. A pull request merges as
   soon as the required checks pass. Fix a problem found later in a new pull
