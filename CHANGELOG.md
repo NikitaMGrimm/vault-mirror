@@ -4,6 +4,17 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.3.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.2.0...v0.3.0) - 2026-10-14
+
+### Added
+
+- [**breaking**] require a command and drop compatibility with the Python version ([#16](https://github.com/NikitaMGrimm/vault-mirror/pull/16))
+- end every command with one fixed-shape Finished line ([#11](https://github.com/NikitaMGrimm/vault-mirror/pull/11))
+
+### Fixed
+
+- don't crash when an environment variable isn't UTF-8 ([#22](https://github.com/NikitaMGrimm/vault-mirror/pull/22))
+
 ## [0.2.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.1.0...v0.2.0) - 2026-10-14
 
 ### Added
