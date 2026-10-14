@@ -66,54 +66,35 @@ clear the quarantine flag with `xattr -d com.apple.quarantine vault-mirror`.
 
 ## Quick start
 
-Create an API key for each account: open the web vault and go to **Settings →
-Security → Keys → View API key**. Then write an env file:
+Create a personal API key for each account: in the web vault, go to
+**Settings → Security → Keys → View API key**. Use a dedicated, empty account
+as the destination, because the tool deletes everything in it that does not
+come from the source.
+
+In an empty directory, run the setup. It asks for both accounts, checks that
+the logins work, writes `vault-mirror.env` and `compose.yaml`, and shows what
+the first run would do:
 
 ```sh
-# vault-mirror.env
-SOURCE_SERVER=https://vault.bitwarden.com
-SOURCE_CLIENT_ID=user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-SOURCE_CLIENT_SECRET=...
-# The master password, to decrypt the vault.
-SOURCE_PASSWORD=...
-
-DEST_SERVER=https://vaultwarden.example.com
-DEST_CLIENT_ID=user....
-DEST_CLIENT_SECRET=...
-DEST_PASSWORD=...
-
-# Protects the backup key. Keep a copy somewhere other than the backups.
-BACKUP_PASSPHRASE=...
-SCHEDULE=0 3 * * *
-TZ=Europe/Berlin
+vault-mirror init
 ```
 
-Use a dedicated, empty destination account. The tool deletes everything in it
-that does not come from the source.
-
-```yaml
-# compose.yaml
-services:
-  vault-mirror:
-    image: ghcr.io/nikitamgrimm/vault-mirror:0.1
-    command: daemon
-    env_file: vault-mirror.env
-    volumes:
-      - ./backups:/data
-    restart: unless-stopped
-```
-
-Check the setup first. `check` logs in to both vaults and prints the plan
-without writing anything:
+With only Docker installed, run the same command from the image:
 
 ```sh
-docker compose run --rm vault-mirror check
+docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
+  ghcr.io/nikitamgrimm/vault-mirror:0.1 init
+```
+
+Then start it. It runs on the schedule you chose:
+
+```sh
 docker compose up -d
 ```
 
-The binary reads the same variables: `set -a; . ./vault-mirror.env; set +a;
-vault-mirror check`. Every setting is described in
-[Configuration](docs/configuration.md).
+Without Docker, run `vault-mirror --env-file vault-mirror.env daemon`
+instead. [Configuration](docs/configuration.md) describes every setting and
+how to write the files by hand.
 
 ## Documentation
 

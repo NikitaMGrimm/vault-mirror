@@ -90,8 +90,6 @@ pub fn source_marker_count(source: &Vault) -> usize {
         .count()
 }
 
-/// The marker on a destination item. A malformed marker counts as none, so
-/// the item is treated as not mirrored rather than trusted.
 /// True for a `__source` field this tool wrote, as opposed to a field
 /// someone else gave that name.
 pub fn is_mirror_marker(field: &Node) -> bool {
@@ -104,6 +102,8 @@ pub fn is_mirror_marker(field: &Node) -> bool {
             .is_some()
 }
 
+/// The marker on a destination item. A malformed marker counts as none, so
+/// the item is treated as not mirrored rather than trusted.
 pub fn marker_of(item: &Item) -> Option<Marker> {
     let field = item.fields().iter().rfind(|field| is_marker_field(field))?;
     Marker::parse(field.as_map()?.get("value")?.as_str()?)

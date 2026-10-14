@@ -4,9 +4,14 @@ use std::{
     io::IsTerminal,
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
+
+mod wizard;
 
 use anstyle::{AnsiColor, Style};
 use anyhow::{Context, Result, anyhow, bail};
@@ -25,18 +30,15 @@ use vault_mirror::{
 
 /// Mirror and back up a Bitwarden or Vaultwarden vault.
 ///
-/// Configuration comes from environment variables; see the README. Without a
-/// subcommand, one run is performed.
+/// Configuration comes from environment variables or --env-file; `init`
+/// writes one. Without a subcommand, one run is performed.
 #[derive(Parser)]
-// Run options belong after `run`, or stand alone without a subcommand. Before
-// a subcommand they would be ignored, so they are rejected there.
-#[command(
-    name = "vault-mirror",
-    version,
-    max_term_width = 100,
-    args_conflicts_with_subcommands = true
-)]
+#[command(name = "vault-mirror", version, max_term_width = 100)]
 struct Cli {
+    /// Read settings from this file of NAME=value lines, as `init` writes
+    /// it. The environment takes precedence.
+    #[arg(long, global = true, value_name = "PATH")]
+    env_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
     #[command(flatten)]
@@ -58,6 +60,12 @@ struct RunArgs {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Ask for the accounts, check the logins, and write vault-mirror.env and compose.yaml.
+    Init {
+        /// Directory to write the files to.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
     /// Back up, then mirror the source into the destination, once.
     Run(RunArgs),
     /// Keep running on SCHEDULE or every INTERVAL.
@@ -148,6 +156,7 @@ const VERB: Style = AnsiColor::Green.on_default().bold();
 const PROGRESS: Style = AnsiColor::Cyan.on_default().bold();
 const WARNING: Style = AnsiColor::Yellow.on_default().bold();
 const ERROR: Style = AnsiColor::Red.on_default().bold();
+const NOTE: Style = AnsiColor::Cyan.on_default().bold();
 
 /// Whether a progress bar occupies the terminal's last line.
 static PROGRESS_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -180,6 +189,14 @@ impl Console {
         }
         Self::clear_progress();
         anstream::println!("{WARNING}warning:{WARNING:#} {message}");
+    }
+
+    fn note(message: &str) {
+        if !Self::terminal() {
+            return Self::log("INFO", message);
+        }
+        Self::clear_progress();
+        anstream::println!("{NOTE}note:{NOTE:#} {message}");
     }
 
     fn error(message: &str) {
@@ -249,13 +266,58 @@ fn main() -> ExitCode {
     }
 }
 
+/// Run options belong after `run`, or stand alone without a subcommand.
+/// Before a subcommand they would be ignored, so they are rejected. Clap's
+/// own rule for this would also reject `--env-file` there.
+fn check_placement(cli: &Cli) -> Result<()> {
+    let RunArgs {
+        dry_run,
+        allow_initial_overwrite,
+        allow_mass_delete,
+    } = cli.run;
+    if (dry_run || allow_initial_overwrite || allow_mass_delete) && cli.command.is_some() {
+        bail!("--dry-run and the --allow options belong after `run`");
+    }
+    Ok(())
+}
+
+/// Settings read with `--env-file`.
+static ENV_FILE: OnceLock<HashMap<String, String>> = OnceLock::new();
+
 fn config() -> Result<Config> {
-    let env: HashMap<String, String> = std::env::vars().collect();
+    let mut env = ENV_FILE.get().cloned().unwrap_or_default();
+    env.extend(std::env::vars());
     Config::from_env(&env).map_err(|error| anyhow!("configuration: {error}"))
 }
 
+/// Reads `NAME=value` lines literally, as Docker Compose's `format: raw`
+/// does: no quotes, no variables, no comments after a value. Blank lines
+/// and lines starting with `#` are skipped.
+fn parse_env_file(text: &str) -> Result<HashMap<String, String>> {
+    let mut settings = HashMap::new();
+    for (number, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let (name, value) = line
+            .split_once('=')
+            .ok_or_else(|| anyhow!("line {} is not NAME=value", number + 1))?;
+        settings.insert(name.trim().to_string(), value.to_string());
+    }
+    Ok(settings)
+}
+
 async fn dispatch(cli: Cli) -> Result<ExitCode> {
+    check_placement(&cli)?;
+    if let Some(path) = &cli.env_file {
+        let text =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let settings =
+            parse_env_file(&text).with_context(|| format!("reading {}", path.display()))?;
+        ENV_FILE.get_or_init(|| settings);
+    }
     match cli.command {
+        Some(Command::Init { dir }) => wizard::init(&dir).await,
         None => run(cli.run).await,
         Some(Command::Run(args)) => run(args).await,
         Some(Command::Daemon) => daemon().await,
@@ -360,49 +422,61 @@ async fn daemon() -> Result<ExitCode> {
 }
 
 async fn check() -> Result<ExitCode> {
-    let config = config()?;
-    let http = app::http_client(&config)?;
-    let source = app::open_account(&config, &http, &config.source, "source").await?;
-    let source_scope = app::scope_of(&config.source);
-    let describe = |vault: &vault_mirror::vault::Vault| {
-        let live: Vec<_> = vault.items.iter().filter(|item| !item.in_trash).collect();
-        let attachments = live.iter().map(|item| item.attachments.len()).sum();
-        // Counts of nothing are noise, except for items.
-        let mut parts = vec![count(live.len(), "item")];
-        for (n, noun) in [
-            (vault.folders.len(), "folder"),
-            (vault.collections.len(), "collection"),
-            (attachments, "attachment"),
-        ] {
-            if n > 0 {
-                parts.push(count(n, noun));
-            }
+    check_config(&config()?, true).await?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Item, folder, collection and attachment counts, leaving out zeros
+/// except for items.
+fn describe_vault(vault: &vault_mirror::vault::Vault) -> String {
+    let live: Vec<_> = vault.items.iter().filter(|item| !item.in_trash).collect();
+    let attachments = live.iter().map(|item| item.attachments.len()).sum();
+    let mut parts = vec![count(live.len(), "item")];
+    for (n, noun) in [
+        (vault.folders.len(), "folder"),
+        (vault.collections.len(), "collection"),
+        (attachments, "attachment"),
+    ] {
+        if n > 0 {
+            parts.push(count(n, noun));
         }
-        parts.join(", ")
-    };
-    Console::status(
-        "Logged in",
-        &format!(
-            "to the source: {}",
-            describe(&source.load(&source_scope).await?)
-        ),
-    );
+    }
+    parts.join(", ")
+}
+
+/// Logs in to the configured vaults and reports what a run would do.
+/// `init` has reported the logins already.
+async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
+    let http = app::http_client(config)?;
+    let source = app::open_account(config, &http, &config.source, "source").await?;
+    let source_scope = app::scope_of(&config.source);
+    if report_logins {
+        Console::status(
+            "Logged in",
+            &format!(
+                "to the source: {}",
+                describe_vault(&source.load(&source_scope).await?)
+            ),
+        );
+    }
     let Some(dest_config) = &config.dest else {
         Console::status(
             "Finished",
             "check; no destination is configured, so runs only back up the source",
         );
-        return Ok(ExitCode::SUCCESS);
+        return Ok(());
     };
-    let dest = app::open_account(&config, &http, dest_config, "dest").await?;
+    let dest = app::open_account(config, &http, dest_config, "dest").await?;
     let dest_scope = app::scope_of(dest_config);
-    Console::status(
-        "Logged in",
-        &format!(
-            "to the destination: {}",
-            describe(&dest.load(&dest_scope).await?)
-        ),
-    );
+    if report_logins {
+        Console::status(
+            "Logged in",
+            &format!(
+                "to the destination: {}",
+                describe_vault(&dest.load(&dest_scope).await?)
+            ),
+        );
+    }
 
     let options = MirrorOptions {
         dry_run: true,
@@ -419,7 +493,7 @@ async fn check() -> Result<ExitCode> {
         scope: dest_scope,
     };
     mirror(&source, &dest, &options, &Console).await?;
-    Ok(ExitCode::SUCCESS)
+    Ok(())
 }
 
 fn backup_keys(config: &Config, identity: Option<&Path>) -> Result<Keys> {
@@ -686,10 +760,17 @@ mod tests {
 
     #[test]
     fn run_options_before_a_subcommand_are_rejected() {
-        let parse = |args: &[&str]| Cli::try_parse_from([&["vault-mirror"], args].concat());
+        let parse = |args: &[&str]| {
+            let cli = Cli::try_parse_from([&["vault-mirror"], args].concat())?;
+            check_placement(&cli)?;
+            anyhow::Ok(cli)
+        };
         assert!(parse(&["--dry-run", "run"]).is_err());
         assert!(parse(&["--allow-mass-delete", "daemon"]).is_err());
         assert!(parse(&["run", "--dry-run"]).unwrap().command.is_some());
         assert!(parse(&["--dry-run"]).unwrap().run.dry_run);
+        let file = parse(&["--env-file", "x.env", "check"]).unwrap();
+        assert_eq!(file.env_file, Some(PathBuf::from("x.env")));
+        assert!(parse(&["check", "--env-file", "x.env"]).is_ok());
     }
 }
