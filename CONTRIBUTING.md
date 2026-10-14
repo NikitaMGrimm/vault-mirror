@@ -157,6 +157,8 @@ there if needed and merges it. That publishes the crate to crates.io, tags the
 version, and runs the release workflow, which builds static binaries for
 x86-64 and arm64 Linux and native binaries for both macOS architectures,
 publishes the container image, and attaches build provenance to all of them.
+Last, it records the terminal demo in the README from `assets/demo.tape`
+against the sandbox, and publishes it to the `assets` branch.
 
 ## License
 

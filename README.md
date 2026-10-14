@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" alt="vault-mirror checks the vaults, copies items, and finds no changes on the second run" width="860">
+  <img src="https://raw.githubusercontent.com/NikitaMGrimm/vault-mirror/assets/demo.gif" alt="vault-mirror checks the vaults, copies items, and finds no changes on the second run" width="860">
 </p>
 
 vault-mirror copies one Bitwarden or Vaultwarden vault into another and keeps it

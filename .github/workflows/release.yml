@@ -1,7 +1,8 @@
 name: Release
 
 # Publishes Linux and macOS binaries, checksums, build provenance, a GitHub
-# release and a multi-architecture image for a version tag. Release-plz calls
+# release and a multi-architecture image for a version tag, then records the
+# README's demo. Release-plz calls
 # it after it tags a release; a pushed tag or a manual run with a tag does the
 # same. A manual run without a tag builds and smoke-tests everything without
 # publishing.
@@ -304,3 +305,13 @@ jobs:
           [[ "$TAG" == *-* ]] && flags+=(--prerelease)
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "$TAG" --notes-file notes/notes.md "${flags[@]}" dist/*
+
+  # The README's demo, recorded with this release.
+  demo:
+    needs: [version, release]
+    if: needs.version.outputs.publish == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/demo.yml
+    with:
+      ref: ${{ needs.version.outputs.tag }}
