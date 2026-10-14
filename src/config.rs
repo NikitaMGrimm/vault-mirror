@@ -7,6 +7,7 @@ use std::{collections::HashMap, fs, path::PathBuf, str::FromStr, time::Duration}
 
 use crate::{
     api::DEFAULT_CLIENT_VERSION,
+    mirror::Filter,
     plan::Safety,
     store::{Protection, Retention},
 };
@@ -52,6 +53,7 @@ pub struct Config {
     pub safety: Safety,
     pub concurrency: usize,
     pub verify_attachments: bool,
+    pub filter: Filter,
     pub client_version: String,
     pub ca_cert_file: Option<PathBuf>,
     pub schedule: Option<Schedule>,
@@ -124,6 +126,18 @@ impl Env<'_> {
                 "{name} must be true or false, not {other}"
             ))),
         }
+    }
+
+    /// A comma-separated list of folder or collection names.
+    fn names(&self, name: &str) -> Vec<String> {
+        self.get(name)
+            .map(|list| {
+                list.split(',')
+                    .map(|part| part.trim().trim_end_matches('/').to_string())
+                    .filter(|part| !part.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn vault(&self, prefix: &str) -> Result<Option<VaultConfig>> {
@@ -236,6 +250,28 @@ impl Config {
                 "MAX_DELETE_PERCENT must be between 0 and 100".into(),
             ));
         }
+        let folders = Filter {
+            include: env.names("INCLUDE_FOLDERS"),
+            exclude: env.names("EXCLUDE_FOLDERS"),
+        };
+        let collections = Filter {
+            include: env.names("INCLUDE_COLLECTIONS"),
+            exclude: env.names("EXCLUDE_COLLECTIONS"),
+        };
+        let filter = match (source.organization_id.is_some(), folders, collections) {
+            (false, folders, collections) if collections.is_empty() => folders,
+            (true, folders, collections) if folders.is_empty() => collections,
+            (false, ..) => {
+                return Err(ConfigError(
+                    "INCLUDE_COLLECTIONS and EXCLUDE_COLLECTIONS apply to organizations; use INCLUDE_FOLDERS and EXCLUDE_FOLDERS for an individual vault".into(),
+                ));
+            }
+            (true, ..) => {
+                return Err(ConfigError(
+                    "organizations are mirrored without folders; use INCLUDE_COLLECTIONS and EXCLUDE_COLLECTIONS".into(),
+                ));
+            }
+        };
         let concurrency: usize = env.parse("CONCURRENCY", 4)?;
         if !(1..=32).contains(&concurrency) {
             return Err(ConfigError("CONCURRENCY must be between 1 and 32".into()));
@@ -271,6 +307,7 @@ impl Config {
             },
             concurrency,
             verify_attachments: env.flag("VERIFY_ATTACHMENTS", true)?,
+            filter,
             client_version: env
                 .get("BITWARDEN_CLIENT_VERSION")
                 .unwrap_or_else(|| DEFAULT_CLIENT_VERSION.into()),
@@ -425,6 +462,33 @@ mod tests {
         .unwrap();
         assert_eq!(config.source.organization_id.as_deref(), Some("a"));
         assert_eq!(config.dest.unwrap().organization_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn filters_match_the_kind_of_vault() {
+        let config = Config::from_env(&with(&[
+            ("INCLUDE_FOLDERS", "Work, Family/Shared/ ,"),
+            ("EXCLUDE_FOLDERS", "Work/Private"),
+        ]))
+        .unwrap();
+        assert_eq!(config.filter.include, ["Work", "Family/Shared"]);
+        assert_eq!(config.filter.exclude, ["Work/Private"]);
+        assert!(error(with(&[("EXCLUDE_COLLECTIONS", "x")])).contains("apply to organizations"));
+        let organization = [
+            ("SOURCE_ORGANIZATION_ID", "a"),
+            ("DEST_ORGANIZATION_ID", "b"),
+        ];
+        let config = Config::from_env(&with(
+            &[&organization[..], &[("INCLUDE_COLLECTIONS", "Team")]].concat(),
+        ))
+        .unwrap();
+        assert_eq!(config.filter.include, ["Team"]);
+        assert!(
+            error(with(
+                &[&organization[..], &[("INCLUDE_FOLDERS", "x")]].concat()
+            ))
+            .contains("without folders")
+        );
     }
 
     #[test]

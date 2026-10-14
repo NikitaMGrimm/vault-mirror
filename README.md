@@ -149,6 +149,8 @@ which suits Docker and systemd credentials.
 | `SOURCE_PASSWORD` | required | Master password. |
 | `SOURCE_ORGANIZATION_ID` | — | Mirror this organization's vault instead of the personal vault. The account must be assigned to every collection, with Can manage permission, and every item must be in a collection: Bitwarden's servers hide other collections and items from owners, so the run stops if there are any. |
 | `DEST_SERVER`, `DEST_CLIENT_ID`, `DEST_CLIENT_SECRET`, `DEST_PASSWORD`, `DEST_ORGANIZATION_ID` | — | The destination, in the same form as the source. Without a destination, runs only back up the source. Organizations are mirrored to organizations: set both organization ids or neither. |
+| `INCLUDE_FOLDERS`, `EXCLUDE_FOLDERS` | — | Comma-separated folder names. Only items in the included folders are mirrored, minus those in excluded ones. A name includes its subfolders, so `Work` covers `Work/Infra`. With `INCLUDE_FOLDERS`, items in no folder are not mirrored. Copies of items that the filter no longer selects are deleted from the destination. Backups always hold the whole vault. |
+| `INCLUDE_COLLECTIONS`, `EXCLUDE_COLLECTIONS` | — | The same for collections, in organization mode. An item in an excluded collection is left out even if it is also in an included one. |
 | `BACKUP_PASSPHRASE` | — | Passphrase that protects the backup key. Either this or `BACKUP_RECIPIENTS` is required while backups are on. `ENCRYPTION_PASSWORD` is accepted as an older name. |
 | `BACKUP_RECIPIENTS` | — | age public keys (`age1…`), separated by commas or spaces, to encrypt backups to instead. Restoring then needs `--identity`. |
 | `BACKUP_ENABLED` | `true` | Set `false` to mirror without backups. |

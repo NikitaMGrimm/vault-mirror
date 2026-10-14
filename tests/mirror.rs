@@ -4,7 +4,7 @@ use anyhow::Result;
 use common::*;
 use vault_mirror::{
     fixtures,
-    mirror::MirrorOptions,
+    mirror::{Filter, MirrorOptions},
     node::Node,
     plan::{MARKER_FIELD, Safety, marker_of},
     vault::{Account, Draft, Scope},
@@ -577,5 +577,57 @@ async fn newer_item_types_are_mirrored() -> Result<()> {
         );
     }
     assert!(!run(&source, &dest, &options()).await?.changed);
+    Ok(())
+}
+
+/// A folder filter mirrors a part of the vault, and changing it moves the
+/// mirror to the new selection.
+#[tokio::test]
+async fn a_folder_filter_mirrors_part_of_the_vault() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    seed(&source).await?;
+    let filtered = |include: &[&str], exclude: &[&str]| MirrorOptions {
+        filter: Filter {
+            include: include.iter().map(|n| n.to_string()).collect(),
+            exclude: exclude.iter().map(|n| n.to_string()).collect(),
+        },
+        ..options()
+    };
+    let count = |selected: &dyn Fn(Option<&str>) -> bool| {
+        fixtures::samples()
+            .iter()
+            .filter(|sample| selected(sample.folder))
+            .count()
+    };
+    let folders = |vault: &vault_mirror::vault::Vault| {
+        let mut names: Vec<String> = vault.folders.iter().map(|f| f.name.clone()).collect();
+        names.sort();
+        names
+    };
+
+    let work = filtered(&["Work"], &["Work/Infra"]);
+    let first = run(&source, &dest, &work).await?;
+    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    let mirrored = dest.load(&PERSONAL).await?;
+    assert_eq!(mirrored.items.len(), count(&|f| f == Some("Work")));
+    assert_eq!(folders(&mirrored), ["Work"]);
+    assert!(!run(&source, &dest, &work).await?.changed);
+
+    let not_private = filtered(&[], &["Persönlich ✈"]);
+    run(&source, &dest, &not_private).await?;
+    let mirrored = dest.load(&PERSONAL).await?;
+    assert_eq!(mirrored.items.len(), count(&|f| f != Some("Persönlich ✈")));
+    assert_eq!(folders(&mirrored), ["Empty", "Work", "Work/Infra"]);
+    assert!(!run(&source, &dest, &not_private).await?.changed);
+
+    let typo = run(&source, &dest, &filtered(&[], &["Persönlich ✈", "Wrok"])).await?;
+    assert!(
+        typo.warnings.iter().any(|w| w.contains("\"Wrok\"")),
+        "{:?}",
+        typo.warnings
+    );
     Ok(())
 }

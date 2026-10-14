@@ -291,6 +291,7 @@ async fn check() -> Result<ExitCode> {
     let options = MirrorOptions {
         dry_run: true,
         safety: config.safety.clone(),
+        filter: config.filter.clone(),
         ..MirrorOptions::default()
     };
     let source = Endpoint {

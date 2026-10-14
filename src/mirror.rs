@@ -1,6 +1,6 @@
 //! Makes a destination vault match a source vault.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{StreamExt, TryStreamExt, stream};
@@ -28,6 +28,76 @@ pub struct MirrorOptions {
     /// Download every copied attachment from the destination again and
     /// compare it with what was read from the source.
     pub verify_attachments: bool,
+    /// The folders, or in an organization the collections, to mirror.
+    pub filter: Filter,
+}
+
+/// Names of folders, or of collections in an organization, that select what
+/// is mirrored. A name also matches everything nested under it, so `Work`
+/// matches `Work/Infra`. Exclusion wins over inclusion.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Filter {
+    /// When not empty, only these are mirrored, and items in no folder or
+    /// collection are not.
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+impl Filter {
+    pub fn is_empty(&self) -> bool {
+        self.include.is_empty() && self.exclude.is_empty()
+    }
+
+    fn matches(pattern: &str, name: &str) -> bool {
+        name.strip_prefix(pattern)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    }
+
+    fn excludes(&self, name: &str) -> bool {
+        self.exclude.iter().any(|p| Self::matches(p, name))
+    }
+
+    fn keeps(&self, name: &str) -> bool {
+        (self.include.is_empty() || self.include.iter().any(|p| Self::matches(p, name)))
+            && !self.excludes(name)
+    }
+
+    /// Reduces a source vault to what the filter selects. An organization
+    /// item in an excluded collection is left out even when it is also in an
+    /// included one; otherwise it keeps only its selected collections.
+    fn apply(&self, vault: &mut Vault, mode: Mode) {
+        let unfiled = self.include.is_empty();
+        match mode {
+            Mode::Personal => {
+                vault.folders.retain(|folder| self.keeps(&folder.name));
+                let kept: HashSet<&str> = vault.folders.iter().map(|f| f.id.as_str()).collect();
+                vault.items.retain(|item| match &item.folder_id {
+                    Some(id) => kept.contains(id.as_str()),
+                    None => unfiled,
+                });
+            }
+            Mode::Organization => {
+                let excluded: HashSet<String> = vault
+                    .collections
+                    .iter()
+                    .filter(|c| self.excludes(&c.name))
+                    .map(|c| c.id.clone())
+                    .collect();
+                vault.collections.retain(|c| self.keeps(&c.name));
+                let kept: HashSet<&str> = vault.collections.iter().map(|c| c.id.as_str()).collect();
+                vault.items.retain_mut(|item| {
+                    if item.collection_ids.is_empty() {
+                        return unfiled;
+                    }
+                    if item.collection_ids.iter().any(|id| excluded.contains(id)) {
+                        return false;
+                    }
+                    item.collection_ids.retain(|id| kept.contains(id.as_str()));
+                    !item.collection_ids.is_empty()
+                });
+            }
+        }
+    }
 }
 
 impl Default for MirrorOptions {
@@ -37,6 +107,7 @@ impl Default for MirrorOptions {
             safety: Safety::default(),
             concurrency: 4,
             verify_attachments: true,
+            filter: Filter::default(),
         }
     }
 }
@@ -141,6 +212,42 @@ impl Run<'_> {
         }
     }
 
+    fn filter(&mut self, source: &mut Vault, mode: Mode) {
+        let options = self.options;
+        let filter = &options.filter;
+        if filter.is_empty() {
+            return;
+        }
+        let names: Vec<&str> = match mode {
+            Mode::Personal => source.folders.iter().map(|f| f.name.as_str()).collect(),
+            Mode::Organization => source.collections.iter().map(|c| c.name.as_str()).collect(),
+        };
+        let kind = match mode {
+            Mode::Personal => "folder",
+            Mode::Organization => "collection",
+        };
+        // A misspelt name would otherwise select nothing without a word.
+        let unmatched: Vec<String> = filter
+            .include
+            .iter()
+            .chain(&filter.exclude)
+            .filter(|pattern| !names.iter().any(|name| Filter::matches(pattern, name)))
+            .map(|pattern| format!("{pattern:?}"))
+            .collect();
+        let before = source.items.iter().filter(|item| !item.in_trash).count();
+        filter.apply(source, mode);
+        let after = source.items.iter().filter(|item| !item.in_trash).count();
+        if !unmatched.is_empty() {
+            self.warn(format!(
+                "The filter names {}, which match(es) no {kind} in the source.",
+                unmatched.join(", ")
+            ));
+        }
+        self.reporter.info(&format!(
+            "The {kind} filter selects {after} of {before} item(s)."
+        ));
+    }
+
     fn warn(&mut self, message: String) {
         self.reporter.warn(&message);
         self.warnings.push(message);
@@ -173,6 +280,7 @@ impl Run<'_> {
         )?;
 
         let mut source_vault = source_vault;
+        self.filter(&mut source_vault, mode);
         let traits = match self.dest.account.server_traits().await {
             Ok(traits) => traits,
             Err(error) => {
@@ -587,4 +695,110 @@ fn collection_names(vault: &Vault, item: &Item, mode: Mode) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault::{Collection, Folder};
+
+    fn item(id: &str, folder: Option<&str>, collections: &[&str]) -> Item {
+        Item {
+            id: id.into(),
+            folder_id: folder.map(Into::into),
+            collection_ids: collections.iter().map(|c| c.to_string()).collect(),
+            revision_date: None,
+            creation_date: None,
+            in_trash: false,
+            archived: false,
+            archived_date: None,
+            content: BTreeMap::new(),
+            attachments: vec![],
+            wrapped_key: None,
+        }
+    }
+
+    fn filter(include: &[&str], exclude: &[&str]) -> Filter {
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect();
+        Filter {
+            include: names(include),
+            exclude: names(exclude),
+        }
+    }
+
+    fn ids(vault: &Vault) -> Vec<&str> {
+        vault.items.iter().map(|i| i.id.as_str()).collect()
+    }
+
+    #[test]
+    fn folder_filters_select_folders_with_their_subfolders() {
+        let vault = Vault {
+            folders: ["Work", "Work/Infra", "Workshop", "Private"]
+                .iter()
+                .map(|name| Folder {
+                    id: name.to_string(),
+                    name: name.to_string(),
+                })
+                .collect(),
+            collections: vec![],
+            items: vec![
+                item("work", Some("Work"), &[]),
+                item("infra", Some("Work/Infra"), &[]),
+                item("shop", Some("Workshop"), &[]),
+                item("private", Some("Private"), &[]),
+                item("unfiled", None, &[]),
+            ],
+        };
+        let run = |filter: Filter| {
+            let mut vault = vault.clone();
+            filter.apply(&mut vault, Mode::Personal);
+            let folders: Vec<String> = vault.folders.iter().map(|f| f.name.clone()).collect();
+            (ids(&vault).join(" "), folders.join(" "))
+        };
+        assert_eq!(
+            run(filter(&["Work"], &[])),
+            ("work infra".into(), "Work Work/Infra".into())
+        );
+        assert_eq!(
+            run(filter(&["Work"], &["Work/Infra"])),
+            ("work".into(), "Work".into())
+        );
+        assert_eq!(
+            run(filter(&[], &["Private"])),
+            (
+                "work infra shop unfiled".into(),
+                "Work Work/Infra Workshop".into()
+            )
+        );
+    }
+
+    #[test]
+    fn collection_filters_trim_collections_and_let_exclusion_win() {
+        let vault = Vault {
+            folders: vec![],
+            collections: ["Shared", "Private", "Other"]
+                .iter()
+                .map(|name| Collection {
+                    id: name.to_string(),
+                    name: name.to_string(),
+                    external_id: None,
+                })
+                .collect(),
+            items: vec![
+                item("shared", None, &["Shared", "Other"]),
+                item("both", None, &["Shared", "Private"]),
+                item("other", None, &["Other"]),
+                item("loose", None, &[]),
+            ],
+        };
+        let mut included = vault.clone();
+        filter(&["Shared"], &["Private"]).apply(&mut included, Mode::Organization);
+        assert_eq!(ids(&included), ["shared"]);
+        assert_eq!(included.items[0].collection_ids, ["Shared"]);
+        assert_eq!(included.collections.len(), 1);
+
+        let mut excluded = vault.clone();
+        filter(&[], &["Private"]).apply(&mut excluded, Mode::Organization);
+        assert_eq!(ids(&excluded), ["shared", "other", "loose"]);
+    }
 }

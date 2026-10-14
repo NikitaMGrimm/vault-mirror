@@ -302,6 +302,7 @@ async fn execute(
         },
         concurrency: config.concurrency,
         verify_attachments: config.verify_attachments,
+        filter: config.filter.clone(),
     };
     let source = Endpoint {
         account: &source,
