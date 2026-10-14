@@ -1,9 +1,9 @@
 name: Release
 
-# Publishes binaries, checksums, build provenance, a GitHub release and a
-# multi-architecture image for a version tag. Release-plz calls it after it
-# tags a release; a pushed tag or a manual run with a tag does the same. A
-# manual run without a tag builds and smoke-tests everything without
+# Publishes Linux and macOS binaries, checksums, build provenance, a GitHub
+# release and a multi-architecture image for a version tag. Release-plz calls
+# it after it tags a release; a pushed tag or a manual run with a tag does the
+# same. A manual run without a tag builds and smoke-tests everything without
 # publishing.
 on:
   push:
@@ -176,6 +176,52 @@ jobs:
           path: digests/
           if-no-files-found: error
 
+  # macOS binaries are built natively; both architectures come from one
+  # Apple silicon runner.
+  build-macos:
+    needs: version
+    runs-on: macos-15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PUBLISH: ${{ needs.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.tag || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          toolchain=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
+          rustup toolchain install "$toolchain" --profile minimal \
+            --target aarch64-apple-darwin,x86_64-apple-darwin
+          rustup default "$toolchain"
+      - name: Build and package
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "$target"
+            binary="target/$target/release/vault-mirror"
+            file "$binary" | tee /dev/stderr | grep -q "Mach-O 64-bit executable"
+            name="vault-mirror-$VERSION-$target"
+            mkdir -p "dist/$name"
+            cp "$binary" LICENSE README.md "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+            rm -r "dist/$name"
+          done
+          "target/aarch64-apple-darwin/release/vault-mirror" --version
+      - if: env.PUBLISH == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-macos
+          path: dist/
+          if-no-files-found: error
+
   image:
     needs: [version, build]
     if: needs.version.outputs.publish == 'true'
@@ -226,7 +272,7 @@ jobs:
           push-to-registry: true
 
   release:
-    needs: [version, build, image]
+    needs: [version, build, build-macos, image]
     if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
