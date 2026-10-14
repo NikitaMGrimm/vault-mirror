@@ -1,3 +1,7 @@
+//! The library behind the `vault-mirror` command. It is published only so
+//! that the command can be built; it has no stable API, and any release may
+//! change it.
+
 pub mod api;
 pub mod app;
 pub mod backup;

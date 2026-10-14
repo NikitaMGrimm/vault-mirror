@@ -6,7 +6,25 @@ rust-version = "1.89"
 license = "GPL-3.0-only"
 description = "Mirror and back up a Bitwarden or Vaultwarden vault, without the Bitwarden CLI."
 repository = "https://github.com/NikitaMGrimm/vault-mirror"
-publish = false
+readme = "README.md"
+keywords = ["bitwarden", "vaultwarden", "backup", "mirror", "password-manager"]
+categories = ["command-line-utilities", "cryptography"]
+include = ["/src", "/LICENSE", "/README.md", "/CHANGELOG.md"]
+
+# `cargo binstall vault-mirror` downloads the static release binary instead of
+# compiling. Releases are built for musl, which also runs on glibc systems.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/vault-mirror-{ version }-{ target }.tar.gz"
+bin-dir = "vault-mirror-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/vault-mirror-{ version }-x86_64-unknown-linux-musl.tar.gz"
+bin-dir = "vault-mirror-{ version }-x86_64-unknown-linux-musl/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/vault-mirror-{ version }-aarch64-unknown-linux-musl.tar.gz"
+bin-dir = "vault-mirror-{ version }-aarch64-unknown-linux-musl/{ bin }{ binary-ext }"
 
 [dependencies]
 age = { version = "0.12.1", features = ["armor"] }
