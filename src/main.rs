@@ -48,7 +48,7 @@ struct RunArgs {
     /// Let the first run delete items that are already in the destination.
     #[arg(long)]
     allow_initial_overwrite: bool,
-    /// Let this run delete more of the destination than MAX_DELETE_PERCENT.
+    /// Let this run delete every earlier copy, or more than MAX_DELETE_PERCENT.
     #[arg(long)]
     allow_mass_delete: bool,
 }

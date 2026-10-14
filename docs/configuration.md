@@ -24,7 +24,7 @@ used exactly as given, spaces included; a file's final newline is dropped.
 | `RETENTION_DAYS` | `30` | Age after which snapshots are deleted… |
 | `MIN_FILES` | `10` | …except the newest this many, per vault. |
 | `BACKUPS_DIR` | `backups` (`/data` in the image) | Where backups and `last-run.json` are kept. |
-| `MAX_DELETE_PERCENT` | `50` | Mass-deletion limit; see [Safety checks](how-it-works.md#safety-checks). |
+| `MAX_DELETE_PERCENT` | — | Stop a run that would delete more than this percentage of the destination's items, if it deletes more than 10. Off unless set; see [Safety checks](how-it-works.md#safety-checks). |
 | `CONCURRENCY` | `4` | Parallel item writes, 1–32. |
 | `VERIFY_ATTACHMENTS` | `true` | Download copied attachments again and compare their SHA-256. |
 | `SCHEDULE` | — | Cron expression for `daemon`, such as `0 3 * * *`. `CRON_SCHEDULE` is accepted as an older name. |

@@ -648,21 +648,24 @@ fn hash(value: &Value) -> String {
 /// Limits that stop a misconfigured run before it destroys a vault.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Safety {
-    /// Refuse to delete more than this share of the destination's items.
-    pub max_delete_percent: u32,
+    /// Refuse to delete more than this share of the destination's items, if
+    /// set. Off by default: any fixed share is arbitrary, and the backup
+    /// taken before the run holds what it deletes.
+    pub max_delete_percent: Option<u32>,
     /// Below this many deletions the percentage is not checked, so small
     /// vaults can change freely.
     pub delete_floor: usize,
     /// Permit the first run to delete what is already in the destination.
     pub allow_initial_overwrite: bool,
-    /// Skip the mass-deletion limit for this run.
+    /// Permit this run to delete every earlier copy, or more than
+    /// `max_delete_percent`.
     pub allow_mass_delete: bool,
 }
 
 impl Default for Safety {
     fn default() -> Self {
         Self {
-            max_delete_percent: 50,
+            max_delete_percent: None,
             delete_floor: 10,
             allow_initial_overwrite: false,
             allow_mass_delete: false,
@@ -682,6 +685,11 @@ pub enum SafetyViolation {
          a first run would delete them. Pass --allow-initial-overwrite to confirm"
     )]
     InitialOverwrite(usize),
+    #[error(
+        "the run would delete all {0} item(s) it mirrored before and keep none, so the source \
+         looks empty or like a different vault. Pass --allow-mass-delete if this is expected"
+    )]
+    ReplacesEverything(usize),
     #[error(
         "the run would delete {deleting} of {total} destination items ({percent}%), above the {limit}% limit; \
          pass --allow-mass-delete if this is expected"
@@ -709,23 +717,30 @@ pub fn check_safety(plan: &Plan, safety: &Safety) -> Result<(), SafetyViolation>
     if untracked > 0 && plan.tracked_before == 0 && !safety.allow_initial_overwrite {
         return Err(SafetyViolation::InitialOverwrite(untracked));
     }
+    if safety.allow_mass_delete {
+        return Ok(());
+    }
+    // Not one earlier copy still has its source item: the source read as
+    // empty, or is another vault. A source that changes, however much, keeps
+    // at least some of its items.
+    if plan.tracked_before > 0 && stale == plan.tracked_before {
+        return Err(SafetyViolation::ReplacesEverything(stale));
+    }
     let deleting = untracked + stale;
     let total = plan.tracked_before + untracked;
-    if !safety.allow_mass_delete
+    if let Some(limit) = safety.max_delete_percent
         && plan.tracked_before > 0
         && deleting > safety.delete_floor
-        && total > 0
-    {
         // Compared exactly: 101 of 200 is above a 50% limit.
-        if deleting as u128 * 100 > safety.max_delete_percent as u128 * total as u128 {
-            let percent = u32::try_from(deleting * 100 / total).unwrap_or(u32::MAX);
-            return Err(SafetyViolation::MassDelete {
-                deleting,
-                total,
-                percent,
-                limit: safety.max_delete_percent,
-            });
-        }
+        && deleting as u128 * 100 > limit as u128 * total as u128
+    {
+        let percent = u32::try_from(deleting * 100 / total).unwrap_or(u32::MAX);
+        return Err(SafetyViolation::MassDelete {
+            deleting,
+            total,
+            percent,
+            limit,
+        });
     }
     Ok(())
 }

@@ -54,7 +54,13 @@ warnings.
 | Source items carry `__source` fields | Source and destination are probably swapped, and the run would overwrite your vault with its copy. | Not possible. |
 | Source and destination are the same vault | The run would delete everything. | Not possible. |
 | The destination holds items, none of them created by vault-mirror | `DEST_*` probably points at an account in use. Its items would be deleted. | `run --allow-initial-overwrite`, once. |
-| The run would delete more than `MAX_DELETE_PERCENT` (default 50) of the destination's items, and more than 10 | The source probably looks emptier than it is: a wrong account, a server problem, or a mistyped filter. The copy is what you fall back on then. | `run --allow-mass-delete`, once, or a higher `MAX_DELETE_PERCENT`. `100` turns this check off. |
+| The run would delete every copy it made before | The source read as empty, or is a different vault: a server problem, a wrong account, or a filter that matches nothing. The copy is what you fall back on then. | `run --allow-mass-delete`, once. |
+| You set `MAX_DELETE_PERCENT`, and the run would delete more than that share of the destination's items, and more than 10 | You asked for a limit. | `run --allow-mass-delete`, once. |
+
+There is no default limit on how much a run may delete. Any fixed share would
+be arbitrary: losing 40% of a vault by mistake is no better than losing 60%.
+Smaller mistakes are covered by the backup each run takes before it deletes
+anything.
 
 With the container, run the override once by hand, for example
 `docker compose run --rm vault-mirror run --allow-mass-delete`. Scheduled
