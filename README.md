@@ -1,45 +1,101 @@
-# vault-mirror
+<p align="center">
+  <img src="assets/logo.svg" alt="vault-mirror" width="420">
+</p>
 
-Keeps a second Bitwarden or Vaultwarden vault in sync with your main one, and
-keeps encrypted, restorable backups of both.
+<p align="center">
+  Keeps a second Bitwarden or Vaultwarden vault in sync with your main one,<br>
+  and keeps encrypted, restorable backups of both.
+</p>
+
+<p align="center">
+  <a href="https://github.com/NikitaMGrimm/vault-mirror/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/NikitaMGrimm/vault-mirror/ci.yml?branch=main&style=flat-square&label=CI"></a>
+  <a href="https://github.com/NikitaMGrimm/vault-mirror/releases"><img alt="Release" src="https://img.shields.io/github/v/release/NikitaMGrimm/vault-mirror?sort=semver&style=flat-square"></a>
+  <a href="https://crates.io/crates/vault-mirror"><img alt="crates.io" src="https://img.shields.io/crates/v/vault-mirror?style=flat-square"></a>
+  <a href="https://github.com/NikitaMGrimm/vault-mirror/pkgs/container/vault-mirror"><img alt="Container image" src="https://img.shields.io/badge/image-ghcr.io-blue?style=flat-square"></a>
+  <a href="Cargo.toml"><img alt="Minimum Rust version" src="https://img.shields.io/crates/msrv/vault-mirror?style=flat-square"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square"></a>
+</p>
+
+<p align="center">
+  <img src="assets/demo.gif" alt="vault-mirror checking, mirroring, and finding nothing to change on the second run" width="860">
+</p>
 
 - **A mirror you can rely on.** Every item type, custom field, password
   history entry, passkey, folder, archive state, and attachment is copied. The
   tool re-reads the destination after every change and fails loudly if the two
   vaults differ.
-- **Incremental.** An unchanged vault costs two syncs and changes nothing on
-  either server. A changed item is updated in place, so its id, and links to
-  it, stay stable.
+- **Incremental and fast.** An unchanged vault costs two syncs and changes
+  nothing on either server. A changed item is updated in place, so its id,
+  and links to it, stay stable. Large first runs into Bitwarden's cloud are
+  imported in bulk.
 - **Complete backups.** Each run writes an [age](https://age-encryption.org)-
-  encrypted snapshot of each vault, including attachment content. A snapshot is
-  only written when the vault changed. Snapshots are Bitwarden's own
-  unencrypted export format, so any Bitwarden client can import one after
-  decryption. Decryption needs only the stock `age` tool.
-- **Hard to misuse.** The tool refuses to run when:
-  - the source looks like a mirror;
-  - a first run would delete items it did not create;
-  - a run would delete more than half the destination.
-
-  The destination is backed up before it is changed.
+  encrypted snapshot of each vault, including attachment content, in
+  Bitwarden's own export format. Recovering needs only the stock `age` tool.
+- **Hard to misuse.** It refuses to run when source and destination look
+  swapped, when a first run would delete items it did not create, or when a
+  run would delete more than half the destination. The destination is backed
+  up before it is changed.
 - **Self-contained.** One static binary or a 14 MB container image. It speaks
   the Bitwarden API directly and needs neither the `bw` CLI nor Node.js.
+  No telemetry: it talks only to your two servers and, if configured, your
+  notification URL.
 
 > [!IMPORTANT]
-> vault-mirror is tested end to end against Vaultwarden and against a
-> self-hosted copy of Bitwarden's own server, each as source and as
-> destination. It has not yet run against Bitwarden's cloud. Try a
-> `--dry-run` first.
+> vault-mirror is tested end to end against Vaultwarden and Bitwarden's own
+> server, each as source and as destination, and has been run against
+> Bitwarden's cloud. It handles the keys to your vault: try `check` and
+> `--dry-run` first, and read [SECURITY.md](SECURITY.md).
 
 ## Contents
 
+- [Use cases](#use-cases)
+- [Install](#install)
 - [Quick start](#quick-start)
 - [How a run works](#how-a-run-works)
 - [Configuration](#configuration)
 - [Backups](#backups)
 - [Commands](#commands)
 - [Scheduling](#scheduling)
+- [Compared with other approaches](#compared-with-other-approaches)
 - [Limitations](#limitations)
 - [Contributing](#contributing)
+
+## Use cases
+
+- **An off-site copy of a self-hosted vault.** Mirror your Vaultwarden into a
+  Bitwarden cloud account, so you can still log in when your server is down.
+- **Moving between servers.** Mirror from the old server to the new one until
+  you switch, then stop.
+- **Sharing part of a vault.** Mirror one folder, or some collections, into
+  another account, such as a family member's.
+- **Backups only.** Leave out the destination and get encrypted, restorable
+  snapshots of one vault.
+
+## Install
+
+**Container image** for `linux/amd64` and `linux/arm64`:
+
+```sh
+docker pull ghcr.io/nikitamgrimm/vault-mirror:0.1
+```
+
+**Static binary** for x86-64 and arm64 Linux, from the
+[releases](https://github.com/NikitaMGrimm/vault-mirror/releases). Each
+release lists SHA-256 checksums, and every binary and image carries
+[build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations)
+that shows it was built by this repository's release workflow:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify vault-mirror-*.tar.gz --repo NikitaMGrimm/vault-mirror
+```
+
+**From crates.io**, on Linux or macOS:
+
+```sh
+cargo binstall vault-mirror    # downloads the release binary
+cargo install vault-mirror --locked
+```
 
 ## Quick start
 
@@ -51,14 +107,16 @@ Security → Keys → View API key**. Then write an env file:
 SOURCE_SERVER=https://vault.bitwarden.com
 SOURCE_CLIENT_ID=user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 SOURCE_CLIENT_SECRET=...
-SOURCE_PASSWORD=...          # master password, to decrypt the vault
+# The master password, to decrypt the vault.
+SOURCE_PASSWORD=...
 
 DEST_SERVER=https://vaultwarden.example.com
 DEST_CLIENT_ID=user....
 DEST_CLIENT_SECRET=...
 DEST_PASSWORD=...
 
-BACKUP_PASSPHRASE=...        # protects the backup key; keep it somewhere else too
+# Protects the backup key. Keep a copy somewhere other than the backups.
+BACKUP_PASSPHRASE=...
 SCHEDULE=0 3 * * *
 TZ=Europe/Berlin
 ```
@@ -86,12 +144,20 @@ docker compose run --rm vault-mirror check
 docker compose up -d
 ```
 
-You can run the binary from the
-[releases](https://github.com/NikitaMGrimm/vault-mirror/releases) the same
-way. It reads the same environment variables and keeps its backups in
-`./backups` unless `BACKUPS_DIR` is set.
+The binary reads the same environment variables, for example with
+`set -a; . ./vault-mirror.env; set +a; vault-mirror check`. It keeps its
+backups in `./backups` unless `BACKUPS_DIR` is set.
 
 ## How a run works
+
+```mermaid
+flowchart LR
+    source[("Source vault")] -- "1. back up" --> backups[("Encrypted backups")]
+    dest[("Destination vault")] -- "2. back up" --> backups
+    source -- "3. compare" --> mirror["vault-mirror"]
+    dest -- "3. compare" --> mirror
+    mirror -- "4. change, 5. verify" --> dest
+```
 
 1. **Source backup.** Log in to the source and back it up with its attachments.
 2. **Destination backup.** Log in to the destination and back it up. Its
@@ -259,7 +325,8 @@ vault-mirror restore --to dest               # write the newest source snapshot 
 - By default it refuses a vault that already has items. Pass
   `--allow-non-empty` to add the items anyway.
 - `--from dest` reads the destination's backups instead of the source's.
-- `--snapshot FILE` picks a snapshot other than the newest.
+- `--snapshot NAME` picks a snapshot other than the newest, by the name
+  `snapshots` lists.
 
 ## Commands
 
@@ -268,7 +335,7 @@ vault-mirror restore --to dest               # write the newest source snapshot 
 | `vault-mirror` or `vault-mirror run` | One run. Flags: `--dry-run`, `--allow-initial-overwrite`, `--allow-mass-delete`. |
 | `vault-mirror daemon` | Runs on `SCHEDULE` or every `INTERVAL`, and stops cleanly on `SIGTERM` between runs. |
 | `vault-mirror check` | Logs in, counts items, and prints the plan. Writes nothing. |
-| `vault-mirror snapshots [--vault dest]` | Lists snapshots. |
+| `vault-mirror snapshots [--from dest]` | Lists snapshots. |
 | `vault-mirror export --output DIR` | Decrypts a snapshot and its attachments into `DIR`. |
 | `vault-mirror restore --to source\|dest` | Writes a snapshot into a vault. |
 | `vault-mirror healthcheck [--max-age-hours 26]` | Exits non-zero unless the last run succeeded within the given time. The image uses it as its health check. |
@@ -302,6 +369,17 @@ The container runs as user 65532. A bind-mounted backup directory must be
 writable by that user, for example after `chown 65532:65532
 /var/lib/vault-mirror`.
 
+## Compared with other approaches
+
+| | vault-mirror | Scripts around `bw export` and `bw import` | Server-side backups, such as copying Vaultwarden's data directory |
+| --- | --- | --- | --- |
+| Works with Bitwarden's cloud | yes | yes | no |
+| Keeps a live, usable second vault | yes | yes, rebuilt on every run | no |
+| Changes only what changed | yes | no | not applicable |
+| Copies attachments | yes | usually not | yes |
+| Readable without the server | yes, with `age` | yes, if exports are kept | no |
+| Needs | one binary | the `bw` CLI and Node.js | access to the server |
+
 ## Limitations
 
 - Sends, organization members, groups, collection permissions, and account
@@ -314,10 +392,15 @@ writable by that user, for example after `chown 65532:65532
   mirror, with a warning, until Bitwarden enables them.
 - Archived items need a server that supports archiving. If the destination
   does not, items are mirrored unarchived, and the run reports a warning.
-- Tested against Vaultwarden 1.37 and Bitwarden's self-hosted server 2026.9.
-  Bitwarden's cloud runs the same server code but has not been tested yet. The
-  cloud stores attachments in Azure, and that upload path is tested against
-  Microsoft's Azurite emulator.
+- Tested against Vaultwarden 1.37, Bitwarden's self-hosted server 2026.9,
+  and Bitwarden's cloud.
+- Bitwarden accepts attachments only from premium accounts. Into a personal
+  vault without premium, everything else is mirrored and attachments are left
+  out with a warning, until the account has premium.
+- Bitwarden's cloud limits how fast a client may write: about 60 single item
+  creations a minute. vault-mirror imports large numbers of new items in bulk
+  and waits out rate limits, so a large first run takes longer but completes.
+  New organization items are still created one at a time.
 - Bitwarden's servers require every organization item to be in a collection.
   Source items in no collection are left out of such a destination, with a
   warning.
@@ -336,3 +419,6 @@ vulnerabilities to a [private report](SECURITY.md). Read
 
 [GPL-3.0-only](LICENSE). vault-mirror uses Bitwarden's `bitwarden-crypto`
 crate, which is published under the GPL.
+
+vault-mirror is an independent project, not affiliated with or endorsed by
+Bitwarden, Inc. or the Vaultwarden project.
