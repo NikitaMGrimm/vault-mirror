@@ -466,11 +466,12 @@ impl Run<'_> {
                     &source_vault.items[entry.source],
                     entry.folder.as_deref(),
                     &entry.collections,
+                    mode,
                 );
                 let dest_item = &dest_vault.items[update.dest];
                 let folder = folder_name(&dest_vault, dest_item, mode);
                 let collections = collection_names(&dest_vault, dest_item, mode);
-                let found = comparable(dest_item, folder.as_deref(), &collections);
+                let found = comparable(dest_item, folder.as_deref(), &collections, mode);
                 // Paths only, never values: this ends up in logs and the status file.
                 let mut reasons = Vec::new();
                 let paths = differing_paths(&wanted, &found);

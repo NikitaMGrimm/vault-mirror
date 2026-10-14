@@ -244,7 +244,8 @@ pub enum PlanError {
 pub enum Mode {
     /// Folders are mirrored by name; collections do not exist.
     Personal,
-    /// Collections are mirrored by name; folders are per-user and ignored.
+    /// Collections are mirrored by name; folders and favorites are per-user
+    /// and ignored.
     Organization,
 }
 
@@ -290,7 +291,7 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
         };
         let marker = Marker {
             source_id: item.id.clone(),
-            core_hash: core_hash(item, folder.as_deref(), &collections),
+            core_hash: core_hash(item, folder.as_deref(), &collections, mode),
             attachments_hash: Some(attachments_hash(item)),
         };
         entry_by_source_id.insert(&item.id, plan.entries.len());
@@ -353,7 +354,7 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
         };
         // The marker alone is not trusted: a destination item edited by hand
         // still carries the old marker.
-        let dest_core = core_hash(dest_item, dest_folder, &dest_item_collections);
+        let dest_core = core_hash(dest_item, dest_folder, &dest_item_collections, mode);
         let attachments_recorded = match &marker.attachments_hash {
             Some(hash) => *hash == attachments_hash(source_item),
             // A legacy marker says nothing about attachments. That only
@@ -458,8 +459,13 @@ fn attachment_names(item: &Item) -> Vec<&str> {
 }
 
 /// The item's content in a form that is equal for the same item on two servers.
-pub fn comparable(item: &Item, folder: Option<&str>, collections: &[String]) -> Value {
+pub fn comparable(item: &Item, folder: Option<&str>, collections: &[String], mode: Mode) -> Value {
     let mut content = item.content.clone();
+    if mode == Mode::Organization {
+        // Bitwarden's server keeps an organization item's favorite flag per
+        // member and ignores it when the item is written.
+        content.remove("favorite");
+    }
     if let Some(Node::List(fields)) = content.get_mut("fields") {
         fields.retain(|field| !is_marker_field(field));
     }
@@ -480,8 +486,8 @@ pub fn comparable(item: &Item, folder: Option<&str>, collections: &[String]) -> 
     })
 }
 
-fn core_hash(item: &Item, folder: Option<&str>, collections: &[String]) -> String {
-    hash(&comparable(item, folder, collections))
+fn core_hash(item: &Item, folder: Option<&str>, collections: &[String], mode: Mode) -> String {
+    hash(&comparable(item, folder, collections, mode))
 }
 
 /// Identifies the source item's attachments. Attachment ids never get reused,
