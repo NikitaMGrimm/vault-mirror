@@ -1,7 +1,7 @@
 name: Pull request
 
-# Checks that a pull request description follows the template. It reads only
-# the event payload and checks out nothing, so it is safe for forks.
+# Checks a pull request's title and description. It reads only the event
+# payload and checks out nothing, so it is safe for forks.
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
@@ -9,6 +9,23 @@ on:
 permissions: {}
 
 jobs:
+  # Pull requests are squashed with their title as the commit message, and
+  # release-plz writes the release notes from those, so this applies to
+  # everyone.
+  title:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Check the title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|perf|revert|docs|ci|build|chore|refactor|test|style)(\([a-z0-9-]+\))?!?: [^ ]'
+          if [[ ! "$TITLE" =~ $pattern ]]; then
+            echo "::error::Title the pull request as a Conventional Commit, such as 'fix: keep archive state on edit'. See CONTRIBUTING.md."
+            exit 1
+          fi
+
   description:
     # Dependabot and release-plz write their own descriptions, and the
     # maintainer and collaborators decide their own.
