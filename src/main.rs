@@ -392,6 +392,9 @@ fn vault_config(config: &Config, role: Role) -> Result<&VaultConfig> {
 
 async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
     let config = config()?;
+    // A run at the same time could prune the snapshot being restored, or
+    // mirror into the vault being restored to.
+    let _lock = app::lock_backups_dir(&config.backups_dir)?;
     let keys = backup_keys(&config, args.snapshot.identity.as_deref())?;
     let store = Store::open(&config.backups_dir, args.snapshot.from.name(), &keys)?;
     let path = locate_snapshot(&store, args.snapshot.from, &args.snapshot.snapshot)?;

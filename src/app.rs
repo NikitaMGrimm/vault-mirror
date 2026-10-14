@@ -154,10 +154,10 @@ fn write_atomically(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Claims the backup directory for one run; it is released when the file is
-/// closed. Two runs at once could both prune and write the same snapshots and
-/// attachment files, and would both write `last-run.json`.
-fn lock_backups_dir(backups_dir: &Path) -> Result<fs::File> {
+/// Claims the backup directory for one run or restore; it is released when
+/// the file is closed. Two runs at once could both prune and write the same
+/// snapshots and attachment files, and would both write `last-run.json`.
+pub fn lock_backups_dir(backups_dir: &Path) -> Result<fs::File> {
     fs::create_dir_all(backups_dir)
         .with_context(|| format!("creating {}", backups_dir.display()))?;
     let path = backups_dir.join(LOCK_FILE);
