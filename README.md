@@ -31,7 +31,7 @@ Before changing anything, each run backs up both vaults, encrypted with
 [age](https://age-encryption.org) in Bitwarden's export format. You can
 recover with the stock `age` tool and any Bitwarden client.
 
-It is a single static binary, or a 14 MB container image. It talks to the
+It is a single binary, or a 14 MB container image. It talks to the
 Bitwarden API directly, without the `bw` CLI, and contacts nothing but your two
 servers and, if you set one, a notification URL.
 
@@ -56,7 +56,8 @@ docker pull ghcr.io/nikitamgrimm/vault-mirror:0.1   # linux/amd64, linux/arm64
 cargo binstall vault-mirror                          # or: cargo install vault-mirror --locked
 ```
 
-Static Linux binaries are on the
+Binaries for Linux (static, x86-64 and arm64) and macOS (Apple silicon and
+Intel) are on the
 [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases), with
 checksums and [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations):
 `gh attestation verify FILE --repo NikitaMGrimm/vault-mirror`.

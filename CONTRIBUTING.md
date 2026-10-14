@@ -99,8 +99,8 @@ of 2000 items. Set `VAULT_MIRROR_SCALE_ITEMS` to change the size.
 with the next version and its changelog. The maintainer edits the changelog
 there if needed and merges it. That publishes the crate to crates.io, tags the
 version, and runs the release workflow, which builds static binaries for
-x86-64 and arm64 Linux, publishes the container image, and attaches build
-provenance to both.
+x86-64 and arm64 Linux and native binaries for both macOS architectures,
+publishes the container image, and attaches build provenance to all of them.
 
 ## License
 
