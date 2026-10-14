@@ -160,9 +160,8 @@ flowchart LR
 ```
 
 1. **Source backup.** Log in to the source and back it up with its attachments.
-2. **Destination backup.** Log in to the destination and back it up. Its
-   attachments are copies of the source's, so their content is not stored
-   again.
+2. **Destination backup.** Log in to the destination and back it up with its
+   attachments, so anything the mirror deletes or replaces can be restored.
 3. **Plan.** Compare the two vaults and check the plan against the safety
    rules.
 4. **Change the destination.**
@@ -296,6 +295,8 @@ backups/
   changed since the last one.
 - **Attachments.** Each attachment is stored once, however many snapshots
   refer to it. Pruning deletes attachments that no remaining snapshot needs.
+  Each vault's backups hold their own attachments, so a mirrored attachment is
+  stored twice: once for the source and once for the destination.
 
 ### Recovering without vault-mirror
 

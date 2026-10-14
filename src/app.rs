@@ -251,23 +251,21 @@ async fn execute(
         Some(backup) => Some(Keys::open(&config.backups_dir, &backup.protection)?),
         None => None,
     };
-    let backup_options = |attachments: bool| {
-        config.backup.as_ref().map(|backup| BackupOptions {
-            attachments: attachments && backup.attachments,
-            retention: backup.retention.as_ref(),
-            now,
-        })
-    };
+    let backup_options = config.backup.as_ref().map(|backup| BackupOptions {
+        attachments: backup.attachments,
+        retention: backup.retention.as_ref(),
+        now,
+    });
 
     progress.stage = "source login";
     let source = open_account(config, &http, &config.source, "source").await?;
     let source_scope = scope_of(&config.source);
-    if let (Some(keys), Some(options)) = (&keys, backup_options(true)) {
+    if let (Some(keys), Some(options)) = (&keys, &backup_options) {
         progress.stage = "source backup";
         reporter.info("Backing up the source vault.");
         let store = Store::open(&config.backups_dir, "source", keys)?;
         progress.status.source_backup = Some(
-            backup(&source, &source_scope, &store, &options, reporter)
+            backup(&source, &source_scope, &store, options, reporter)
                 .await?
                 .into(),
         );
@@ -279,14 +277,16 @@ async fn execute(
     progress.stage = "destination login";
     let dest = open_account(config, &http, dest_config, "dest").await?;
     let dest_scope = scope_of(dest_config);
-    // The destination's attachments are copies of the source's, which are
-    // already backed up, so its snapshot records them without their content.
-    if let (Some(keys), Some(options)) = (&keys, backup_options(false)) {
+    // Attachment content is stored on this side too. A destination file can
+    // be the only copy: one the source never had, one changed in the
+    // destination, or one in a vault this tool did not fill. The mirror is
+    // about to delete or replace such files.
+    if let (Some(keys), Some(options)) = (&keys, &backup_options) {
         progress.stage = "destination backup";
         reporter.info("Backing up the destination vault before changing it.");
         let store = Store::open(&config.backups_dir, "dest", keys)?;
         progress.status.dest_backup = Some(
-            backup(&dest, &dest_scope, &store, &options, reporter)
+            backup(&dest, &dest_scope, &store, options, reporter)
                 .await?
                 .into(),
         );

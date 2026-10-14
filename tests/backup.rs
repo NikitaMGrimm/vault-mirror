@@ -457,6 +457,58 @@ async fn a_failed_run_is_recorded_with_its_stage_and_changes_nothing() -> Result
 }
 
 #[tokio::test]
+async fn destination_attachments_are_backed_up_before_the_mirror_deletes_them() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    // A file only the destination has, so no source backup holds it.
+    let item = dest
+        .create_item(
+            &PERSONAL,
+            &Draft {
+                content: fixtures::samples().remove(4).content,
+                folder_id: None,
+                collection_ids: vec![],
+            },
+        )
+        .await?;
+    dest.upload_attachment(&PERSONAL, &item, "only-copy.txt", b"the only copy")
+        .await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    let flags = RunFlags {
+        allow_initial_overwrite: true,
+        ..RunFlags::default()
+    };
+
+    let status = app::run_once(&config, flags, &Capture::default()).await;
+    assert!(status.succeeded(), "{status:?}");
+    assert!(dest.load(&PERSONAL).await?.items.is_empty());
+    assert_eq!(
+        status.dest_backup.as_ref().unwrap().attachments_downloaded,
+        1
+    );
+
+    let keys = keys(dir.path());
+    let store = Store::open(dir.path(), "dest", &keys)?;
+    let target = restored_copy(&sandbox, &store).await?;
+    let restored = target.load(&PERSONAL).await?;
+    let item = &restored.items[0];
+    let attachment = &item.attachments[0];
+    assert_eq!(attachment.file_name, "only-copy.txt");
+    assert_eq!(
+        target
+            .download_attachment(&PERSONAL, item, attachment)
+            .await?,
+        b"the only copy"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_setup_without_a_destination_only_backs_up() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
