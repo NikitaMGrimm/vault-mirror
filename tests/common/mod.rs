@@ -217,3 +217,93 @@ pub fn folder_of(vault: &Vault, item: &Item) -> Option<String> {
         .find(|folder| folder.id == id)
         .map(|folder| folder.name.clone())
 }
+
+/// Creates an organization owned by `owner`, with a "Default collection" the
+/// owner manages, as the API does. A self-hosted Bitwarden server creates
+/// organizations only from a license, so for the sandbox's Bitwarden server
+/// they are written into its database instead.
+pub async fn create_organization(
+    sandbox: &Sandbox,
+    owner: &TestAccount,
+    name: &str,
+) -> Result<String> {
+    match provision::create_organization(&sandbox.http, owner, name).await {
+        Err(error) if format!("{error:#}").contains("Only allowed when not self hosted") => {
+            seed_organization(owner, name)
+        }
+        result => result,
+    }
+}
+
+fn seed_organization(owner: &TestAccount, name: &str) -> Result<String> {
+    let keys = provision::organization_keys(owner, name)?;
+    let org = uuid::Uuid::new_v4();
+    let member = uuid::Uuid::new_v4();
+    let collection = uuid::Uuid::new_v4();
+    // Every value is generated here or is base64, so none contains a quote.
+    let sql = format!(
+        r#"BEGIN;
+INSERT INTO "Organization" ("Id", "Name", "BillingEmail", "Plan", "PlanType", "Seats", "MaxStorageGb",
+  "UsePolicies", "UseSso", "UseGroups", "UseDirectory", "UseEvents", "UseTotp", "Use2fa",
+  "UseApi", "UseResetPassword", "SelfHost", "UsersGetPremium", "Enabled",
+  "PublicKey", "PrivateKey", "CreationDate", "RevisionDate")
+VALUES ('{org}', '{name}', '{email}', 'Free', 0, 2, 10,
+  false, false, false, false, false, false, false,
+  false, false, true, false, true,
+  '{public_key}', '{private_key}', now(), now());
+INSERT INTO "OrganizationUser" ("Id", "OrganizationId", "UserId", "Key", "Status", "Type",
+  "AccessSecretsManager", "AccessPam", "CreationDate", "RevisionDate")
+VALUES ('{member}', '{org}', '{user}', '{owner_key}', 2, 0, false, false, now(), now());
+INSERT INTO "Collection" ("Id", "OrganizationId", "Name", "CreationDate", "RevisionDate")
+VALUES ('{collection}', '{org}', '{collection_name}', now(), now());
+INSERT INTO "CollectionUsers" ("CollectionId", "OrganizationUserId", "ReadOnly", "HidePasswords", "Manage")
+VALUES ('{collection}', '{member}', false, false, true);
+COMMIT;"#,
+        email = owner.email,
+        user = owner.user_id,
+        public_key = keys.public_key,
+        private_key = keys.encrypted_private_key,
+        owner_key = keys.owner_key,
+        collection_name = keys.default_collection_name,
+    );
+    anyhow::ensure!(
+        !name.contains('\''),
+        "organization names must not contain quotes"
+    );
+    official_sql(&sql)?;
+    Ok(org.to_string())
+}
+
+/// Runs SQL in the database of the sandbox's Bitwarden server.
+pub fn official_sql(sql: &str) -> Result<()> {
+    let compose = concat!(env!("CARGO_MANIFEST_DIR"), "/sandbox/compose.yaml");
+    let output = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            compose,
+            "--profile",
+            "official",
+            "exec",
+            "-T",
+        ])
+        .args([
+            "official-db",
+            "psql",
+            "-U",
+            "bitwarden",
+            "-d",
+            "vault",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-q",
+        ])
+        .args(["-c", sql])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "SQL in the sandbox's Bitwarden database failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}

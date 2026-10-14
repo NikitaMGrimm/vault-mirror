@@ -7,28 +7,18 @@ use vault_mirror::{
     fixtures,
     mirror::MirrorOptions,
     node::Node,
-    provision,
     vault::{Account, Draft, Scope, Vault},
 };
 
-/// `None` when the server does not let accounts create organizations: a
-/// self-hosted Bitwarden server only creates them from a license file.
-async fn organization(sandbox: &Sandbox, server: &str) -> Result<Option<(Account, Scope, String)>> {
+async fn organization(sandbox: &Sandbox, server: &str) -> Result<(Account, Scope, String)> {
     let owner = sandbox.register(server).await?;
-    let org = match provision::create_organization(&sandbox.http, &owner, "Mirror Test Org").await {
-        Ok(org) => org,
-        Err(error) if format!("{error:#}").contains("Only allowed when not self hosted") => {
-            eprintln!("skipping: {server} cannot create organizations without a license");
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
+    let org = create_organization(sandbox, &owner, "Mirror Test Org").await?;
     // Opened after the organization exists, so its key is loaded.
-    Ok(Some((
+    Ok((
         sandbox.open(&owner).await?,
         Scope::Organization(org.clone()),
         org,
-    )))
+    ))
 }
 
 fn collections_of(vault: &Vault, name: &str) -> Vec<String> {
@@ -48,14 +38,8 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
-    let Some((source, source_scope, source_org)) =
-        organization(&sandbox, &sandbox.source_url).await?
-    else {
-        return Ok(());
-    };
-    let Some((dest, dest_scope, _)) = organization(&sandbox, &sandbox.dest_url).await? else {
-        return Ok(());
-    };
+    let (source, source_scope, source_org) = organization(&sandbox, &sandbox.source_url).await?;
+    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
 
     let team_a = source
         .create_collection(&source_org, "Team A", Some("ext-a"))
@@ -219,9 +203,7 @@ async fn an_individual_vault_cannot_be_mirrored_into_an_organization() -> Result
     let source = sandbox
         .open(&sandbox.register(&sandbox.source_url).await?)
         .await?;
-    let Some((dest, dest_scope, _)) = organization(&sandbox, &sandbox.dest_url).await? else {
-        return Ok(());
-    };
+    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
     let error = run_scoped(
         &source,
         Scope::Personal,
@@ -312,5 +294,53 @@ async fn a_server_behind_a_private_certificate_authority_needs_that_authority() 
     )
     .await?;
     assert_eq!(opened.user_id, account.user_id);
+    Ok(())
+}
+
+/// Bitwarden's server leaves collections an owner is not assigned to out of
+/// the owner's syncs, so the run stops instead of treating their items as
+/// deleted.
+#[tokio::test]
+async fn collections_the_account_is_not_assigned_to_stop_the_run() -> Result<()> {
+    use vault_mirror::api::ServerUrls;
+
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let server = &sandbox.dest_url;
+    let api = ServerUrls::from_server(server)?.api;
+    let config: serde_json::Value = sandbox
+        .http
+        .get(format!("{api}/config"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    if config
+        .pointer("/server/name")
+        .and_then(|name| name.as_str())
+        == Some("Vaultwarden")
+    {
+        eprintln!("skipping: Vaultwarden shows owners every collection");
+        return Ok(());
+    }
+    let owner = sandbox.register(server).await?;
+    let org = create_organization(&sandbox, &owner, "Mirror Test Org").await?;
+    // A collection nobody is assigned to, as an administrator might add.
+    official_sql(&format!(
+        r#"INSERT INTO "Collection" ("Id", "OrganizationId", "Name", "CreationDate", "RevisionDate")
+           VALUES ('{}', '{org}', 'unassigned', now(), now());"#,
+        uuid::Uuid::new_v4()
+    ))?;
+
+    let account = sandbox.open(&owner).await?;
+    let error = account
+        .load(&Scope::Organization(org))
+        .await
+        .expect_err("an unassigned collection must stop the run");
+    assert!(
+        format!("{error:#}").contains("1 collection(s) of organization"),
+        "{error:#}"
+    );
     Ok(())
 }

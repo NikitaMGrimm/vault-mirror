@@ -132,12 +132,17 @@ pub async fn register(
 }
 
 /// Creates an organization owned by `account` and returns its id.
-pub async fn create_organization(
-    http: &reqwest::Client,
-    account: &TestAccount,
-    name: &str,
-) -> Result<String> {
-    let urls = ServerUrls::from_server(&account.server)?;
+/// The key material of a new organization, as a client generates it.
+pub struct OrganizationKeys {
+    /// The organization key, encrypted for its owner.
+    pub owner_key: String,
+    pub public_key: String,
+    pub encrypted_private_key: String,
+    /// "Default collection", encrypted with the organization key.
+    pub default_collection_name: String,
+}
+
+pub fn organization_keys(account: &TestAccount, name: &str) -> Result<OrganizationKeys> {
     let org_key = SymKey::generate();
     // The organization gets its own RSA key pair; only its shape matters to
     // the server, so one derived from a throwaway secret is enough here.
@@ -147,17 +152,32 @@ pub async fn create_organization(
         &KdfParams::Pbkdf2 { iterations: 5000 },
     )?
     .new_account_keys()?;
+    Ok(OrganizationKeys {
+        owner_key: crypto::share_key_with(&account.public_key, &org_key)?,
+        public_key: org_pair.public_key,
+        encrypted_private_key: org_key.encrypt_str("unused private key")?,
+        default_collection_name: org_key.encrypt_str("Default collection")?,
+    })
+}
+
+pub async fn create_organization(
+    http: &reqwest::Client,
+    account: &TestAccount,
+    name: &str,
+) -> Result<String> {
+    let urls = ServerUrls::from_server(&account.server)?;
+    let keys = organization_keys(account, name)?;
     let created = post(
         http.post(format!("{}/organizations", urls.api))
             .bearer_auth(&account.access_token)
             .json(&json!({
                 "name": name,
                 "billingEmail": account.email,
-                "collectionName": org_key.encrypt_str("Default collection")?,
-                "key": crypto::share_key_with(&account.public_key, &org_key)?,
+                "collectionName": keys.default_collection_name,
+                "key": keys.owner_key,
                 "keys": {
-                    "publicKey": org_pair.public_key,
-                    "encryptedPrivateKey": org_key.encrypt_str("unused private key")?,
+                    "publicKey": keys.public_key,
+                    "encryptedPrivateKey": keys.encrypted_private_key,
                 },
                 "planType": 0,
             })),
