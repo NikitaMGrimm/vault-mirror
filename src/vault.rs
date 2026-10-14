@@ -480,8 +480,6 @@ impl Account {
             .collect()
     }
 
-    /// Replaces the content of `existing`. Fails if the item changed on the
-    /// server since it was loaded.
     /// Reads one item as the server now holds it. Collections are left
     /// empty: not every server reports them here.
     pub async fn get_item(&self, scope: &Scope, id: &str) -> Result<Item> {
@@ -490,6 +488,8 @@ impl Account {
         decrypt_item(&cipher, scope_key).context("reading the item")
     }
 
+    /// Replaces the content of `existing`. Fails if the item changed on the
+    /// server since it was loaded.
     pub async fn update_item(&self, scope: &Scope, existing: &Item, draft: &Draft) -> Result<Item> {
         let scope_key = self.scope_key(scope)?;
         let item_key = self.item_key(scope, existing)?;
@@ -717,13 +717,8 @@ fn sorted(ids: &[String]) -> Vec<&String> {
     ids
 }
 
-/// Decides whether a top-level field of a server item is mirrored content.
-///
-/// Known scalar and list fields are content. So is every object, because that
-/// is where each item type keeps its data, including types that do not exist
-/// yet. Unknown scalars are left out: servers add per-account flags there.
-/// A missing list must not read as an empty vault, which would have every
-/// mirrored item deleted.
+/// A list from a sync response. A missing list must not read as an empty
+/// vault, which would have every mirrored item deleted.
 fn sync_list(sync: &Value, name: &str) -> Result<Vec<Value>> {
     sync.get(name)
         .and_then(Value::as_array)
@@ -780,6 +775,11 @@ fn check_organization_visible(
     Ok(())
 }
 
+/// Decides whether a top-level field of a server item is mirrored content.
+///
+/// Known scalar and list fields are content. So is every object, because that
+/// is where each item type keeps its data, including types that do not exist
+/// yet. Unknown scalars are left out: servers add per-account flags there.
 pub fn is_content_key(name: &str, node: &Node) -> bool {
     if META_KEYS.contains(&name) {
         return false;
