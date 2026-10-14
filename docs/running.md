@@ -58,16 +58,26 @@ already running, the new one stops straight away without changing anything.
 
 ### systemd
 
-This service and timer run vault-mirror in a container every night:
+To run vault-mirror nightly with a systemd timer instead of the daemon, run
+these commands in the directory with `vault-mirror.env`:
 
-```ini
-# /etc/systemd/system/vault-mirror.service
+```sh
+sudo install -m 600 vault-mirror.env /etc/vault-mirror.env
+sudo install -d -o 65532 -g 65532 /var/lib/vault-mirror
+
+sudo tee /etc/systemd/system/vault-mirror.service > /dev/null <<'EOF'
+[Unit]
+Description=vault-mirror run
+After=docker.service
+Requires=docker.service
+
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/docker run --rm --env-file /etc/vault-mirror.env \
-  -v /var/lib/vault-mirror:/data ghcr.io/nikitamgrimm/vault-mirror:0.2 run
+  -v /var/lib/vault-mirror:/data ghcr.io/nikitamgrimm/vault-mirror run
+EOF
 
-# /etc/systemd/system/vault-mirror.timer
+sudo tee /etc/systemd/system/vault-mirror.timer > /dev/null <<'EOF'
 [Timer]
 OnCalendar=*-*-* 03:00:00
 RandomizedDelaySec=15m
@@ -75,11 +85,16 @@ Persistent=true
 
 [Install]
 WantedBy=timers.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now vault-mirror.timer
 ```
 
-The container runs as user 65532, which needs write access to the backup
-directory:
+The container runs as user 65532, so `/var/lib/vault-mirror` belongs to that
+user. To run once now and see the result:
 
-```console
-# chown 65532:65532 /var/lib/vault-mirror
+```sh
+sudo systemctl start vault-mirror.service
+journalctl -u vault-mirror.service -n 20
 ```

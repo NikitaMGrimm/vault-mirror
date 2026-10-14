@@ -2,22 +2,22 @@
 
 [← Documentation](README.md)
 
-vault-mirror is configured entirely with environment variables. `vault-mirror
-init` writes them into a **settings file**, `vault-mirror.env`, which Docker
-Compose and the binary both read. If you'd rather write the file yourself, see
-[Setting up by hand](#setting-up-by-hand).
+vault-mirror is configured with environment variables. `vault-mirror init`
+writes them into a **settings file**, `vault-mirror.env`. To write it yourself,
+see [Setting up by hand](#setting-up-by-hand).
 
 ## The settings file
 
-Each line is `NAME=value`. Lines starting with `#` are comments, and blank lines
-are ignored. Values are taken literally, with no quotes and no `$VARIABLES`, so
-a password can contain any character that fits on one line:
+Each line is `NAME=value`. Lines starting with `#` are comments.
 
-```sh
+Values are taken literally, without quotes or `$VARIABLES`, so a password can
+contain any character:
+
+```dotenv
 SOURCE_PASSWORD=it's "quoted" and $not a variable
 ```
 
-Every tool reads it the same way:
+How each tool reads it:
 
 | Program | How to use the settings file |
 | --- | --- |
@@ -25,18 +25,18 @@ Every tool reads it the same way:
 | `docker run` | `--env-file vault-mirror.env` |
 | vault-mirror binary | `vault-mirror --env-file vault-mirror.env <command>` |
 
-A variable set in the environment takes precedence over the same name in the
-settings file.
+A variable set in the environment wins over the same name in the settings file.
 
 ### Secrets in files
 
-Instead of putting a secret in the settings file, you can put it in a file of
-its own and set `NAME_FILE` to that file's path. For example,
+To keep a secret out of the settings file, put it in a file of its own and set
+`NAME_FILE` to that file's path, for example
 `SOURCE_PASSWORD_FILE=/run/secrets/source_password`. This works with Docker
-secrets and systemd credentials. A trailing newline in the file is ignored.
+secrets and systemd credentials.
 
-Passwords and passphrases are used exactly as given, including leading and
-trailing spaces. API keys and URLs are trimmed.
+Passwords and passphrases are used exactly as given, including spaces at the
+ends. API keys and URLs are trimmed, and so is a trailing newline in a secret
+file.
 
 ## Variables
 
@@ -88,19 +88,20 @@ trailing spaces. API keys and URLs are trimmed.
 
 If you can't run `init`, for example because there's no terminal:
 
-1. Write `vault-mirror.env` with at least the required variables above,
-   `BACKUP_PASSPHRASE`, and either `SCHEDULE` or `INTERVAL` for the daemon.
-2. Create the `backups` directory next to it.
-3. Save this as `compose.yaml`, replacing `1000:1000` with the user and group id
-   that own `backups` (`id -u` and `id -g`):
+1. Write `vault-mirror.env` with the required variables above,
+   `BACKUP_PASSPHRASE`, and `SCHEDULE` or `INTERVAL`.
 
-   ```yaml
+2. In the same directory, create `backups` and `compose.yaml`. The container
+   runs as you, so it can write to `backups`.
+
+   ```sh
+   mkdir -p backups
+   cat > compose.yaml <<EOF
    services:
      vault-mirror:
-       image: ghcr.io/nikitamgrimm/vault-mirror:0.2
+       image: ghcr.io/nikitamgrimm/vault-mirror
        command: daemon
-       # The image runs unprivileged, as the owner of ./backups.
-       user: "1000:1000"
+       user: "$(id -u):$(id -g)"
        env_file:
          - path: vault-mirror.env
            format: raw
@@ -109,30 +110,31 @@ If you can't run `init`, for example because there's no terminal:
        restart: unless-stopped
        # Lets a run in progress finish when the container is stopped.
        stop_grace_period: 5m
+   EOF
    ```
 
-4. Check the logins and see what the first run would do:
+3. Check the logins and see what the first run would do. This doesn't change
+   either vault.
 
-   ```console
-   $ docker compose run --rm vault-mirror check
+   ```sh
+   docker compose run --rm vault-mirror check
    ```
 
-   `check` never changes either vault. It does create `backups` and
-   `backups/state.json`, which remembers the device id vault-mirror logs in
-   with.
+4. Start it:
 
-5. Start it with `docker compose up -d`.
+   ```sh
+   docker compose up -d
+   ```
 
 ## Organizations
 
 To mirror one organization into another, set both `SOURCE_ORGANIZATION_ID` and
-`DEST_ORGANIZATION_ID`. You'll find an organization's id in the web vault's
-address bar while you have the organization open.
+`DEST_ORGANIZATION_ID`. An organization's id is in the web vault's address bar
+while the organization is open.
 
-Bitwarden's servers only show an owner the collections they're assigned to, and
-they hide items that aren't in any collection. Hidden items would look deleted
-to vault-mirror, so it stops instead if the account can't see everything. For
-each of the two organizations:
+The account must see everything in each organization. Otherwise hidden items
+would look deleted, so vault-mirror stops. On Bitwarden's servers, that means,
+for both organizations:
 
 1. Give the account the **Owner** or **Admin** role.
 2. Assign the account to every collection, with **Can manage** permission.
@@ -143,9 +145,9 @@ organizations.
 
 ## Mirroring part of a vault
 
-To mirror only some folders, list them:
+To mirror only some folders, list them in the settings file:
 
-```sh
+```dotenv
 # Only these folders and the folders inside them…
 INCLUDE_FOLDERS=Work, Family
 # …except this one.

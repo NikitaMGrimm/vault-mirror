@@ -2,71 +2,56 @@
 
 [← Documentation](README.md)
 
-This guide takes you from nothing to a second vault that stays in sync with your
-main one, with encrypted backups of both. It takes about ten minutes. Along the
-way you'll see what vault-mirror does before it does it, so nothing about the
-first real run should surprise you.
-
-We'll call your main vault the **source** and the second vault the
-**destination**. vault-mirror reads the source and makes the destination match
-it.
+This guide sets up vault-mirror with Docker, from nothing to scheduled runs.
+Your main vault is the **source**. The second vault, which vault-mirror keeps in
+sync with it, is the **destination**.
 
 ## What you need
 
-- **Your source account.** Bitwarden's cloud (US or EU), a self-hosted Bitwarden
-  server, or Vaultwarden all work.
-- **A second, empty account for the destination.** This can be on the same
-  server or a different one. Create a new account for this. vault-mirror deletes
-  anything in the destination that didn't come from the source, so don't point it
-  at an account you already use.
-- **Docker**, or the `vault-mirror` binary from the
-  [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases). This
-  guide uses Docker for the long-running part, because then restarts and
-  scheduling are handled for you.
+- **Docker.** Without Docker, use a binary from the
+  [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases): run
+  `vault-mirror init`, then `vault-mirror --env-file vault-mirror.env daemon`.
+- **Your source account**, on Bitwarden's cloud, a self-hosted Bitwarden server,
+  or Vaultwarden.
+- **A new, empty account for the destination**, on the same server or another
+  one.
 
-> [!NOTE]
-> If the destination is a free Bitwarden cloud account, everything except
-> attachments gets copied. Bitwarden only accepts attachments from Premium
-> accounts. vault-mirror tells you how many it skipped and copies them once the
-> account has Premium.
+> [!WARNING]
+> vault-mirror deletes everything in the destination that doesn't come from the
+> source. Don't use an account that holds anything you want to keep.
 
-## Step 1: Get an API key for each account
+If the destination is a free Bitwarden cloud account, attachments aren't copied,
+because Bitwarden only accepts them from Premium accounts. Everything else is.
 
-vault-mirror logs in the way the official command-line client does: with a
-personal API key plus the master password, which it needs to decrypt the vault.
+## Step 1: Get the API keys
 
-For each of the two accounts:
+vault-mirror logs in with each account's personal API key and master password.
+For each account:
 
 1. Log in to the web vault.
 2. Open **Settings → Security → Keys**.
-3. Select **View API key** and keep the page open. You'll need the `client_id`
-   and `client_secret` in the next step.
+3. Select **View API key**, and keep the page open for the next step.
 
-## Step 2: Run `init`
+## Step 2: Run the setup
 
-Make a directory for vault-mirror's files and run the setup there:
+Create a directory for vault-mirror's files, and run `init` in it:
 
-```console
-$ mkdir vault-mirror && cd vault-mirror
-$ docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
-    ghcr.io/nikitamgrimm/vault-mirror:0.2 init
+```sh
+mkdir vault-mirror && cd vault-mirror
+docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
+  ghcr.io/nikitamgrimm/vault-mirror init
 ```
-
-If you installed the binary instead, `vault-mirror init` does the same thing.
 
 `init` asks for:
 
-1. **The source account**: which server it's on, its `client_id` and
-   `client_secret`, and its master password. It logs in right away, so a typo
-   shows up now rather than at 3 a.m.
-2. **Whether to mirror into a second account**, and the same details for the
-   destination. Answer no if you only want backups of the source.
-3. **How often to run**: every day at 03:00, every 6 hours, or every hour. You can
-   change this later.
-4. **A backup passphrase**. Let `init` generate one unless you have a reason not
-   to.
+1. The source's server, `client_id`, `client_secret` and master password. It
+   logs in right away to check them.
+2. The same for the destination. Answer no to "Mirror the source into a second
+   account?" if you only want backups.
+3. How often to run.
+4. A backup passphrase. Let `init` generate one.
 
-Then it writes two files and shows you what the first run would do:
+It then writes two files and shows what the first run would do:
 
 ```text
      Created vault-mirror.env, readable only by you
@@ -76,48 +61,35 @@ note: keep a copy of BACKUP_PASSPHRASE outside the backups and the vault; withou
     Finished check in 4.1s; neither vault was changed
 ```
 
-The "Would" line is the plan: nothing has been changed yet.
+Nothing has been changed yet. The "Would" line is the plan.
 
 > [!IMPORTANT]
-> Copy `BACKUP_PASSPHRASE` from `vault-mirror.env` into your password manager now.
-> The backups are encrypted with it, and without it they can't be read by anyone,
-> including you.
+> Copy `BACKUP_PASSPHRASE` from `vault-mirror.env` into your password manager.
+> Without it, nobody can read the backups, including you.
 
-### What did `init` write?
+The two files:
 
-`vault-mirror.env` holds every setting as `NAME=value` lines, including your
-secrets, so only your user can read it. The
-[configuration reference](configuration.md) describes every setting in it.
+- `vault-mirror.env` holds every setting, secrets included, and only you can read
+  it. [Configuration](configuration.md) describes each setting.
+- `compose.yaml` runs vault-mirror on your schedule, keeps backups in `./backups`,
+  and restarts it after a reboot.
 
-`compose.yaml` runs the container as a daemon on the schedule you picked, keeps
-backups in `./backups`, and restarts the container if it stops.
+## Step 3: Start it
 
-## Step 3: Try a dry run (optional)
-
-`init` has already shown you the plan. If you want to see the full run, backups
-included, without touching the destination, do a dry run:
-
-```console
-$ docker compose run --rm vault-mirror run --dry-run
+```sh
+docker compose up -d
 ```
 
-A dry run writes the first backups to `./backups` and prints the plan. It doesn't
-change the destination.
+With a daily schedule, the first run starts at the next 03:00. With an interval,
+it starts right away.
 
-## Step 4: Start it
+To run once now instead of waiting:
 
-```console
-$ docker compose up -d
+```sh
+docker compose run --rm vault-mirror run
 ```
 
-If you chose a daily schedule, the first run happens at the next 03:00. With an
-interval, it starts right away. You can also run it once now:
-
-```console
-$ docker compose run --rm vault-mirror run
-```
-
-A first run looks like this:
+A first run prints:
 
 ```text
   Backing up the source vault
@@ -132,62 +104,60 @@ A first run looks like this:
     Finished 152 created, 0 updated, 0 deleted, 0 unchanged in 41.3s
 ```
 
-Every run backs up both vaults first, then compares them, then makes the
-changes. Last, it reads the destination back and checks that it now matches the
-source. [How it works](how-it-works.md) goes through this in detail.
+Your items are now in the destination. Each copy has an extra hidden field,
+`__source`, which links it to its source item. Leave that field in place.
 
-Open the destination in any Bitwarden app and you'll find your items. Each copy
-has one extra hidden field, `__source`, which is how vault-mirror recognizes its
-copies on later runs. Leave it there.
+[How it works](how-it-works.md) explains each step of a run.
 
-## Step 5: Check that it keeps working
+## Step 4: Check that it keeps working
 
-The container reports itself unhealthy if the last run failed or is more than 26
-hours old:
+The container reports itself unhealthy when the last run failed or is more than
+26 hours old. To see its state:
 
-```console
-$ docker compose ps
+```sh
+docker compose ps
+```
+
+```text
 NAME                          STATUS
 vault-mirror-vault-mirror-1   Up 2 days (healthy)
 ```
 
-For details, read the logs, or `backups/last-run.json`, which records the result
-and counts of the last run:
+To see what the last runs did:
 
-```console
-$ docker compose logs --tail 20
+```sh
+docker compose logs --tail 20
 ```
 
-To get a message after each run, set `NOTIFY_FAILURE_URL` (and
-`NOTIFY_SUCCESS_URL`, if you like) in `vault-mirror.env` to an
-[ntfy](https://ntfy.sh) topic, a [healthchecks.io](https://healthchecks.io) check,
-or any other service that accepts a plain `POST`. Then restart with
-`docker compose up -d`.
+To get a message after each run, set `NOTIFY_FAILURE_URL`, and optionally
+`NOTIFY_SUCCESS_URL`, in `vault-mirror.env`. Any service that accepts a plain
+`POST` works, such as [ntfy](https://ntfy.sh) or
+[healthchecks.io](https://healthchecks.io). Then apply the change:
+
+```sh
+docker compose up -d
+```
 
 ## If a run stops
 
-vault-mirror stops before it changes anything when something looks wrong. For
-example:
+vault-mirror stops before it changes anything when the plan looks like a mistake.
+The error names the reason and, if there is one, the flag that allows the run.
 
-- **The destination already has items that vault-mirror didn't create.** You
-  probably picked an account you already use. If you really want those items
-  replaced, run once with `run --allow-initial-overwrite`.
-- **The run would delete every copy it made before.** This is what an empty or
-  wrong source looks like. If you did empty the source on purpose, run once with
-  `run --allow-mass-delete`.
-- **The source has `__source` fields.** The source and destination are probably
-  swapped in the settings.
+| Error | Likely cause | If you're sure |
+| --- | --- | --- |
+| The destination holds items that vault-mirror didn't create | You picked an account you already use. | `run --allow-initial-overwrite` |
+| The run would delete every item it mirrored before | The source looks empty or like another vault. | `run --allow-mass-delete` |
+| The source has items with a `__source` marker | The source and destination are swapped. | Fix the settings. |
 
-The error message names the flag to use. Flags apply to that one run; the next
-scheduled run is checked as usual. [Safety checks](how-it-works.md#safety-checks)
-lists them all.
+A flag applies to one run. For example:
 
-## Where to go next
+```sh
+docker compose run --rm vault-mirror run --allow-mass-delete
+```
 
-- Mirror only some folders or collections, or an organization:
-  [Configuration](configuration.md).
-- Get data back out of a backup, with or without vault-mirror:
-  [Backups and restoring](backups.md).
-- Run it with systemd instead of Docker:
-  [Commands and scheduling](running.md#scheduling).
-- What isn't copied, and why: [Limitations](limitations.md).
+## Next steps
+
+- Mirror only some folders, or an organization: [Configuration](configuration.md)
+- Get data back out of a backup: [Backups and restoring](backups.md)
+- Run it with systemd instead of Docker Compose: [Commands and scheduling](running.md#systemd)
+- What isn't copied: [Limitations](limitations.md)
