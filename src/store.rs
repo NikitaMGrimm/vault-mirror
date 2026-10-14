@@ -150,9 +150,19 @@ fn parse_identity(text: &str) -> Result<age::x25519::Identity> {
         .map_err(|error| anyhow!("invalid age secret key: {error}"))
 }
 
+/// scrypt cost for the key file: 2^16, which is 64 MiB of memory per attempt.
+/// Fixed, because the library's default calibrates to the machine it runs on,
+/// and a key written on a fast machine then fails to open on a slow or busy one.
+const KEY_WORK_FACTOR: u8 = 16;
+/// The highest cost accepted when opening a key file, as the `age` tool does.
+const KEY_MAX_WORK_FACTOR: u8 = 22;
+
 fn encrypt_with_passphrase(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
+    let mut recipient = age::scrypt::Recipient::new(SecretString::from(passphrase.to_string()));
+    recipient.set_work_factor(KEY_WORK_FACTOR);
     let encryptor =
-        age::Encryptor::with_user_passphrase(SecretString::from(passphrase.to_string()));
+        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+            .map_err(|error| anyhow!("preparing key encryption: {error}"))?;
     // Armored, so that `age -d -i key.age` accepts it as an identity file.
     let mut writer = encryptor.wrap_output(age::armor::ArmoredWriter::wrap_output(
         Vec::new(),
@@ -165,7 +175,8 @@ fn encrypt_with_passphrase(data: &[u8], passphrase: &str) -> Result<Vec<u8>> {
 fn decrypt_with_passphrase(data: &[u8], passphrase: &str) -> Result<String> {
     let decryptor = age::Decryptor::new(age::armor::ArmoredReader::new(data))
         .map_err(|error| anyhow!("not an age file: {error}"))?;
-    let identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_string()));
+    let mut identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_string()));
+    identity.set_max_work_factor(KEY_MAX_WORK_FACTOR);
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
         .map_err(|error| anyhow!("{error}"))?;

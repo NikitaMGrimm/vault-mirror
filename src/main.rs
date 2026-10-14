@@ -517,7 +517,9 @@ async fn sandbox(source: &str, dest: &str, seed: bool) -> Result<ExitCode> {
                         .await?;
                 }
                 if sample.archived {
-                    opened.set_archived(&[item.id.clone()], true).await?;
+                    opened
+                        .set_archived(std::slice::from_ref(&item.id), true)
+                        .await?;
                 }
             }
         }

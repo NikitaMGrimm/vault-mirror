@@ -38,10 +38,11 @@ fn options(attachments: bool) -> BackupOptions<'static> {
     }
 }
 
+/// Comparable content, folder name, archive state and attachment names.
+type Summary = (Option<serde_json::Value>, Option<String>, bool, Vec<String>);
+
 /// Content of every live item by name, in the form that is equal across servers.
-fn contents(
-    vault: &Vault,
-) -> HashMap<String, (Option<serde_json::Value>, Option<String>, bool, Vec<String>)> {
+fn contents(vault: &Vault) -> HashMap<String, Summary> {
     vault
         .items
         .iter()

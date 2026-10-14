@@ -117,7 +117,9 @@ pub async fn seed(account: &Account) -> Result<()> {
                 .await?;
         }
         if sample.archived {
-            account.set_archived(&[item.id.clone()], true).await?;
+            account
+                .set_archived(std::slice::from_ref(&item.id), true)
+                .await?;
         }
     }
     Ok(())
