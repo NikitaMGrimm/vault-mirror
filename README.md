@@ -57,10 +57,12 @@ cargo binstall vault-mirror                          # or: cargo install vault-m
 ```
 
 Binaries for Linux (static, x86-64 and arm64) and macOS (Apple silicon and
-Intel) are on the
-[releases page](https://github.com/NikitaMGrimm/vault-mirror/releases), with
-checksums and [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations):
+Intel) are on the [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases),
+with checksums and [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations):
 `gh attestation verify FILE --repo NikitaMGrimm/vault-mirror`.
+
+The macOS binaries are not notarized. If you download one with a browser,
+clear the quarantine flag with `xattr -d com.apple.quarantine vault-mirror`.
 
 ## Quick start
 
