@@ -16,6 +16,8 @@ use vault_mirror::{
 
 pub const PASSWORD: &str = "sandbox master password";
 
+static WARMED_UP: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
 pub struct Sandbox {
     pub http: reqwest::Client,
     pub source_url: String,
@@ -60,6 +62,16 @@ pub async fn sandbox() -> Option<Sandbox> {
             return None;
         }
     }
+    // Bitwarden's server fills some caches on first use without locking, so
+    // the first registrations and logins must not run in parallel.
+    WARMED_UP
+        .get_or_init(|| async {
+            for url in [&sandbox.source_url, &sandbox.dest_url] {
+                let account = sandbox.register(url).await.expect("warm-up registration");
+                sandbox.open(&account).await.expect("warm-up login");
+            }
+        })
+        .await;
     Some(sandbox)
 }
 

@@ -25,8 +25,10 @@ keeps encrypted, restorable backups of both.
   the Bitwarden API directly and needs neither the `bw` CLI nor Node.js.
 
 > [!IMPORTANT]
-> vault-mirror is tested end to end against Vaultwarden. Testing against
-> Bitwarden's official servers is still to come. Try a `--dry-run` first.
+> vault-mirror is tested end to end against Vaultwarden and against a
+> self-hosted copy of Bitwarden's own server, each as source and as
+> destination. It has not yet run against Bitwarden's cloud. Try a
+> `--dry-run` first.
 
 ## Contents
 
@@ -292,9 +294,14 @@ your env file.
   destination are deleted.
 - Archived items need a server that supports archiving. If the destination
   does not, items are mirrored unarchived, and the run reports a warning.
-- Tested against Vaultwarden 1.37. Bitwarden's official servers use the same
-  API, but they have not been tested yet. Neither has their attachment upload,
-  which goes through Azure storage.
+- Tested against Vaultwarden 1.37 and Bitwarden's self-hosted server 2026.9.
+  Bitwarden's cloud runs the same server code, but it has not been tested
+  yet. Neither has its attachment upload, which goes through Azure storage.
+- Organization mode is tested against Vaultwarden only. A self-hosted
+  Bitwarden server creates organizations only from a license file, which the
+  test setup does not have.
+- Attachments are held in memory while they are copied, so a large attachment
+  needs a few times its size in free memory.
 
 ## Development
 
@@ -305,13 +312,27 @@ so you can develop without a Bitwarden account:
 sandbox/up.sh                   # http://127.0.0.1:18081 and :18082, https on :18443 and :18444
 cargo test                      # unit and end-to-end tests
 cargo run -- sandbox --seed     # prints an env file for two new accounts with sample data
-docker compose -f sandbox/compose.yaml down
+docker compose -f sandbox/compose.yaml --profile official down
 ```
 
 When the sandbox is not running, the end-to-end tests are skipped. In CI they
 are required: `VAULT_MIRROR_REQUIRE_SANDBOX=1`. One test checks that a
 snapshot imports into the official Bitwarden CLI. Set `VAULT_MIRROR_BW` to a
 `bw` binary to run it.
+
+`sandbox/up.sh --official` also starts Bitwarden's own server, which needs a
+2.7 GB image. The server runs entirely locally: its installation id is made
+up, and it has no installation key, so it never contacts Bitwarden. The
+sandbox makes every account on it premium, because attachments need premium.
+Point the tests at it by URL:
+
+```sh
+VAULT_MIRROR_SANDBOX_SOURCE=http://127.0.0.1:18085 cargo test
+VAULT_MIRROR_SANDBOX_DEST=http://127.0.0.1:18085 VAULT_MIRROR_SANDBOX_DEST_TLS=https://127.0.0.1:18445 cargo test
+```
+
+`cargo test --release --test scale -- --ignored --nocapture` measures a vault
+of 2000 items. Set `VAULT_MIRROR_SCALE_ITEMS` to change the size.
 
 ## License
 

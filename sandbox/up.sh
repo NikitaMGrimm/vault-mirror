@@ -21,4 +21,33 @@ if [[ ! -f tls/cert.pem ]]; then
   chmod 644 tls/key.pem
 fi
 
-docker compose up -d --wait "$@"
+if [[ "${1:-}" != --official ]]; then
+  docker compose up -d --wait "$@"
+  exit
+fi
+shift
+docker compose --profile official up -d --wait "$@"
+
+# The admin service migrates the database before it reports that it started.
+for attempt in $(seq 180); do
+  docker compose exec -T official grep -qs "Application started" /var/log/bitwarden/admin.log && break
+  if (( attempt == 180 )); then
+    echo "the official server did not finish migrating its database" >&2
+    exit 1
+  fi
+  sleep 1
+done
+
+# Attachments need a premium account with storage, which a self-hosted server
+# grants only through a license. The sandbox makes every account premium
+# instead.
+docker compose exec -T official-db psql -U bitwarden -d vault -v ON_ERROR_STOP=1 -q <<'SQL'
+CREATE OR REPLACE FUNCTION sandbox_premium() RETURNS trigger AS $$
+BEGIN
+  NEW."Premium" := true;
+  NEW."MaxStorageGb" := 10;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+CREATE OR REPLACE TRIGGER sandbox_premium BEFORE INSERT OR UPDATE ON "User"
+  FOR EACH ROW EXECUTE FUNCTION sandbox_premium();
+SQL

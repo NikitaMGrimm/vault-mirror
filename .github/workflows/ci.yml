@@ -58,6 +58,47 @@ jobs:
       - if: failure()
         run: docker compose -f sandbox/compose.yaml logs
 
+  # The same suite against Bitwarden's own server. Its image is large, so this
+  # runs on main and on request, not for every pull request.
+  official:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    env:
+      VAULT_MIRROR_REQUIRE_SANDBOX: "1"
+      OFFICIAL: http://127.0.0.1:18085
+      OFFICIAL_TLS: https://127.0.0.1:18445
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          toolchain=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
+          rustup toolchain install "$toolchain" --profile minimal && rustup default "$toolchain"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: |
+          npm install --no-fund --no-audit --prefix "$RUNNER_TEMP/bw" "@bitwarden/cli@$BW_VERSION"
+          echo "VAULT_MIRROR_BW=$RUNNER_TEMP/bw/node_modules/.bin/bw" >> "$GITHUB_ENV"
+      - run: sandbox/up.sh --official
+      - name: Bitwarden's server as the source
+        run: VAULT_MIRROR_SANDBOX_SOURCE="$OFFICIAL" cargo test --locked --test mirror --test organization --test backup
+      - name: Bitwarden's server as the destination
+        if: ${{ !cancelled() }}
+        run: |
+          VAULT_MIRROR_SANDBOX_DEST="$OFFICIAL" VAULT_MIRROR_SANDBOX_DEST_TLS="$OFFICIAL_TLS" \
+            cargo test --locked --test mirror --test organization --test backup
+      - name: Bitwarden's server on both sides
+        if: ${{ !cancelled() }}
+        run: |
+          VAULT_MIRROR_SANDBOX_SOURCE="$OFFICIAL" VAULT_MIRROR_SANDBOX_DEST="$OFFICIAL" \
+            VAULT_MIRROR_SANDBOX_DEST_TLS="$OFFICIAL_TLS" \
+            cargo test --locked --test mirror --test organization --test backup
+      - if: failure()
+        run: docker compose -f sandbox/compose.yaml --profile official logs
+
   msrv:
     runs-on: ubuntu-24.04
     steps:

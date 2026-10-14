@@ -14,3 +14,9 @@ https://127.0.0.1:18444 {
 	tls /tls/cert.pem /tls/key.pem
 	reverse_proxy dest:80
 }
+
+# Bitwarden's own server, when the sandbox runs with `--official`.
+https://127.0.0.1:18445 {
+	tls /tls/cert.pem /tls/key.pem
+	reverse_proxy official:8080
+}

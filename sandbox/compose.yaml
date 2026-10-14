@@ -4,6 +4,8 @@
 # Start it with `sandbox/up.sh`, which first creates the test certificate the
 # TLS proxy serves. The servers answer on plain HTTP (18081, 18082) and behind
 # TLS (18443, 18444); the official Bitwarden CLI only talks to the latter.
+# `sandbox/up.sh --official` adds Bitwarden's own server on 18085 and, behind
+# TLS, 18445.
 name: vault-mirror-sandbox
 
 x-vaultwarden: &vaultwarden
@@ -51,6 +53,55 @@ services:
     ports:
       - "127.0.0.1:18443:18443"
       - "127.0.0.1:18444:18444"
+      - "127.0.0.1:18445:18445"
     depends_on:
       - source
       - dest
+
+  # Bitwarden's own server, on 18085. Opt-in because the image is large:
+  # `sandbox/up.sh --official`. It is not connected to Bitwarden: the
+  # installation id is a made-up local value and there is no installation
+  # key, so nothing is sent to Bitwarden's push relay.
+  official:
+    image: ghcr.io/bitwarden/lite:2026.9.2@sha256:f42c5a256face5c59990d515e7d672ff4f029c6d03acb8f0cb0c5839cd27fe2a
+    profiles: [official]
+    environment:
+      BW_DOMAIN: "127.0.0.1"
+      BW_DB_PROVIDER: postgresql
+      BW_DB_SERVER: official-db
+      BW_DB_DATABASE: vault
+      BW_DB_USERNAME: bitwarden
+      BW_DB_PASSWORD: sandbox
+      BW_INSTALLATION_ID: "5a4dbc0e-7d3e-4c41-9f0c-2b1d4e6a8f10"
+      BW_INSTALLATION_KEY: ""
+      BW_ENABLE_ICONS: "false"
+      BW_ENABLE_NOTIFICATIONS: "false"
+      # Attachment download links are built from this address.
+      globalSettings__baseServiceUri__vault: "http://127.0.0.1:18085"
+    tmpfs:
+      - /tmp
+      - /etc/bitwarden
+    ports:
+      - "127.0.0.1:18085:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/alive"]
+      interval: 2s
+      timeout: 3s
+      retries: 90
+    depends_on:
+      official-db:
+        condition: service_healthy
+  official-db:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    profiles: [official]
+    environment:
+      POSTGRES_USER: bitwarden
+      POSTGRES_PASSWORD: sandbox
+      POSTGRES_DB: vault
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "bitwarden", "-d", "vault"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
