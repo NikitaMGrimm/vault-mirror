@@ -6,14 +6,28 @@ Notable changes for users. The format follows
 
 ## [0.3.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.2.0...v0.3.0) - 2026-10-14
 
-### Added
+### Changed
 
-- [**breaking**] require a command and drop compatibility with the Python version ([#16](https://github.com/NikitaMGrimm/vault-mirror/pull/16))
-- end every command with one fixed-shape Finished line ([#11](https://github.com/NikitaMGrimm/vault-mirror/pull/11))
+- **Breaking:** vault-mirror needs a command. Without one it prints its
+  help instead of doing a run. Use `vault-mirror run` for one run, or
+  `daemon` to run on a schedule. Compose files written by `init` already
+  set `command: daemon`.
+- **Breaking:** compatibility with the Python version is gone.
+  `ENCRYPTION_PASSWORD` and `CRON_SCHEDULE` are no longer read; use
+  `BACKUP_PASSPHRASE` and `SCHEDULE`. Copies made by the Python version are
+  no longer recognized, so the first run stops at the safety check for a
+  destination without copies. Run it once with `--allow-initial-overwrite`
+  to replace them.
+- Every command ends with one `Finished` line in a fixed shape, so scripts
+  can match it.
+- Compose files written by `init` give a run in progress five minutes to
+  finish when the container stops.
 
 ### Fixed
 
-- don't crash when an environment variable isn't UTF-8 ([#22](https://github.com/NikitaMGrimm/vault-mirror/pull/22))
+- vault-mirror no longer crashes when any environment variable holds text
+  that isn't UTF-8.
+- `healthcheck` reads `BACKUPS_DIR` from the file given with `--env-file`.
 
 ## [0.2.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.1.0...v0.2.0) - 2026-10-14
 
