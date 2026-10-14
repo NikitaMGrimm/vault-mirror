@@ -13,6 +13,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # An empty directory the unprivileged user owns, to copy into the final image.
 RUN mkdir /data
 
+# Only the binary, for release archives: `docker build --target binary --output DIR .`
+FROM scratch AS binary
+COPY --from=build /vault-mirror /vault-mirror
+
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /vault-mirror /vault-mirror

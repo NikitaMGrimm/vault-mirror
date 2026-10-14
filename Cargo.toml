@@ -2,7 +2,7 @@
 name = "vault-mirror"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "GPL-3.0-only"
 description = "Mirror and back up a Bitwarden or Vaultwarden vault, without the Bitwarden CLI."
 repository = "https://github.com/NikitaMGrimm/vault-mirror-rs"
