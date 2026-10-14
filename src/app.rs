@@ -287,12 +287,6 @@ async fn execute(
     progress: &mut Progress,
     now: OffsetDateTime,
 ) -> Result<()> {
-    if !config.ignored.is_empty() {
-        reporter.warn(&format!(
-            "Ignoring settings that are no longer used: {}.",
-            config.ignored.join(", ")
-        ));
-    }
     let http = http_client(config)?;
     let keys = match &config.backup {
         Some(backup) => Some(Keys::open(&config.backups_dir, &backup.protection)?),

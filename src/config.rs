@@ -1,7 +1,4 @@
 //! Configuration, read from environment variables.
-//!
-//! The variable names of the original Python and shell tools still work, so an
-//! existing deployment can switch by replacing the image.
 
 use std::{collections::HashMap, fs, path::PathBuf, str::FromStr, time::Duration};
 
@@ -60,19 +57,7 @@ pub struct Config {
     pub timezone: Option<String>,
     pub notify_success_url: Option<String>,
     pub notify_failure_url: Option<String>,
-    /// Settings that were read but have no effect, for a startup notice.
-    pub ignored: Vec<&'static str>,
 }
-
-/// Variables of the earlier tools that no longer do anything.
-const LEGACY: &[&str] = &[
-    "SOURCE_ACCOUNT",
-    "DEST_ACCOUNT",
-    "PUID",
-    "PGID",
-    "TEMP_DIR",
-    "DEST_DELETE_WORKERS",
-];
 
 struct Env<'a>(&'a HashMap<String, String>);
 
@@ -199,17 +184,7 @@ impl Config {
         }
 
         let backup = if env.flag("BACKUP_ENABLED", true)? {
-            let passphrase = match (
-                env.secret("BACKUP_PASSPHRASE")?,
-                env.secret("ENCRYPTION_PASSWORD")?,
-            ) {
-                (Some(_), Some(_)) => {
-                    return Err(ConfigError(
-                        "set either BACKUP_PASSPHRASE or ENCRYPTION_PASSWORD, not both".into(),
-                    ));
-                }
-                (new, old) => new.or(old),
-            };
+            let passphrase = env.secret("BACKUP_PASSPHRASE")?;
             let recipients: Vec<String> = env
                 .get("BACKUP_RECIPIENTS")
                 .map(|list| {
@@ -292,15 +267,7 @@ impl Config {
             return Err(ConfigError("CONCURRENCY must be between 1 and 32".into()));
         }
 
-        let cron = match (env.get("SCHEDULE"), env.get("CRON_SCHEDULE")) {
-            (Some(_), Some(_)) => {
-                return Err(ConfigError(
-                    "set either SCHEDULE or CRON_SCHEDULE, not both".into(),
-                ));
-            }
-            (new, old) => new.or(old),
-        };
-        let schedule = match (cron, env.get("INTERVAL")) {
+        let schedule = match (env.get("SCHEDULE"), env.get("INTERVAL")) {
             (Some(_), Some(_)) => {
                 return Err(ConfigError(
                     "set either SCHEDULE or INTERVAL, not both".into(),
@@ -331,11 +298,6 @@ impl Config {
             timezone: env.get("TZ"),
             notify_success_url: env.token("NOTIFY_SUCCESS_URL")?,
             notify_failure_url: env.token("NOTIFY_FAILURE_URL")?,
-            ignored: LEGACY
-                .iter()
-                .copied()
-                .filter(|name| env.get(name).is_some())
-                .collect(),
         })
     }
 }
@@ -393,7 +355,7 @@ mod tests {
             ("DEST_CLIENT_ID", "user.dest"),
             ("DEST_CLIENT_SECRET", "dest-secret"),
             ("DEST_PASSWORD", "dest password"),
-            ("ENCRYPTION_PASSWORD", "backup passphrase"),
+            ("BACKUP_PASSPHRASE", "backup passphrase"),
         ]
     }
 
@@ -416,12 +378,8 @@ mod tests {
     }
 
     #[test]
-    fn the_variables_of_the_original_tool_are_enough() {
-        let config = Config::from_env(&with(&[
-            ("SOURCE_ACCOUNT", "me@example.com"),
-            ("PUID", "1000"),
-        ]))
-        .unwrap();
+    fn the_required_variables_are_enough() {
+        let config = Config::from_env(&with(&[])).unwrap();
         assert_eq!(config.source.server, "https://vault.bitwarden.com");
         assert_eq!(config.source.password, " source password ");
         assert_eq!(config.dest.as_ref().unwrap().client_id, "user.dest");
@@ -441,7 +399,6 @@ mod tests {
         assert_eq!(config.concurrency, 4);
         assert!(config.schedule.is_none());
         assert_eq!(config.backups_dir, PathBuf::from("backups"));
-        assert_eq!(config.ignored, ["SOURCE_ACCOUNT", "PUID"]);
     }
 
     #[test]
@@ -474,7 +431,7 @@ mod tests {
             error(without(&["SOURCE_CLIENT_SECRET"])),
             "SOURCE_CLIENT_SECRET is not set"
         );
-        assert!(error(env(&[("ENCRYPTION_PASSWORD", "p")])).contains("no source vault configured"));
+        assert!(error(env(&[("BACKUP_PASSPHRASE", "p")])).contains("no source vault configured"));
     }
 
     #[test]
@@ -542,7 +499,6 @@ mod tests {
             ("DEST_CLIENT_SECRET", " api secret\n"),
             ("NOTIFY_FAILURE_URL", " https://ntfy.example.com/topic "),
             ("DEST_PASSWORD", "  "),
-            ("ENCRYPTION_PASSWORD", ""),
             ("BACKUP_PASSPHRASE", " backup passphrase\t"),
         ]))
         .unwrap();
@@ -564,20 +520,19 @@ mod tests {
     #[test]
     fn backups_need_exactly_one_kind_of_key() {
         assert!(
-            error(without(&["ENCRYPTION_PASSWORD"]))
+            error(without(&["BACKUP_PASSPHRASE"]))
                 .contains("BACKUP_PASSPHRASE or BACKUP_RECIPIENTS")
         );
         assert!(error(with(&[("BACKUP_RECIPIENTS", "age1abc")])).contains("not both"));
-        assert!(error(with(&[("BACKUP_PASSPHRASE", "x")])).contains("not both"));
 
-        let mut recipients = without(&["ENCRYPTION_PASSWORD"]);
+        let mut recipients = without(&["BACKUP_PASSPHRASE"]);
         recipients.insert("BACKUP_RECIPIENTS".into(), "age1abc, age1def".into());
         let config = Config::from_env(&recipients).unwrap();
         assert!(
             matches!(config.backup.unwrap().protection, Protection::Recipients(ref r) if r == &["age1abc", "age1def"])
         );
 
-        let mut disabled = without(&["ENCRYPTION_PASSWORD"]);
+        let mut disabled = without(&["BACKUP_PASSPHRASE"]);
         disabled.insert("BACKUP_ENABLED".into(), "false".into());
         assert!(Config::from_env(&disabled).unwrap().backup.is_none());
     }
@@ -606,11 +561,8 @@ mod tests {
 
     #[test]
     fn schedules_are_a_cron_expression_or_an_interval() {
-        let cron = Config::from_env(&with(&[
-            ("CRON_SCHEDULE", "0 3 * * *"),
-            ("TZ", "Europe/Berlin"),
-        ]))
-        .unwrap();
+        let cron =
+            Config::from_env(&with(&[("SCHEDULE", "0 3 * * *"), ("TZ", "Europe/Berlin")])).unwrap();
         assert_eq!(cron.schedule, Some(Schedule::Cron("0 3 * * *".into())));
         assert_eq!(cron.timezone.as_deref(), Some("Europe/Berlin"));
         let every = Config::from_env(&with(&[("INTERVAL", "6h")])).unwrap();

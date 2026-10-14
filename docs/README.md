@@ -12,7 +12,6 @@ up a mirror from scratch and explains each step.
   to get data back out, with or without vault-mirror.
 - [Commands and scheduling](running.md): every command, output, and systemd.
 - [Limitations](limitations.md): what isn't copied, and server restrictions.
-- [Migrating from the Python version](migrating-from-python.md).
 
 Can't find something? Ask in
 [Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions).

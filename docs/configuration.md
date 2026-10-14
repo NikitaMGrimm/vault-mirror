@@ -62,7 +62,7 @@ trailing spaces. API keys and URLs are trimmed.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `BACKUP_PASSPHRASE` | | The passphrase that protects the backup key. Backups need this or `BACKUP_RECIPIENTS`. `ENCRYPTION_PASSWORD` also works, for the Python version's settings. |
+| `BACKUP_PASSPHRASE` | | The passphrase that protects the backup key. Backups need this or `BACKUP_RECIPIENTS`. |
 | `BACKUP_RECIPIENTS` | | age public keys (`age1…`), separated by commas or spaces. Backups are encrypted to these keys, so the machine running vault-mirror can't read them back. Restoring then needs `--identity`. |
 | `BACKUP_ENABLED` | `true` | Set to `false` to mirror without backups. |
 | `BACKUP_ATTACHMENTS` | `true` | Store attachment content in the backups, not only their names. |
@@ -75,7 +75,7 @@ trailing spaces. API keys and URLs are trimmed.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SCHEDULE` | | When `daemon` runs, as a cron expression such as `0 3 * * *`. `CRON_SCHEDULE` also works. |
+| `SCHEDULE` | | When `daemon` runs, as a cron expression such as `0 3 * * *`. |
 | `INTERVAL` | | Or how often `daemon` runs, such as `30m`, `6h` or `1d`. The first run starts right away. |
 | `TZ` | UTC | The time zone `SCHEDULE` is read in, such as `Europe/Berlin`. |
 | `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After each run, `POST` a one-line summary here. Works with [ntfy](https://ntfy.sh), [healthchecks.io](https://healthchecks.io), Gotify and anything else that accepts a plain-text `POST`. The summary has counts and error messages, never vault content. |
@@ -83,10 +83,6 @@ trailing spaces. API keys and URLs are trimmed.
 | `VERIFY_ATTACHMENTS` | `true` | Download every copied attachment again and compare its SHA-256 hash. |
 | `CA_CERT_FILE` | | A PEM file of extra certificate authorities to trust, for a server with a private CA. |
 | `BITWARDEN_CLIENT_VERSION` | a recent version | The client version reported to servers. Only change this if a server rejects the default. |
-
-vault-mirror ignores, with a warning, a few variables that only the Python
-version used: `SOURCE_ACCOUNT`, `DEST_ACCOUNT`, `PUID`, `PGID`, `TEMP_DIR` and
-`DEST_DELETE_WORKERS`.
 
 ## Setting up by hand
 
