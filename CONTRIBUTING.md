@@ -19,6 +19,10 @@ includes new features, new settings, behaviour changes, new dependencies, and
 refactors. Pull requests for substantial changes without prior approval are
 closed.
 
+The approval step, the one-change rule and the description check below are
+for contributions from outside. The maintainer and collaborators skip them,
+and the required CI checks still apply to everyone.
+
 The project aims to stay small. A feature that most users would not need, or
 that other tools already do well, will probably be declined. Remote storage
 for backups is an example: point rclone or restic at the backup directory.
@@ -141,7 +145,9 @@ same pull request and give the reason.
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` with the sandbox running.
 - CI skips the build and tests when a change only touches Markdown files,
-  `docs/` or `assets/`.
+  `docs/` or `assets/`. It runs the tests against Bitwarden's own server on
+  `main`, and for pull requests that change `sandbox/`. To run them for any
+  other branch, use `gh workflow run ci.yml --ref BRANCH`.
 - Update the README or `docs/` when behaviour or configuration changes.
 - The maintainer turns on auto-merge after review. A pull request merges as
   soon as the required checks pass. Fix a problem found later in a new pull
