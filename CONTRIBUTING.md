@@ -161,8 +161,10 @@ same pull request and give the reason.
 ## Releases
 
 [Release-plz](https://release-plz.dev) keeps a release pull request open
-with the next version and its changelog. The maintainer edits the changelog
-there if needed and merges it. That publishes the crate to crates.io, tags the
+with the next version and its changelog. The maintainer rewrites the
+changelog there for users, and merges it with the ruleset bypass: pull
+requests that release-plz opens don't start CI, and CI runs on `main` after
+the merge. That publishes the crate to crates.io, tags the
 version, and runs the release workflow, which builds static binaries for
 x86-64 and arm64 Linux and native binaries for both macOS architectures,
 publishes the container image, and attaches build provenance to all of them.
