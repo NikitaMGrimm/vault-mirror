@@ -8,10 +8,30 @@ Notable changes for users. The format follows
 
 ### Added
 
-- add init, which writes the settings and compose file after checking the logins ([#10](https://github.com/NikitaMGrimm/vault-mirror/pull/10))
-- show each step as an aligned verb, with progress for long steps ([#9](https://github.com/NikitaMGrimm/vault-mirror/pull/9))
-- [**breaking**] stop only when a run would delete every earlier copy ([#6](https://github.com/NikitaMGrimm/vault-mirror/pull/6))
-- *(cli)* colour warnings, errors and the run result in a terminal
+- `vault-mirror init` asks for the two accounts, checks that both logins
+  work, and writes `vault-mirror.env` and `compose.yaml`. The binary reads
+  the same file with `--env-file`.
+- At a terminal, each step is one line with an aligned, coloured verb, and
+  long steps show a progress bar. Outside a terminal, log lines start with
+  the same verb.
+- Release binaries for macOS, on Apple silicon and Intel.
+
+### Changed
+
+- **Breaking:** the default limit of deleting half the destination is gone.
+  A run now stops only when it would delete every copy it made before, which
+  is what an empty or wrong source looks like. `MAX_DELETE_PERCENT` still
+  sets a limit, but only when you set it. `--allow-mass-delete` overrides
+  both.
+- Messages use proper plurals, and several are reworded. Anything that
+  matches log lines by their text may need updating.
+
+### Fixed
+
+- The compose setup in the README could not write its backups on a fresh
+  machine, because Docker created `./backups` as root. The compose file
+  from `init` runs the container as the owner of that directory, and the
+  hand-written example shows how.
 
 ## [0.1.0] - 2026-10-14
 

@@ -52,7 +52,7 @@ What people use it for:
 ## Install
 
 ```sh
-docker pull ghcr.io/nikitamgrimm/vault-mirror:0.1   # linux/amd64, linux/arm64
+docker pull ghcr.io/nikitamgrimm/vault-mirror:0.2   # linux/amd64, linux/arm64
 cargo binstall vault-mirror                          # or: cargo install vault-mirror --locked
 ```
 
@@ -83,7 +83,7 @@ With only Docker installed, run the same command from the image:
 
 ```sh
 docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
-  ghcr.io/nikitamgrimm/vault-mirror:0.1 init
+  ghcr.io/nikitamgrimm/vault-mirror:0.2 init
 ```
 
 Then start it. It runs on the schedule you chose:

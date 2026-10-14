@@ -21,7 +21,7 @@ To set up by hand instead, write that file and a `compose.yaml` like this:
 ```yaml
 services:
   vault-mirror:
-    image: ghcr.io/nikitamgrimm/vault-mirror:0.1
+    image: ghcr.io/nikitamgrimm/vault-mirror:0.2
     command: daemon
     # The image runs unprivileged. Run it as the owner of ./backups: create
     # the directory first, and put your `id -u`:`id -g` here.
