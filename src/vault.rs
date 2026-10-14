@@ -384,6 +384,17 @@ impl Account {
                 .send_idempotent(Method::PUT, &path, Some(&body))
                 .await?;
         }
+        if existing.archived {
+            // Bitwarden's server on Postgres, MySQL or SQLite answers with the
+            // archive date it was sent but stores the item unarchived. Its
+            // archive endpoint rejects items that are still archived, so the
+            // stored state is read back first.
+            let stored = self.session.get(&path).await?;
+            if optional_str(&stored, "archivedDate").is_none() {
+                self.set_archived(std::slice::from_ref(&existing.id), true)
+                    .await?;
+            }
+        }
         let mut item = decrypt_item(&updated, scope_key).context("reading the updated item")?;
         item.collection_ids = draft.collection_ids.clone();
         Ok(item)
