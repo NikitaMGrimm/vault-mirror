@@ -4,9 +4,8 @@
 
 vault-mirror makes one vault, the **destination**, match another, the
 **source**. Each time it does this is called a **run**. A run either finishes
-the whole job or stops with an error. It never leaves the destination half
-matched without telling you, and the next run picks up where a failed one left
-off.
+the whole job or stops with an error, and the next run picks up where a failed
+one left off.
 
 ## A run, step by step
 
@@ -29,9 +28,11 @@ flowchart LR
    and runs the [safety checks](#safety-checks). If a check fails, the run stops
    here and the destination is untouched.
 4. **Change the destination.** It creates folders or collections, creates and
-   updates items, copies new or changed attachments, and finally deletes what no
-   longer belongs. Deletions come last, so a run that fails partway has removed
-   nothing.
+   updates items, copies new or changed attachments, and finally deletes the
+   items that no longer belong. Because item deletions come last, a run that
+   fails partway hasn't deleted any items. A changed attachment is the
+   exception: the old file is removed before the new one is uploaded, and the
+   backup from step 2 holds it.
 5. **Verify.** It reads the destination back and compares it with the source
    again. If anything still differs, the run fails. Attachments are checked as
    they're copied: each one is downloaded again and its SHA-256 hash compared.
@@ -75,6 +76,9 @@ run stops with an error and the destination is left exactly as it was.
 | The destination has items, and none of them are copies. | `DEST_*` probably points at an account you already use. The first run would delete its items. | `run --allow-initial-overwrite` |
 | The run would delete every copy it made before. | That's what an empty or wrong source looks like: a server error, the wrong account, or a filter that matches nothing. | `run --allow-mass-delete` |
 | The run would delete more than `MAX_DELETE_PERCENT` of the destination (only if you set it, above 10 deletions, once the destination has copies). | You asked for a limit. | `run --allow-mass-delete` |
+
+Duplicate copies of one source item are always removed, and don't count towards
+`MAX_DELETE_PERCENT` or its 10-deletion threshold.
 
 The `--allow` flags apply to one run. Scheduled runs after it are checked as
 usual. With Docker Compose, run one with:

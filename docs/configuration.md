@@ -92,8 +92,8 @@ version used: `SOURCE_ACCOUNT`, `DEST_ACCOUNT`, `PUID`, `PGID`, `TEMP_DIR` and
 
 If you can't run `init`, for example because there's no terminal:
 
-1. Write `vault-mirror.env` with at least the required variables above and
-   `BACKUP_PASSPHRASE`.
+1. Write `vault-mirror.env` with at least the required variables above,
+   `BACKUP_PASSPHRASE`, and either `SCHEDULE` or `INTERVAL` for the daemon.
 2. Create the `backups` directory next to it.
 3. Save this as `compose.yaml`, replacing `1000:1000` with the user and group id
    that own `backups` (`id -u` and `id -g`):

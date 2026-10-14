@@ -48,12 +48,13 @@ keys, so the machine making the backups can't read them back.
 
 ## What leaves the machine
 
-vault-mirror connects only to your two servers and, if you configure them, your
-notification URLs.
+vault-mirror connects only to your two servers, the attachment storage they
+point it to, and, if you configure them, your notification URLs.
 
 | Destination | What is sent |
 | --- | --- |
 | The source and destination servers | API requests and attachment transfers. |
+| Attachment storage named by those servers, such as the Azure storage that Bitwarden's cloud uses | Encrypted attachment files. |
 | `NOTIFY_SUCCESS_URL` and `NOTIFY_FAILURE_URL`, if set | A one-line summary of the run, with counts and error messages. No vault content. |
 
 Error messages and logs never include request URLs, because attachment download

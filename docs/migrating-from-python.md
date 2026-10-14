@@ -3,7 +3,9 @@
 [← Documentation](README.md)
 
 vault-mirror started as a Python tool. This version reads the same environment
-variables, so you can keep your settings file and swap the image.
+variables, so you can keep your settings file and swap the image. The new image
+needs a command, though: give it `daemon` to run on `SCHEDULE` or `INTERVAL`
+(in Compose, `command: daemon`), or `run` if something else schedules it.
 
 ## What happens on the first run
 

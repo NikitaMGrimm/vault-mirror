@@ -44,8 +44,9 @@ vault, it keeps encrypted backups of one vault on a schedule.
   and when a run would delete every copy at once. After each run it reads the
   destination back to check the result.
 - **Small.** One static binary or a small container image. It talks to the
-  Bitwarden API directly, without the `bw` CLI or Node.js, and contacts nothing
-  but your two servers and, if you set one, a notification URL.
+  Bitwarden API directly, without the `bw` CLI or Node.js, and contacts only
+  your two servers (and the attachment storage they use) and, if you set one,
+  a notification URL.
 
 It copies every item type, custom field, passkey, password history, folder,
 collection and attachment, within [what the servers allow](docs/limitations.md).
