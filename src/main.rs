@@ -132,6 +132,14 @@ struct Console;
 
 impl Console {
     fn line(level: &str, message: &str) {
+        // People at a terminal know the time; logs need it.
+        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            match level {
+                "INFO" => println!("{message}"),
+                _ => println!("{}: {message}", level.to_lowercase()),
+            }
+            return;
+        }
         let now = OffsetDateTime::now_utc();
         println!(
             "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z {level} {message}",
@@ -346,7 +354,17 @@ fn snapshots(vault: Role) -> Result<ExitCode> {
 
 fn locate_snapshot(store: &Store<'_>, role: Role, snapshot: &str) -> Result<PathBuf> {
     if snapshot != "latest" {
-        return Ok(PathBuf::from(snapshot));
+        let path = PathBuf::from(snapshot);
+        if path.exists() {
+            return Ok(path);
+        }
+        // A file name as `snapshots` lists it.
+        return store
+            .list()?
+            .into_iter()
+            .find(|entry| entry.path.file_name() == Some(std::ffi::OsStr::new(snapshot)))
+            .map(|entry| entry.path)
+            .ok_or_else(|| anyhow!("no snapshot {snapshot} of the {} vault", role.name()));
     }
     store
         .list()?
@@ -525,7 +543,6 @@ async fn sandbox(source: &str, dest: &str, seed: bool) -> Result<ExitCode> {
             }
         }
         lines.push(format!("{prefix}_SERVER={server}"));
-        lines.push(format!("{prefix}_ACCOUNT={email}"));
         lines.push(format!("{prefix}_PASSWORD={password}"));
         lines.push(format!(
             "{prefix}_CLIENT_ID={}",
@@ -536,7 +553,7 @@ async fn sandbox(source: &str, dest: &str, seed: bool) -> Result<ExitCode> {
             account.credentials.client_secret
         ));
     }
-    lines.push("ENCRYPTION_PASSWORD=sandbox-backup-passphrase".to_string());
+    lines.push("BACKUP_PASSPHRASE=sandbox-backup-passphrase".to_string());
     println!("{}", lines.join("\n"));
     Ok(ExitCode::SUCCESS)
 }

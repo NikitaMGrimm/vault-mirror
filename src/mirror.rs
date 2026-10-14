@@ -332,22 +332,13 @@ impl Run<'_> {
         let summary = plan.summary(&source_vault);
         self.summary = Some(summary);
         self.reporter.info(&format!(
-            "{}: items create {} update {} delete {} unchanged {}; folders create {} delete {}; \
-             collections create {} delete {}; attachments copy {}",
+            "{}: {}",
             if self.options.dry_run {
                 "Dry-run plan"
             } else {
                 "Plan"
             },
-            summary.items_created,
-            summary.items_updated,
-            summary.items_deleted,
-            summary.items_unchanged,
-            summary.folders_created,
-            summary.folders_deleted,
-            summary.collections_created,
-            summary.collections_deleted,
-            summary.attachments_copied,
+            describe_plan(&summary)
         ));
         plan::check_safety(&plan, &self.options.safety)?;
         if self.options.dry_run || !plan.has_changes() {
@@ -720,6 +711,31 @@ fn collection_names(vault: &Vault, item: &Item, mode: Mode) -> Vec<String> {
     names
 }
 
+/// The plan's changes in a few words, leaving out what does not happen.
+fn describe_plan(summary: &Summary) -> String {
+    let changes: Vec<String> = [
+        (summary.items_created, "create", "item"),
+        (summary.items_updated, "update", "item"),
+        (summary.items_deleted, "delete", "item"),
+        (summary.folders_created, "create", "folder"),
+        (summary.folders_deleted, "delete", "folder"),
+        (summary.collections_created, "create", "collection"),
+        (summary.collections_deleted, "delete", "collection"),
+        (summary.attachments_copied, "copy", "attachment"),
+    ]
+    .into_iter()
+    .filter(|(count, ..)| *count > 0)
+    .map(|(count, verb, noun)| {
+        format!("{verb} {count} {noun}{}", if count == 1 { "" } else { "s" })
+    })
+    .collect();
+    let unchanged = format!("{} item(s) unchanged", summary.items_unchanged);
+    match changes.is_empty() {
+        true => format!("nothing to change, {unchanged}"),
+        false => format!("{}; {unchanged}", changes.join(", ")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,6 +767,28 @@ mod tests {
 
     fn ids(vault: &Vault) -> Vec<&str> {
         vault.items.iter().map(|i| i.id.as_str()).collect()
+    }
+
+    #[test]
+    fn plans_are_described_by_what_changes() {
+        let summary = Summary {
+            items_created: 9,
+            items_unchanged: 1,
+            folders_created: 1,
+            attachments_copied: 4,
+            ..Summary::default()
+        };
+        assert_eq!(
+            describe_plan(&summary),
+            "create 9 items, create 1 folder, copy 4 attachments; 1 item(s) unchanged"
+        );
+        assert_eq!(
+            describe_plan(&Summary {
+                items_unchanged: 9,
+                ..Summary::default()
+            }),
+            "nothing to change, 9 item(s) unchanged"
+        );
     }
 
     #[test]

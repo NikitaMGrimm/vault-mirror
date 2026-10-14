@@ -359,7 +359,7 @@ pub fn describe(status: &Status) -> String {
     )];
     if let Some(mirror) = &status.mirror {
         parts.push(format!(
-            "items +{} ~{} -{} ={}",
+            "{} items created, {} updated, {} deleted, {} unchanged",
             mirror.items_created,
             mirror.items_updated,
             mirror.items_deleted,
@@ -505,7 +505,7 @@ mod tests {
     fn descriptions_are_one_line_summaries() {
         assert_eq!(
             describe(&success()),
-            "vault-mirror succeeded; items +2 ~0 -0 =40"
+            "vault-mirror succeeded; 2 items created, 0 updated, 0 deleted, 40 unchanged"
         );
         let failed = Status {
             status: "failed".into(),
