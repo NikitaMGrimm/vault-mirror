@@ -1,26 +1,23 @@
 use std::{
     collections::HashMap,
     fs,
-    io::IsTerminal,
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::{
-        OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
+mod console;
 mod wizard;
 
-use anstyle::{AnsiColor, Style};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use console::{Console, ERROR};
 use time::OffsetDateTime;
 use vault_mirror::{
     app::{self, RunFlags},
     config::{Config, VaultConfig},
-    mirror::{Endpoint, MirrorOptions, Reporter, mirror},
+    mirror::{Endpoint, MirrorOptions, mirror},
     restore::{RestoreOptions, restore},
     schedule::Timetable,
     snapshot,
@@ -31,7 +28,7 @@ use vault_mirror::{
 /// Mirror and back up a Bitwarden or Vaultwarden vault.
 ///
 /// Configuration comes from environment variables or --env-file; `init`
-/// writes one. Without a subcommand, one run is performed.
+/// writes one.
 #[derive(Parser)]
 #[command(name = "vault-mirror", version, max_term_width = 100)]
 struct Cli {
@@ -40,12 +37,10 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     env_file: Option<PathBuf>,
     #[command(subcommand)]
-    command: Option<Command>,
-    #[command(flatten)]
-    run: RunArgs,
+    command: Command,
 }
 
-#[derive(Args, Clone, Copy, Default)]
+#[derive(Args, Clone, Copy)]
 struct RunArgs {
     /// Back up and report what would change, without changing the destination.
     #[arg(long)]
@@ -70,12 +65,12 @@ enum Command {
     Run(RunArgs),
     /// Keep running on SCHEDULE or every INTERVAL.
     Daemon,
-    /// Log in to the configured vaults and report what a run would do. Writes nothing.
+    /// Log in to the configured vaults and report what a run would do, without changing them.
     Check,
     /// List the snapshots in the backup directory.
     Snapshots {
         /// Whose backups to list.
-        #[arg(long, alias = "vault", value_enum, default_value_t = Role::Source)]
+        #[arg(long, value_enum, default_value_t = Role::Source)]
         from: Role,
     },
     /// Write a snapshot into a vault.
@@ -147,114 +142,6 @@ impl Role {
     }
 }
 
-/// Writes progress for people at a terminal, in the style of Cargo: a
-/// right-aligned verb, then the rest of the sentence. Elsewhere, such as in
-/// container logs, each line is a timestamped log line instead.
-struct Console;
-
-const VERB: Style = AnsiColor::Green.on_default().bold();
-const PROGRESS: Style = AnsiColor::Cyan.on_default().bold();
-const WARNING: Style = AnsiColor::Yellow.on_default().bold();
-const ERROR: Style = AnsiColor::Red.on_default().bold();
-const NOTE: Style = AnsiColor::Cyan.on_default().bold();
-
-/// Whether a progress bar occupies the terminal's last line.
-static PROGRESS_SHOWN: AtomicBool = AtomicBool::new(false);
-
-impl Console {
-    fn terminal() -> bool {
-        std::io::stdout().is_terminal()
-    }
-
-    /// Removes the progress bar so that a line can take its place.
-    fn clear_progress() {
-        if PROGRESS_SHOWN.swap(false, Ordering::Relaxed) {
-            // Written directly: anstream would strip the control sequence
-            // along with colours when NO_COLOR is set.
-            eprint!("\r\x1b[K");
-        }
-    }
-
-    fn status(verb: &str, detail: &str) {
-        if !Self::terminal() {
-            return Self::log("INFO", &format!("{verb} {detail}"));
-        }
-        Self::clear_progress();
-        anstream::println!("{VERB}{verb:>12}{VERB:#} {detail}");
-    }
-
-    fn warning(message: &str) {
-        if !Self::terminal() {
-            return Self::log("WARN", message);
-        }
-        Self::clear_progress();
-        anstream::println!("{WARNING}warning:{WARNING:#} {message}");
-    }
-
-    /// The last line of a command. Its verb turns yellow when the command
-    /// printed warnings, which are on the lines above.
-    fn finished(detail: &str, warned: bool) {
-        if !Self::terminal() {
-            return Self::log("INFO", &format!("Finished {detail}"));
-        }
-        Self::clear_progress();
-        let style = if warned { WARNING } else { VERB };
-        anstream::println!("{style}{:>12}{style:#} {detail}", "Finished");
-    }
-
-    fn note(message: &str) {
-        if !Self::terminal() {
-            return Self::log("INFO", message);
-        }
-        Self::clear_progress();
-        anstream::println!("{NOTE}note:{NOTE:#} {message}");
-    }
-
-    fn error(message: &str) {
-        if !Self::terminal() {
-            return Self::log("ERROR", message);
-        }
-        Self::clear_progress();
-        anstream::println!("{ERROR}error:{ERROR:#} {message}");
-    }
-
-    fn log(level: &str, message: &str) {
-        let now = OffsetDateTime::now_utc();
-        println!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z {level} {message}",
-            now.year(),
-            u8::from(now.month()),
-            now.day(),
-            now.hour(),
-            now.minute(),
-            now.second()
-        );
-    }
-}
-
-impl Reporter for Console {
-    fn status(&self, verb: &str, detail: &str) {
-        Self::status(verb, detail);
-    }
-    fn warn(&self, message: &str) {
-        Self::warning(message);
-    }
-    fn progress(&self, verb: &str, done: usize, total: usize, unit: &str) {
-        const WIDTH: usize = 25;
-        if !Self::terminal() || !std::io::stderr().is_terminal() {
-            return;
-        }
-        if done >= total {
-            return Self::clear_progress();
-        }
-        let filled = WIDTH * done / total;
-        let bar = format!("{}>{}", "=".repeat(filled), " ".repeat(WIDTH - filled - 1));
-        eprint!("\r\x1b[K");
-        anstream::eprint!("{PROGRESS}{verb:>12}{PROGRESS:#} [{bar}] {done}/{total} {unit}");
-        PROGRESS_SHOWN.store(true, Ordering::Relaxed);
-    }
-}
-
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -277,28 +164,18 @@ fn main() -> ExitCode {
     }
 }
 
-/// Run options belong after `run`, or stand alone without a subcommand.
-/// Before a subcommand they would be ignored, so they are rejected. Clap's
-/// own rule for this would also reject `--env-file` there.
-fn check_placement(cli: &Cli) -> Result<()> {
-    let RunArgs {
-        dry_run,
-        allow_initial_overwrite,
-        allow_mass_delete,
-    } = cli.run;
-    if (dry_run || allow_initial_overwrite || allow_mass_delete) && cli.command.is_some() {
-        bail!("--dry-run and the --allow options belong after `run`");
-    }
-    Ok(())
-}
-
 /// Settings read with `--env-file`.
 static ENV_FILE: OnceLock<HashMap<String, String>> = OnceLock::new();
 
-fn config() -> Result<Config> {
+/// The environment, over the settings read with `--env-file`.
+fn settings() -> HashMap<String, String> {
     let mut env = ENV_FILE.get().cloned().unwrap_or_default();
     env.extend(std::env::vars());
-    Config::from_env(&env).map_err(|error| anyhow!("configuration: {error}"))
+    env
+}
+
+fn config() -> Result<Config> {
+    Config::from_env(&settings()).map_err(|error| anyhow!("configuration: {error}"))
 }
 
 /// Reads `NAME=value` lines literally, as Docker Compose's `format: raw`
@@ -319,7 +196,6 @@ fn parse_env_file(text: &str) -> Result<HashMap<String, String>> {
 }
 
 async fn dispatch(cli: Cli) -> Result<ExitCode> {
-    check_placement(&cli)?;
     if let Some(path) = &cli.env_file {
         let text =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -328,16 +204,15 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         ENV_FILE.get_or_init(|| settings);
     }
     match cli.command {
-        Some(Command::Init { dir }) => wizard::init(&dir).await,
-        None => run(cli.run).await,
-        Some(Command::Run(args)) => run(args).await,
-        Some(Command::Daemon) => daemon().await,
-        Some(Command::Check) => check().await,
-        Some(Command::Snapshots { from }) => snapshots(from),
-        Some(Command::Restore(args)) => restore_command(args).await,
-        Some(Command::Export { snapshot, output }) => export(snapshot, &output),
-        Some(Command::Healthcheck { max_age_hours }) => healthcheck(max_age_hours),
-        Some(Command::Sandbox { source, dest, seed }) => sandbox(&source, &dest, seed).await,
+        Command::Init { dir } => wizard::init(&dir).await,
+        Command::Run(args) => run(args).await,
+        Command::Daemon => daemon().await,
+        Command::Check => check().await,
+        Command::Snapshots { from } => snapshots(from),
+        Command::Restore(args) => restore_command(args).await,
+        Command::Export { snapshot, output } => export(snapshot, &output),
+        Command::Healthcheck { max_age_hours } => healthcheck(max_age_hours),
+        Command::Sandbox { source, dest, seed } => sandbox(&source, &dest, seed).await,
     }
 }
 
@@ -504,7 +379,7 @@ async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
 
 fn checked(started: Instant) -> String {
     format!(
-        "check in {:.1}s; nothing was written",
+        "check in {:.1}s; neither vault was changed",
         started.elapsed().as_secs_f64()
     )
 }
@@ -774,25 +649,4 @@ async fn sandbox(source: &str, dest: &str, seed: bool) -> Result<ExitCode> {
     lines.push("BACKUP_PASSPHRASE=sandbox-backup-passphrase".to_string());
     println!("{}", lines.join("\n"));
     Ok(ExitCode::SUCCESS)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn run_options_before_a_subcommand_are_rejected() {
-        let parse = |args: &[&str]| {
-            let cli = Cli::try_parse_from([&["vault-mirror"], args].concat())?;
-            check_placement(&cli)?;
-            anyhow::Ok(cli)
-        };
-        assert!(parse(&["--dry-run", "run"]).is_err());
-        assert!(parse(&["--allow-mass-delete", "daemon"]).is_err());
-        assert!(parse(&["run", "--dry-run"]).unwrap().command.is_some());
-        assert!(parse(&["--dry-run"]).unwrap().run.dry_run);
-        let file = parse(&["--env-file", "x.env", "check"]).unwrap();
-        assert_eq!(file.env_file, Some(PathBuf::from("x.env")));
-        assert!(parse(&["check", "--env-file", "x.env"]).is_ok());
-    }
 }
