@@ -147,7 +147,7 @@ which suits Docker and systemd credentials.
 | `SOURCE_SERVER` | required | Server URL. `https://vault.bitwarden.com` and `https://vault.bitwarden.eu` select Bitwarden's cloud. |
 | `SOURCE_CLIENT_ID`, `SOURCE_CLIENT_SECRET` | required | Personal API key. |
 | `SOURCE_PASSWORD` | required | Master password. |
-| `SOURCE_ORGANIZATION_ID` | — | Mirror this organization's vault instead of the personal vault. The account must be assigned to every collection: Bitwarden's servers hide collections an owner is not assigned to, so the run stops if there are any. |
+| `SOURCE_ORGANIZATION_ID` | — | Mirror this organization's vault instead of the personal vault. The account must be assigned to every collection, with Can manage permission, and every item must be in a collection: Bitwarden's servers hide other collections and items from owners, so the run stops if there are any. |
 | `DEST_SERVER`, `DEST_CLIENT_ID`, `DEST_CLIENT_SECRET`, `DEST_PASSWORD`, `DEST_ORGANIZATION_ID` | — | The destination, in the same form as the source. Without a destination, runs only back up the source. Organizations are mirrored to organizations: set both organization ids or neither. |
 | `BACKUP_PASSPHRASE` | — | Passphrase that protects the backup key. Either this or `BACKUP_RECIPIENTS` is required while backups are on. `ENCRYPTION_PASSWORD` is accepted as an older name. |
 | `BACKUP_RECIPIENTS` | — | age public keys (`age1…`), separated by commas or spaces, to encrypt backups to instead. Restoring then needs `--identity`. |
@@ -307,6 +307,9 @@ your env file.
   Microsoft's Azurite emulator.
 - In organization mode, favorites and folders are not mirrored: Bitwarden
   keeps them per member.
+- Bitwarden's servers require every organization item to be in a collection.
+  Source items in no collection are left out of such a destination, with a
+  warning.
 - Attachments are held in memory while they are copied, so a large attachment
   needs a few times its size in free memory.
 

@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     plan::{self, Mode, Plan, Safety, Summary, comparable, differing_paths, marker_of},
-    vault::{Account, Item, Scope, Vault},
+    vault::{Account, Item, Scope, ServerTraits, Vault},
 };
 
 /// Receives progress lines. Messages never contain vault content, only
@@ -126,6 +126,21 @@ impl Run<'_> {
         }
     }
 
+    /// Removes source items the destination could not hold, with a warning.
+    fn leave_out(&mut self, source: &mut Vault, unfit: impl Fn(&Item) -> bool, reason: &str) {
+        let count = source
+            .items
+            .iter()
+            .filter(|item| !item.in_trash && unfit(item))
+            .count();
+        source.items.retain(|item| !unfit(item));
+        if count > 0 {
+            self.warn(format!(
+                "{count} item(s) are left out of the mirror because {reason}."
+            ));
+        }
+    }
+
     fn warn(&mut self, message: String) {
         self.reporter.warn(&message);
         self.warnings.push(message);
@@ -158,27 +173,32 @@ impl Run<'_> {
         )?;
 
         let mut source_vault = source_vault;
-        let hidden = match self.dest.account.hidden_item_types().await {
-            Ok(types) => types,
+        let traits = match self.dest.account.server_traits().await {
+            Ok(traits) => traits,
             Err(error) => {
                 self.warn(format!(
-                    "Could not read the destination's settings, so every item type is mirrored: {error:#}"
+                    "Could not read the destination's settings, so every item is mirrored: {error:#}"
                 ));
-                Vec::new()
+                ServerTraits {
+                    hidden_item_types: Vec::new(),
+                    items_need_collections: false,
+                }
             }
         };
-        let is_hidden = |item: &Item| item.item_type().is_some_and(|kind| hidden.contains(&kind));
-        let left_out = source_vault
-            .items
-            .iter()
-            .filter(|item| !item.in_trash && is_hidden(item))
-            .count();
-        source_vault.items.retain(|item| !is_hidden(item));
-        if left_out > 0 {
-            self.warn(format!(
-                "The destination server does not show bank accounts, driver's licences or passports yet, \
-                 so {left_out} item(s) of these types are left out of the mirror."
-            ));
+        self.leave_out(
+            &mut source_vault,
+            |item| {
+                item.item_type()
+                    .is_some_and(|kind| traits.hidden_item_types.contains(&kind))
+            },
+            "the destination server does not show bank accounts, driver's licences or passports yet",
+        );
+        if mode == Mode::Organization && traits.items_need_collections {
+            self.leave_out(
+                &mut source_vault,
+                |item| item.collection_ids.is_empty(),
+                "they are in no collection, which the destination server requires",
+            );
         }
 
         self.stage = "planning";

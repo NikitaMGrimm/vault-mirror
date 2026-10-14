@@ -339,8 +339,86 @@ async fn collections_the_account_is_not_assigned_to_stop_the_run() -> Result<()>
         .await
         .expect_err("an unassigned collection must stop the run");
     assert!(
-        format!("{error:#}").contains("1 collection(s) of organization"),
+        format!("{error:#}").contains("1 collection(s) and 0 item(s)"),
         "{error:#}"
+    );
+    Ok(())
+}
+
+/// An organization item can be in no collection. Bitwarden's server hides
+/// such items from their owner and refuses to create them, so neither side
+/// may lose one silently.
+#[tokio::test]
+async fn items_in_no_collection_are_never_lost_silently() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, source_scope, _) = organization(&sandbox, &sandbox.source_url).await?;
+    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
+    let note = |collection_ids: Vec<String>| Draft {
+        content: [
+            ("type".to_string(), Node::Number(2.into())),
+            ("name".to_string(), Node::secret("Loose note")),
+            (
+                "secureNote".to_string(),
+                Node::Map([("type".to_string(), Node::Number(0.into()))].into()),
+            ),
+        ]
+        .into(),
+        folder_id: None,
+        collection_ids,
+    };
+
+    if source.server_traits().await?.items_need_collections {
+        // Created in a collection, then taken out of it, as the web vault
+        // allows an administrator to do.
+        let collection = source.load(&source_scope).await?.collections[0].id.clone();
+        let item = source
+            .create_item(&source_scope, &note(vec![collection]))
+            .await?;
+        official_sql(&format!(
+            r#"DELETE FROM "CollectionCipher" WHERE "CipherId" = '{}';"#,
+            item.id
+        ))?;
+        let error = source
+            .load(&source_scope)
+            .await
+            .expect_err("an item hidden from the owner must stop the run");
+        assert!(
+            format!("{error:#}").contains("0 collection(s) and 1 item(s)"),
+            "{error:#}"
+        );
+        return Ok(());
+    }
+
+    source.create_item(&source_scope, &note(vec![])).await?;
+    let options = MirrorOptions::default();
+    let first = run_scoped(
+        &source,
+        source_scope.clone(),
+        &dest,
+        dest_scope.clone(),
+        &options,
+    )
+    .await?;
+    if dest.server_traits().await?.items_need_collections {
+        assert_eq!(first.summary.items_created, 0);
+        assert!(
+            first
+                .warnings
+                .iter()
+                .any(|w| w.contains("in no collection")),
+            "{:?}",
+            first.warnings
+        );
+    } else {
+        assert_eq!(first.summary.items_created, 1);
+        assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    }
+    assert!(
+        !run_scoped(&source, source_scope, &dest, dest_scope, &options)
+            .await?
+            .changed
     );
     Ok(())
 }

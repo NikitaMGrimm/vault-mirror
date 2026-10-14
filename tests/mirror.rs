@@ -472,7 +472,7 @@ async fn newer_item_types_are_mirrored() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    if !source.hidden_item_types().await?.is_empty() {
+    if !source.server_traits().await?.hidden_item_types.is_empty() {
         eprintln!("skipping: the source server does not show these item types");
         return Ok(());
     }
@@ -555,7 +555,7 @@ async fn newer_item_types_are_mirrored() -> Result<()> {
     }
 
     let first = run(&source, &dest, &options()).await?;
-    if dest.hidden_item_types().await?.is_empty() {
+    if dest.server_traits().await?.hidden_item_types.is_empty() {
         assert_eq!(first.summary.items_created, items.len());
         let mirrored = dest.load(&PERSONAL).await?;
         for (_, name, key, block) in &items {

@@ -274,7 +274,7 @@ impl Account {
                 }
             }
             Scope::Organization(org) => {
-                self.check_collections_visible(org, &list("collections"))
+                self.check_organization_visible(org, &list("collections"), &list("ciphers"))
                     .await?;
                 for collection in list("collections") {
                     if collection.get("organizationId").and_then(Value::as_str) != Some(org) {
@@ -475,45 +475,56 @@ impl Account {
         Ok(())
     }
 
-    /// Fails when the organization has collections this account is not
-    /// assigned to. Bitwarden's server leaves those, and their items, out of
-    /// the account's syncs, so they would look deleted or missing.
-    async fn check_collections_visible(&self, org: &str, synced: &[Value]) -> Result<()> {
-        // Members who may not list every collection get an error here; the
-        // check is then skipped.
-        let Ok(all) = self
-            .session
-            .get(&format!("/organizations/{org}/collections"))
-            .await
-        else {
+    /// Fails when the organization holds collections or items this account
+    /// cannot see. Bitwarden's server shows an owner only the collections the
+    /// owner is assigned to, and no item that is in no collection. Hidden
+    /// items would look deleted, and their copies would be deleted.
+    async fn check_organization_visible(
+        &self,
+        org: &str,
+        synced_collections: &[Value],
+        synced_items: &[Value],
+    ) -> Result<()> {
+        // Members who may not list everything get errors here; the check is
+        // then skipped.
+        let collections_path = format!("/organizations/{org}/collections");
+        let items_path = format!("/ciphers/organization-details?organizationId={org}");
+        let (Ok(collections), Ok(items)) = tokio::join!(
+            self.session.get(&collections_path),
+            self.session.get(&items_path),
+        ) else {
             return Ok(());
         };
-        let visible: HashSet<&str> = synced
-            .iter()
-            .filter_map(|collection| collection.get("id").and_then(Value::as_str))
-            .collect();
-        let hidden = all
-            .get("data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|collection| collection.get("id").and_then(Value::as_str))
-            .filter(|id| !visible.contains(id))
-            .count();
-        if hidden > 0 {
+        let hidden = |all: &Value, synced: &[Value]| {
+            let visible: HashSet<&str> = synced
+                .iter()
+                .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+                .collect();
+            all.get("data")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+                .filter(|id| !visible.contains(id))
+                .count()
+        };
+        let (collections, items) = (
+            hidden(&collections, synced_collections),
+            hidden(&items, synced_items),
+        );
+        if collections + items > 0 {
             bail!(
-                "{hidden} collection(s) of organization {org} are not assigned to this account, \
-                 so their items cannot be read or written; assign the account to every collection \
-                 with Can manage permission"
+                "organization {org} holds {collections} collection(s) and {items} item(s) this \
+                 account cannot see; assign the account to every collection with Can manage \
+                 permission, and put every item in a collection"
             );
         }
         Ok(())
     }
 
-    /// Item types the server accepts but leaves out of syncs, so copies of
-    /// such items would never be seen and would be created again every run.
-    pub async fn hidden_item_types(&self) -> Result<Vec<u64>> {
-        Ok(hidden_item_types(&self.session.get("/config").await?))
+    /// What the server accepts and shows, as far as mirroring depends on it.
+    pub async fn server_traits(&self) -> Result<ServerTraits> {
+        Ok(server_traits(&self.session.get("/config").await?))
     }
 
     pub async fn set_archived(&self, ids: &[String], archived: bool) -> Result<()> {
@@ -734,18 +745,29 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
     })
 }
 
-/// Bitwarden's own server shows bank accounts, driver's licences and passports
-/// only where a feature flag is on. Vaultwarden always shows them.
-fn hidden_item_types(config: &Value) -> Vec<u64> {
+pub struct ServerTraits {
+    /// Item types the server accepts but leaves out of syncs. Copies of such
+    /// items would never be seen and would be created again every run.
+    pub hidden_item_types: Vec<u64>,
+    /// Whether an organization item must be in at least one collection.
+    pub items_need_collections: bool,
+}
+
+fn server_traits(config: &Value) -> ServerTraits {
     let vaultwarden = config.pointer("/server/name").and_then(Value::as_str) == Some("Vaultwarden");
-    let enabled = config
+    // Bitwarden's own server shows bank accounts, driver's licences and
+    // passports only where a feature flag is on. Vaultwarden always does.
+    let flagged_types_shown = config
         .pointer("/featureStates/pm-32009-new-item-types")
         .and_then(Value::as_bool)
         == Some(true);
-    if vaultwarden || enabled {
-        Vec::new()
-    } else {
-        FLAGGED_ITEM_TYPES.to_vec()
+    ServerTraits {
+        hidden_item_types: if vaultwarden || flagged_types_shown {
+            Vec::new()
+        } else {
+            FLAGGED_ITEM_TYPES.to_vec()
+        },
+        items_need_collections: !vaultwarden,
     }
 }
 
@@ -754,32 +776,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn flagged_item_types_are_hidden_only_by_bitwarden_without_the_flag() {
+    fn server_traits_tell_bitwarden_from_vaultwarden() {
         let flagged = FLAGGED_ITEM_TYPES.to_vec();
         // Bitwarden's cloud and self-hosted server send no server name.
+        let bitwarden = |flags| server_traits(&json!({"server": null, "featureStates": flags}));
         assert_eq!(
-            hidden_item_types(
-                &json!({"server": null, "featureStates": {"pm-32009-new-item-types": false}})
-            ),
+            bitwarden(json!({"pm-32009-new-item-types": false})).hidden_item_types,
             flagged
         );
-        assert_eq!(
-            hidden_item_types(&json!({"server": null, "featureStates": {}})),
-            flagged
-        );
-        assert!(
-            hidden_item_types(
-                &json!({"server": null, "featureStates": {"pm-32009-new-item-types": true}})
-            )
-            .is_empty()
-        );
-        assert!(
-            hidden_item_types(&json!({
-                "server": {"name": "Vaultwarden", "url": "https://github.com/dani-garcia/vaultwarden"},
-                "featureStates": {}
-            }))
-            .is_empty()
-        );
+        assert_eq!(bitwarden(json!({})).hidden_item_types, flagged);
+        let enabled = bitwarden(json!({"pm-32009-new-item-types": true}));
+        assert!(enabled.hidden_item_types.is_empty());
+        assert!(enabled.items_need_collections);
+
+        let vaultwarden = server_traits(&json!({
+            "server": {"name": "Vaultwarden", "url": "https://github.com/dani-garcia/vaultwarden"},
+            "featureStates": {}
+        }));
+        assert!(vaultwarden.hidden_item_types.is_empty());
+        assert!(!vaultwarden.items_need_collections);
     }
 
     #[test]
