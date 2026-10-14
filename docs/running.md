@@ -4,42 +4,46 @@
 
 ## Commands
 
-| Command | Does |
+| Command | Effect |
 | --- | --- |
-| `vault-mirror init [--dir DIR]` | Asks for the accounts, checks the logins, writes `vault-mirror.env` and `compose.yaml`, and shows the plan. |
-| `vault-mirror` or `vault-mirror run` | One run. Flags: `--dry-run`, `--allow-initial-overwrite`, `--allow-mass-delete`. |
-| `vault-mirror daemon` | Runs on `SCHEDULE` or every `INTERVAL`, and stops cleanly on `SIGTERM` between runs. |
-| `vault-mirror check` | Logs in, counts items, and prints the plan. Writes nothing. |
-| `vault-mirror snapshots [--from dest]` | Lists snapshots. |
-| `vault-mirror export --output DIR` | Decrypts a snapshot and its attachments into `DIR`. |
-| `vault-mirror restore --to source\|dest` | Writes a snapshot into a vault. |
-| `vault-mirror healthcheck [--max-age-hours 26]` | Exits non-zero unless the last run succeeded within the given time. The image uses it as its health check. |
+| `vault-mirror init [--dir DIR]` | vault-mirror asks for accounts and checks logins. vault-mirror writes `vault-mirror.env` and `compose.yaml`. vault-mirror shows the plan. |
+| `vault-mirror` or `vault-mirror run` | vault-mirror completes one run. Flags: `--dry-run`, `--allow-initial-overwrite`, `--allow-mass-delete`. |
+| `vault-mirror daemon` | vault-mirror runs on `SCHEDULE` or every `INTERVAL`. vault-mirror completes an active run before stopping on `SIGTERM`. |
+| `vault-mirror check` | vault-mirror checks logins, counts items, and prints the plan. vault-mirror can write local login device state. vault-mirror does not change vault data. |
+| `vault-mirror snapshots [--from dest]` | vault-mirror lists snapshots. |
+| `vault-mirror export --output DIR` | vault-mirror decrypts a snapshot and its attachments into `DIR`. |
+| `vault-mirror restore --to source\|dest` | vault-mirror writes a snapshot into the selected configured vault. |
+| `vault-mirror healthcheck [--max-age-hours 26]` | vault-mirror exits with a nonzero status unless the last run succeeded within the specified time. The image uses this command for health checks. |
 
-A dry run makes backups and prints the plan, but does not change the
-destination.
+A dry run makes enabled backups and prints the plan.
+A dry run does not change the destination.
 
-Every command takes `--env-file PATH` to read settings from a file; see
-[Settings file](configuration.md#settings-file).
+Every command accepts `--env-file PATH` to read the settings file.
+See [Settings file](configuration.md#settings-file).
 
 ## Output
 
-At a terminal, each step is one line with a coloured verb, and long steps
-show a progress bar. Elsewhere, such as in container logs or under systemd,
-each line has a UTC timestamp and a level instead:
+At a terminal, vault-mirror shows each stage on one line with a colored verb.
+vault-mirror shows a progress bar for long stages.
+Container logs and systemd output show a UTC timestamp and a level on each line:
 
 ```text
 2026-10-14T03:00:12Z INFO Created 9 items
 2026-10-14T03:00:13Z WARN The destination refused to change the archive state of 1 item: ...
 ```
 
-Set `NO_COLOR` to turn colours off.
+Set `NO_COLOR` to disable colors.
 
 ## Scheduling
 
-Either let the container run `daemon`, as in the [quick start](../README.md#quick-start), or have your
-scheduler start a single run. Only one run or restore at a time can use a
-backup directory: one that starts while another is still going fails without
-touching the vaults or the backups. A systemd example:
+Use the container's `daemon` command, as shown in the [quick start](../README.md#quick-start).
+Alternatively, configure your scheduler to start individual runs.
+
+One run or restore can use a backup directory at a time.
+vault-mirror rejects another run or restore while the directory lock remains active.
+The rejected operation does not change vault data or backups.
+
+For systemd, use these service and timer settings:
 
 ```ini
 # /etc/systemd/system/vault-mirror.service
@@ -58,6 +62,6 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-The container runs as user 65532. A bind-mounted backup directory must be
-writable by that user, for example after `chown 65532:65532
-/var/lib/vault-mirror`.
+The container runs as user 65532.
+This user needs write access to a bind-mounted backup directory.
+Give this user access with `chown 65532:65532 /var/lib/vault-mirror`.

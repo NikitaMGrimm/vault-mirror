@@ -2,6 +2,9 @@
 
 [← Documentation](README.md)
 
+vault-mirror copies all supported item types, custom fields, passkeys, password history entries, folders, and attachments.
+[Limitations](limitations.md) lists server restrictions and data that vault-mirror does not copy.
+
 ## A run, step by step
 
 ```mermaid
@@ -13,69 +16,79 @@ flowchart LR
     mirror -- "4. change, 5. verify" --> dest
 ```
 
-1. Back up the source, with its attachments.
-2. Back up the destination, with its attachments, so that anything the run
-   deletes or replaces can be restored.
-3. Compare the two vaults and run the [safety checks](#safety-checks).
-4. Change the destination: create folders and collections, create and update
-   items, copy new or changed attachments, and delete what is no longer in
-   the source.
-5. Read the destination again and compare it with the source. Copied
-   attachments are downloaded again and compared by SHA-256.
-6. Write `last-run.json`, and send the notification if one is configured.
+| Stage | Action |
+| --- | --- |
+| 1. Source backup | vault-mirror backs up the source and its attachments. |
+| 2. Destination backup | vault-mirror backs up the destination and its attachments before deleting or replacing data. |
+| 3. Comparison | vault-mirror compares both vaults and runs the [safety checks](#safety-checks). |
+| 4. Changes | vault-mirror creates folders and collections. vault-mirror creates and updates items. vault-mirror copies new or changed attachments. vault-mirror deletes destination data that no longer matches the source. |
+| 5. Verification | vault-mirror reads the destination again and compares the data with the source. vault-mirror downloads copied attachments again and compares their SHA-256 hashes. |
+| 6. Reporting | vault-mirror writes `last-run.json`. vault-mirror sends a notification when you configure a notification URL. |
 
-If any step fails, the run stops there. A failed backup means the destination
-is not touched.
+These stages describe a run with backups and attachment verification enabled.
+Without a destination, a run backs up only the source.
+
+A failure stops further backup or destination changes.
+vault-mirror still attempts to record the result and send the configured notification.
+A failed backup prevents destination changes.
 
 ## How copies are matched
 
-Each copy in the destination gets one extra custom field, `__source`. It is
-an ordinary field of Bitwarden's **Hidden** type: you see it in the item,
-with its value masked until you reveal it. The value holds:
+A **copy** is a destination item that vault-mirror made.
+Each copy has a **marker**, the extra custom field `__source`.
+The marker uses Bitwarden's **Hidden** field type.
 
-- the id of the source item;
-- a hash of the item's content;
-- a hash of its attachments and of their copies.
+Bitwarden shows the marker with a masked value until you reveal the value.
+The marker contains these values:
 
-The field links each copy to its original, so a later run knows exactly what
-changed. It holds no secrets. Changes are found by comparing the decrypted
-content itself, not only the hash, so an edit made directly in a copy is
-undone on the next run. Leave the field in place: without it, a copy is no
-longer recognised and is deleted and created again.
+- The source item's id.
+- A hash of the item's content.
+- A hash of the source attachments and their copies.
+
+The marker links a copy to its source item.
+The marker contains no passwords or other secret values.
+vault-mirror compares decrypted content as well as the marker hashes.
+
+vault-mirror replaces direct edits to a copy during the next run.
+Keep the marker in each copy.
+Without the marker, vault-mirror cannot identify the copy and plans to delete and recreate the item.
 
 ## Safety checks
 
-A run checks its plan before it changes anything. If a check fails, the run
-stops with an error and leaves the destination as it was. None of these are
-warnings.
+vault-mirror checks the plan before changing the destination.
+A failed safety check stops destination changes with an error.
+Safety check failures are errors.
 
-| The run stops when | Because | To go ahead |
+| Stop condition | Reason | Override |
 | --- | --- | --- |
-| Source items carry `__source` fields | Source and destination are probably swapped, and the run would overwrite your vault with its copy. | Not possible. |
-| Source and destination are the same vault | The run would delete everything. | Not possible. |
-| The destination holds items, none of them created by vault-mirror | `DEST_*` probably points at an account in use. Its items would be deleted. | `run --allow-initial-overwrite`, once. |
-| The run would delete every copy it made before | The source read as empty, or is a different vault: a server problem, a wrong account, or a filter that matches nothing. The copy is what you fall back on then. | `run --allow-mass-delete`, once. |
-| You set `MAX_DELETE_PERCENT`, and the run would delete more than that share of the destination's items, and more than 10 | You asked for a limit. | `run --allow-mass-delete`, once. |
+| Source items have `__source` fields. | The source might be a destination from an earlier run. vault-mirror could overwrite your vault with copies. | None. |
+| Source and destination are the same vault. | The run could delete all items. | None. |
+| The destination contains items, with no recognized copies. | The `DEST_*` settings select a destination with items that have no recognized markers. The run would delete those items. | `run --allow-initial-overwrite`, for one run. |
+| The plan deletes every earlier copy. | The source appears empty or different. Possible causes include a server error, a wrong account, or a filter that selects nothing. Earlier copies preserve your data. | `run --allow-mass-delete`, for one run. |
+| Deletions exceed `MAX_DELETE_PERCENT` and 10 items, with at least one recognized copy in the destination. | You set a percentage limit for destination item deletions. | `run --allow-mass-delete`, for one run. |
 
-There is no default limit on how much a run may delete. Any fixed share would
-be arbitrary: losing 40% of a vault by mistake is no better than losing 60%.
-Smaller mistakes are covered by the backup each run takes before it deletes
-anything.
+The percentage check excludes duplicate copies from its deletion count.
 
-With the container, run the override once by hand, for example
-`docker compose run --rm vault-mirror run --allow-mass-delete`. Scheduled
-runs then continue normally.
+vault-mirror has no default percentage limit for deletions.
+A fixed percentage cannot distinguish intended deletions from mistakes.
+With backups enabled, the run backs up data before deleting items.
 
-Deletions in the destination are permanent; they do not go to the trash. The
-backup the same run took beforehand keeps a copy of everything it deletes.
+> [!WARNING]
+> vault-mirror permanently deletes destination items.
+> Deleted items do not enter the trash.
+> An override permits the deletions that the corresponding safety check blocks.
+> Backups preserve deleted data only when you enable backups and the required attachment content.
+
+Run an override for one container run with `docker compose run --rm vault-mirror run --allow-mass-delete`.
+Scheduled runs then continue with the usual safety checks.
 
 ## Compared with other approaches
 
 | | vault-mirror | Scripts around `bw export` and `bw import` | Server-side backups, such as copying Vaultwarden's data directory |
 | --- | --- | --- | --- |
 | Works with Bitwarden's cloud | yes | yes | no |
-| Keeps a live, usable second vault | yes | yes, rebuilt on every run | no |
-| Changes only what changed | yes | no | not applicable |
-| Copies attachments | yes | usually not | yes |
-| Readable without the server | yes, with `age` | yes, if exports are kept | no |
-| Needs | one binary | the `bw` CLI and Node.js | access to the server |
+| Keeps a usable destination vault | yes | yes, rebuilt on every run | no |
+| Updates only changed data | yes | no | not applicable |
+| Copies attachments | yes | usually no | yes |
+| Readable without the server | yes, with `age` | yes, if you keep exports | no |
+| Requirements | one binary | the `bw` CLI and Node.js | access to the server |

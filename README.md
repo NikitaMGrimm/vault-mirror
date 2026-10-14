@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  Keeps a second Bitwarden or Vaultwarden vault in sync with your main one,<br>
-  and keeps encrypted, restorable backups of both.
+  vault-mirror copies a source vault into a destination vault.<br>
+  vault-mirror keeps encrypted backups of both vaults.
 </p>
 
 <p align="center">
@@ -17,37 +17,30 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" alt="vault-mirror checking, mirroring, and finding nothing to change on the second run" width="860">
+  <img src="assets/demo.gif" alt="vault-mirror checks the vaults, copies items, and finds no changes on the second run" width="860">
 </p>
 
-vault-mirror copies one Bitwarden or Vaultwarden vault into another and keeps
-the copy up to date. Run it on a schedule and the second vault follows the
-first: new items are created, edited ones are updated in place, and deleted
-ones are removed. It copies every item type, custom field, passkey, password
-history entry, folder, and attachment, then reads the destination back to
-check the result.
+vault-mirror copies one Bitwarden or Vaultwarden vault into another.
+The **source** is the vault that vault-mirror copies.
+The **destination** is the vault that receives the copies.
 
-Before changing anything, each run backs up both vaults, encrypted with
-[age](https://age-encryption.org) in Bitwarden's export format. You can
-recover with the stock `age` tool and any Bitwarden client.
+A **run** is one execution of vault-mirror.
+Each run updates the destination to match the source.
+With backups enabled, vault-mirror backs up both vaults before changing the destination.
 
-It is a single binary, or a 14 MB container image. It talks to the
-Bitwarden API directly, without the `bw` CLI, and contacts nothing but your two
-servers and, if you set one, a notification URL.
+A **snapshot** is one encrypted backup file in Bitwarden's export format.
+vault-mirror uses [age](https://age-encryption.org) to encrypt backups.
+You can recover data with the standard `age` tool and any Bitwarden client.
 
-What people use it for:
+vault-mirror runs as one binary or a 14 MB container image.
+vault-mirror uses the Bitwarden API directly, without the `bw` CLI.
 
-- an off-site copy of a self-hosted Vaultwarden in Bitwarden's cloud, for when
-  the server is down;
-- moving between servers, mirroring until the switch;
-- sharing one folder, or some collections, with another account;
-- encrypted backups of a single vault, with no destination at all.
+Common uses include:
 
-> [!IMPORTANT]
-> vault-mirror logs in with your master password. Start with `check` and
-> `--dry-run`, and read [SECURITY.md](SECURITY.md). It is tested against
-> Vaultwarden and Bitwarden's own server, each as source and destination, and
-> has been run against Bitwarden's cloud.
+- Keep a destination in Bitwarden's cloud when your self-hosted Vaultwarden server is unavailable.
+- Copy items between servers before changing servers.
+- Copy one folder or selected collections to another account.
+- Keep encrypted backups of one source without a destination.
 
 ## Install
 
@@ -56,72 +49,78 @@ docker pull ghcr.io/nikitamgrimm/vault-mirror:0.2   # linux/amd64, linux/arm64
 cargo binstall vault-mirror                          # or: cargo install vault-mirror --locked
 ```
 
-Binaries for Linux (static, x86-64 and arm64) and macOS (Apple silicon and
-Intel) are on the [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases),
-with checksums and [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations):
-`gh attestation verify FILE --repo NikitaMGrimm/vault-mirror`.
+The [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases) has binaries for these systems:
 
-The macOS binaries are not notarized. If you download one with a browser,
-clear the quarantine flag with `xattr -d com.apple.quarantine vault-mirror`.
+| System | Architectures |
+| --- | --- |
+| Linux, static binaries | x86-64, arm64 |
+| macOS | Apple silicon, Intel |
+
+Releases include checksums and [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations).
+Verify a downloaded file with `gh attestation verify FILE --repo NikitaMGrimm/vault-mirror`.
+
+The macOS binaries have no notarization.
+After a browser download, remove the quarantine flag with `xattr -d com.apple.quarantine vault-mirror`.
 
 ## Quick start
 
-Create a personal API key for each account: in the web vault, go to
-**Settings → Security → Keys → View API key**. Use a dedicated, empty account
-as the destination, because the tool deletes everything in it that does not
-come from the source.
+> [!WARNING]
+> vault-mirror uses each account's master password to decrypt vault data.
+> Use a dedicated, empty destination account.
+> vault-mirror permanently deletes destination items that do not match the source.
+> Read [SECURITY.md](SECURITY.md) before setup.
 
-In an empty directory, run the setup. It asks for both accounts, checks that
-the logins work, writes `vault-mirror.env` and `compose.yaml`, and shows what
-the first run would do:
+1. Open **Settings → Security → Keys → View API key** in each account's web vault.
+2. Create a personal API key for each account.
+3. Open an empty directory.
+4. Run `vault-mirror init`.
 
 ```sh
 vault-mirror init
 ```
 
-With only Docker installed, run the same command from the image:
+`init` asks for both accounts and checks their logins.
+`init` writes the **settings file**, `vault-mirror.env`, and `compose.yaml`.
+`init` also shows the first run's plan.
+
+For setup with only Docker installed, run this command instead:
 
 ```sh
 docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
   ghcr.io/nikitamgrimm/vault-mirror:0.2 init
 ```
 
-Then start it. It runs on the schedule you chose:
+1. Run `docker compose run --rm vault-mirror check` to review the plan.
+2. Run `docker compose run --rm vault-mirror run --dry-run` to test a run without changing the destination.
+3. Run `docker compose up -d` to start scheduled runs.
 
 ```sh
 docker compose up -d
 ```
 
-Without Docker, run `vault-mirror --env-file vault-mirror.env daemon`
-instead. [Configuration](docs/configuration.md) describes every setting and
-how to write the files by hand.
+Without Docker, start scheduled runs with `vault-mirror --env-file vault-mirror.env daemon`.
+[Configuration](docs/configuration.md) describes each setting and manual setup.
 
 ## Documentation
 
-- [How it works](docs/how-it-works.md): what a run does, how copies are
-  matched, and the [safety checks](docs/how-it-works.md#safety-checks) that
-  stop a run before it does damage.
-- [Configuration](docs/configuration.md): every setting,
-  [organizations](docs/configuration.md#organizations), and
-  [mirroring part of a vault](docs/configuration.md#mirroring-part-of-a-vault).
+- [How it works](docs/how-it-works.md): run stages, matching copies, and [safety checks](docs/how-it-works.md#safety-checks).
+- [Configuration](docs/configuration.md): settings, [organizations](docs/configuration.md#organizations), and [mirroring part of a vault](docs/configuration.md#mirroring-part-of-a-vault).
 - [Backups and restoring](docs/backups.md)
 - [Commands and scheduling](docs/running.md)
-- [Limitations](docs/limitations.md): Sends, members, permissions, and
-  account settings are not mirrored, and attachments need Premium on
-  Bitwarden's servers.
+- [Limitations](docs/limitations.md): unsupported data and Bitwarden attachment requirements.
 
 ## Contributing
 
-Questions and ideas go to
-[Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions),
-bugs to [Issues](https://github.com/NikitaMGrimm/vault-mirror/issues), and
-vulnerabilities to a [private report](SECURITY.md). Read
-[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+Post questions and ideas in [Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions).
+Report bugs in [Issues](https://github.com/NikitaMGrimm/vault-mirror/issues).
+Report vulnerabilities through a [private report](SECURITY.md).
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 
-[GPL-3.0-only](LICENSE). vault-mirror uses Bitwarden's `bitwarden-crypto`
-crate, which is published under the GPL.
+vault-mirror uses the [GPL-3.0-only](LICENSE) license.
+vault-mirror uses Bitwarden's `bitwarden-crypto` crate, which also uses the GPL.
 
-vault-mirror is an independent project, not affiliated with or endorsed by
-Bitwarden, Inc. or the Vaultwarden project.
+vault-mirror is an independent project.
+Bitwarden, Inc. and the Vaultwarden project do not affiliate with or endorse vault-mirror.
