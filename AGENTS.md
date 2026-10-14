@@ -63,8 +63,9 @@ Use these terms the way the docs do:
 | `src/plan.rs` | Pure diff of source and destination, and the safety rules |
 | `src/mirror.rs` | Runs a plan, then re-reads and verifies the destination |
 | `src/snapshot.rs`, `src/store.rs`, `src/backup.rs`, `src/restore.rs` | Encrypted backups |
-| `src/provision.rs`, `src/fixtures.rs` | Test accounts and sample items for the sandbox |
 | `tests/` | End-to-end tests against the sandbox servers, and the command line |
+| `tests/common/` | Sandbox setup, test accounts (`provision.rs`) and sample items (`fixtures.rs`) |
+| `examples/sandbox.rs` | Prints a settings file for two new sandbox accounts, for trying things by hand |
 | `sandbox/` | Throwaway Vaultwarden and Bitwarden servers in Docker |
 
 ## Checks

@@ -89,17 +89,6 @@ enum Command {
         #[arg(long, default_value_t = 26)]
         max_age_hours: u64,
     },
-    /// Create throwaway accounts on test servers and print their settings.
-    #[command(hide = true)]
-    Sandbox {
-        #[arg(long, default_value = "http://127.0.0.1:18081")]
-        source: String,
-        #[arg(long, default_value = "http://127.0.0.1:18082")]
-        dest: String,
-        /// Fill the source vault with sample items.
-        #[arg(long)]
-        seed: bool,
-    },
 }
 
 #[derive(Args)]
@@ -212,7 +201,6 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Restore(args) => restore_command(args).await,
         Command::Export { snapshot, output } => export(snapshot, &output),
         Command::Healthcheck { max_age_hours } => healthcheck(max_age_hours),
-        Command::Sandbox { source, dest, seed } => sandbox(&source, &dest, seed).await,
     }
 }
 
@@ -592,60 +580,4 @@ fn healthcheck(max_age_hours: u64) -> Result<ExitCode> {
             Ok(ExitCode::FAILURE)
         }
     }
-}
-
-async fn sandbox(source: &str, dest: &str, seed: bool) -> Result<ExitCode> {
-    use vault_mirror::{api, crypto::KdfParams, fixtures, provision, vault};
-
-    let http = api::build_http_client(&api::ClientOptions::default())?;
-    let kdf = KdfParams::Pbkdf2 {
-        iterations: 600_000,
-    };
-    let password = "sandbox-master-password";
-    let mut lines = Vec::new();
-    for (prefix, server) in [("SOURCE", source), ("DEST", dest)] {
-        let email = format!("sandbox-{}@example.com", uuid::Uuid::new_v4().simple());
-        let account = provision::register(&http, server, &email, password, &kdf).await?;
-        if seed && prefix == "SOURCE" {
-            let urls = api::ServerUrls::from_server(server)?;
-            let opened =
-                vault::Account::open(http.clone(), urls, account.credentials.clone(), password)
-                    .await?;
-            let mut folders = HashMap::new();
-            for name in fixtures::FOLDERS {
-                folders.insert(*name, opened.create_folder(name).await?.id);
-            }
-            for sample in fixtures::samples() {
-                let draft = vault::Draft {
-                    content: sample.content,
-                    folder_id: sample.folder.map(|name| folders[name].clone()),
-                    collection_ids: Vec::new(),
-                };
-                let item = opened.create_item(&vault::Scope::Personal, &draft).await?;
-                for (name, data) in &sample.attachments {
-                    opened
-                        .upload_attachment(&vault::Scope::Personal, &item, name, data)
-                        .await?;
-                }
-                if sample.archived {
-                    opened
-                        .set_archived(std::slice::from_ref(&item.id), true)
-                        .await?;
-                }
-            }
-        }
-        lines.push(format!("{prefix}_SERVER={server}"));
-        lines.push(format!("{prefix}_PASSWORD={password}"));
-        lines.push(format!(
-            "{prefix}_CLIENT_ID={}",
-            account.credentials.client_id
-        ));
-        lines.push(format!(
-            "{prefix}_CLIENT_SECRET={}",
-            account.credentials.client_secret
-        ));
-    }
-    lines.push("BACKUP_PASSPHRASE=sandbox-backup-passphrase".to_string());
-    println!("{}", lines.join("\n"));
-    Ok(ExitCode::SUCCESS)
 }

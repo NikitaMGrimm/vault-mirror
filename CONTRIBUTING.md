@@ -40,9 +40,9 @@ Docker. You don't need a Bitwarden account: the sandbox runs throwaway servers
 locally.
 
 ```sh
-sandbox/up.sh                   # two Vaultwarden servers, plus a TLS proxy
-cargo test                      # unit and end-to-end tests
-cargo run -- sandbox --seed     # prints an env file for two new accounts with sample data
+sandbox/up.sh                           # two Vaultwarden servers, plus a TLS proxy
+cargo test                              # unit and end-to-end tests
+cargo run --example sandbox -- --seed   # prints a settings file for two new accounts with sample data
 ```
 
 When the sandbox is not running, the end-to-end tests are skipped. CI requires

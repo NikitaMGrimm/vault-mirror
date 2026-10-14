@@ -3,7 +3,6 @@ mod common;
 use anyhow::Result;
 use common::*;
 use vault_mirror::{
-    fixtures,
     mirror::{Endpoint, Filter, MirrorOptions, mirror_onto},
     node::Node,
     plan::{self, MARKER_FIELD, Safety, marker_of},

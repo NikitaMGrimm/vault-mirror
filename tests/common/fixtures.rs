@@ -1,9 +1,9 @@
 //! A sample vault that exercises every item type and awkward value the
-//! mirror has to carry. Used by the integration suite and the sandbox command.
+//! mirror has to carry. Used by the integration suite and `examples/sandbox.rs`.
 
 use std::collections::BTreeMap;
 
-use crate::node::Node;
+use vault_mirror::node::Node;
 
 pub struct Sample {
     pub folder: Option<&'static str>,
