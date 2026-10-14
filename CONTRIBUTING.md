@@ -81,7 +81,7 @@ of 2000 items. Set `VAULT_MIRROR_SCALE_ITEMS` to change the size.
 - Keep each pull request to one change, with a test that fails without it.
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` with the sandbox running.
-- Update the README when behaviour or configuration changes.
+- Update the README or `docs/` when behaviour or configuration changes.
 - Title the pull request as a [Conventional Commit](https://www.conventionalcommits.org),
   for example `fix: keep archive state on edit`. Pull requests are squashed,
   and the release notes are generated from these titles: `feat`, `fix` and

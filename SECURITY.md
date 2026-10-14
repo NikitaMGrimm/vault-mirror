@@ -51,8 +51,9 @@ with any URL and any credential sent with the request removed.
 
 ## The mirror marker
 
-Each mirrored item carries a hidden custom field, `__source`, with the source
-item's id and hashes of the item's content and attachments. Like every other
+Each mirrored item carries a custom field, `__source`, of Bitwarden's Hidden
+type, which masks the value until it is revealed. It holds the source item's
+id and hashes of the item's content and attachments. Like every other
 field, it is encrypted with the destination vault's keys. Only someone who
 can open the destination vault can read it, and all it adds to what they can
 already see are the source item ids.
