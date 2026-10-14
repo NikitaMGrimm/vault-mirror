@@ -28,7 +28,6 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ steps.diff.outputs.code }}
-      sandbox: ${{ steps.diff.outputs.sandbox }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,7 +40,6 @@ jobs:
           # Without a known base, such as on a manual run, everything runs.
           if [[ -z "$BASE" ]] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
             echo "code=true" >> "$GITHUB_OUTPUT"
-            echo "sandbox=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git diff --name-only "$BASE" HEAD | tee changed
@@ -49,11 +47,6 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
-          fi
-          if grep -q '^sandbox/' changed; then
-            echo "sandbox=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "sandbox=false" >> "$GITHUB_OUTPUT"
           fi
 
   lint:
@@ -102,14 +95,11 @@ jobs:
       - if: failure()
         run: docker compose -f sandbox/compose.yaml logs
 
-  # The same suite against Bitwarden's own server. Its image is large, so this
-  # runs on main, on request, and for pull requests that change the sandbox,
-  # which nothing else would test before it reaches main.
+  # The same suite against Bitwarden's own server, which differs from
+  # Vaultwarden in what it shows and accepts.
   official:
     needs: changes
-    if: >-
-      needs.changes.outputs.code == 'true' &&
-      (github.event_name != 'pull_request' || needs.changes.outputs.sandbox == 'true')
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
