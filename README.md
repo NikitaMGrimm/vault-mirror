@@ -295,8 +295,9 @@ your env file.
 - Archived items need a server that supports archiving. If the destination
   does not, items are mirrored unarchived, and the run reports a warning.
 - Tested against Vaultwarden 1.37 and Bitwarden's self-hosted server 2026.9.
-  Bitwarden's cloud runs the same server code, but it has not been tested
-  yet. Neither has its attachment upload, which goes through Azure storage.
+  Bitwarden's cloud runs the same server code but has not been tested yet. The
+  cloud stores attachments in Azure, and that upload path is tested against
+  Microsoft's Azurite emulator.
 - Organization mode is tested against Vaultwarden only. A self-hosted
   Bitwarden server creates organizations only from a license file, which the
   test setup does not have.
@@ -322,8 +323,10 @@ snapshot imports into the official Bitwarden CLI. Set `VAULT_MIRROR_BW` to a
 
 `sandbox/up.sh --official` also starts Bitwarden's own server, which needs a
 2.7 GB image. The server runs entirely locally: its installation id is made
-up, and it has no installation key, so it never contacts Bitwarden. The
-sandbox makes every account on it premium, because attachments need premium.
+up, and it has no installation key, so it never contacts Bitwarden. Like
+Bitwarden's cloud, it stores attachments in Azure blob storage, here provided
+by the Azurite emulator. The sandbox makes every account on it premium,
+because attachments need premium.
 Point the tests at it by URL:
 
 ```sh
