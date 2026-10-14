@@ -20,7 +20,7 @@ diff alone. -->
 <!-- What you ran and what you saw: the test that fails without this change,
 the servers you ran against (Vaultwarden, Bitwarden's own server), and
 anything you could not check. For changes to output or documentation, show
-before and after. -->
+before and after as text. Add a screenshot only for what text cannot show. -->
 
 <!-- End with one of these, as the last lines of the description:
 

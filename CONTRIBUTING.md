@@ -131,9 +131,11 @@ same pull request and give the reason.
 - Keep each pull request to one change, with a test that fails without it.
 - Fill in the template: the problem, the change, and how you verified it. A
   check fails until the description has these sections and the AI disclosure
-  line. Show before and after for changes to output or documentation, as
-  screenshots or a short recording uploaded to the pull request; do not
-  commit them.
+  line. Show before and after for changes to output or documentation as
+  text: a fenced block of terminal output, or a quoted excerpt. Use a
+  screenshot or a short recording only when text cannot show the change,
+  such as colour, layout or motion. Upload media to the pull request; do not
+  commit it.
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` with the sandbox running.
 - Update the README or `docs/` when behaviour or configuration changes.
