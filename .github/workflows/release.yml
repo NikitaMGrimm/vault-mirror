@@ -34,10 +34,28 @@ jobs:
             fi
             echo "version=$crate" >> "$GITHUB_OUTPUT"
             echo "publish=true" >> "$GITHUB_OUTPUT"
+            # The release notes are the changelog section headed with the
+            # version, checked here so that nothing is published without them.
+            mkdir notes
+            awk -v heading="## $crate" '
+              $0 == heading { found = 1; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md > notes/notes.md
+            if ! grep -q '[^[:space:]]' notes/notes.md; then
+              echo "::error::CHANGELOG.md has no section headed '## $crate'"
+              exit 1
+            fi
           else
             echo "version=$crate-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
+      - if: steps.version.outputs.publish == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notes
+          path: notes/
+          if-no-files-found: error
 
   build:
     needs: version
@@ -161,6 +179,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: notes
+          path: notes
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
           pattern: dist-*
           path: dist
           merge-multiple: true
@@ -173,4 +195,4 @@ jobs:
           flags=()
           [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "$GITHUB_REF_NAME" --generate-notes "${flags[@]}" dist/*
+            --title "$GITHUB_REF_NAME" --notes-file notes/notes.md "${flags[@]}" dist/*
