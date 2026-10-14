@@ -47,3 +47,20 @@ fn healthcheck_reads_the_backup_directory_from_the_settings_file() {
     assert!(output.status.success(), "{stdout}{stderr}");
     assert!(stdout.starts_with("healthy"), "{stdout}");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_variable_that_is_not_utf8_does_not_crash_the_command() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let output = vault_mirror()
+        .env("BACKUPS_DIR", dir.path())
+        .env("UNRELATED", OsStr::from_bytes(b"caf\xe9"))
+        .arg("healthcheck")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+}

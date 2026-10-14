@@ -199,7 +199,7 @@ fn decrypt_with_passphrase(data: &[u8], passphrase: &str) -> Result<String> {
 }
 
 /// Writes a file that only the owner may read, atomically.
-fn write_private(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     let directory = path
         .parent()
         .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
