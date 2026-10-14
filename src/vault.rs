@@ -364,6 +364,15 @@ impl Account {
         Ok(())
     }
 
+    /// Moves items to the trash, as a user deleting them in a client does.
+    pub async fn trash_items(&self, ids: &[String]) -> Result<()> {
+        for chunk in ids.chunks(BULK_LIMIT) {
+            let body = json!({ "ids": chunk });
+            self.session.send_idempotent(Method::PUT, "/ciphers/delete", Some(&body)).await?;
+        }
+        Ok(())
+    }
+
     pub async fn set_archived(&self, ids: &[String], archived: bool) -> Result<()> {
         let path = if archived { "/ciphers/archive" } else { "/ciphers/unarchive" };
         for chunk in ids.chunks(BULK_LIMIT) {
