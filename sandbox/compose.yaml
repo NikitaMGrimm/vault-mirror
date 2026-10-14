@@ -107,14 +107,16 @@ services:
     network_mode: "service:official"
     command: ["azurite-blob", "--blobHost", "0.0.0.0", "--inMemoryPersistence", "--skipApiVersionCheck"]
   official-db:
-    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
     profiles: [official]
     environment:
       POSTGRES_USER: bitwarden
       POSTGRES_PASSWORD: sandbox
       POSTGRES_DB: vault
+    # Postgres 18 keeps its data in a versioned directory below this one and
+    # refuses to start with anything mounted at the old `.../data`.
     tmpfs:
-      - /var/lib/postgresql/data
+      - /var/lib/postgresql
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "bitwarden", "-d", "vault"]
       interval: 1s

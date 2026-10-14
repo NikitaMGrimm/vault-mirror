@@ -10,8 +10,11 @@ permissions: {}
 
 jobs:
   description:
-    # Dependabot and release-plz write their own descriptions.
-    if: github.event.pull_request.user.type != 'Bot'
+    # Dependabot and release-plz write their own descriptions, and the
+    # maintainer and collaborators decide their own.
+    if: >-
+      github.event.pull_request.user.type != 'Bot' &&
+      !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -23,7 +26,7 @@ jobs:
           body=$(printf '%s' "$BODY" | perl -0pe 's/<!--.*?-->//gs')
           missing=()
           for section in Problem Change Verification; do
-            grep -Eq "^## $section[[:space:]]*\$" <<< "$body" || missing+=("a '## $section' section")
+            grep -Eq "^## ${section}[[:space:]]*\$" <<< "$body" || missing+=("a '## $section' section")
           done
           grep -Eq 'Agent assistance:|^No AI assistance\.' <<< "$body" \
             || missing+=("the AI disclosure line: 'No AI assistance.' or the agent note from the template")
