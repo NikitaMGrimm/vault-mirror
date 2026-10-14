@@ -11,6 +11,7 @@ use crate::{
     api::{self, ApiCredentials, ServerUrls, Session},
     crypto::{KdfParams, MasterSecret, SymKey},
     node::Node,
+    text::count,
 };
 
 /// Item fields that identify or describe an item on one particular server.
@@ -407,10 +408,12 @@ impl Account {
         drafts: &[Draft],
         folder_names: &HashMap<String, String>,
         concurrency: usize,
+        created: &(dyn Fn(usize) + Sync),
     ) -> Result<Vec<Item>> {
         if *scope != Scope::Personal || drafts.len() <= SINGLE_CREATE_LIMIT {
             return stream::iter(drafts.iter().map(|draft| self.create_item(scope, draft)))
                 .buffered(concurrency.max(1))
+                .inspect_ok(|_| created(1))
                 .try_collect()
                 .await;
         }
@@ -451,6 +454,7 @@ impl Account {
             self.session
                 .send_once(Method::POST, "/ciphers/import", Some(&body))
                 .await?;
+            created(chunk.len());
         }
 
         // An import does not report the new ids. Every encryption is
@@ -767,9 +771,10 @@ fn check_organization_visible(
     let items = hidden("items", &all_items, synced_items)?;
     if collections + items > 0 {
         bail!(
-            "organization {org} holds {collections} collection(s) and {items} item(s) this \
-             account cannot see; assign the account to every collection with Can manage \
-             permission, and put every item in a collection"
+            "organization {org} holds {} and {} this account cannot see; assign the account \
+             to every collection with Can manage permission, and put every item in a collection",
+            count(collections, "collection"),
+            count(items, "item")
         );
     }
     Ok(())
@@ -926,7 +931,7 @@ mod tests {
             all(),
             Ok(json!({ "data": [{ "id": "c1" }, { "id": "i2" }] })),
         );
-        assert!(format!("{:#}", hidden.unwrap_err()).contains("1 item(s)"));
+        assert!(format!("{:#}", hidden.unwrap_err()).contains("1 item"));
     }
 
     #[test]

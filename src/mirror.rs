@@ -1,6 +1,9 @@
 //! Makes a destination vault match a source vault.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, TryStreamExt, stream};
@@ -9,14 +12,52 @@ use sha2::{Digest, Sha256};
 use crate::{
     api::ApiError,
     plan::{self, Mode, Plan, Safety, SafetyViolation, Summary, comparable, differing_paths},
+    text::count,
     vault::{Account, Item, Scope, Vault},
 };
 
 /// Receives progress lines. Messages never contain vault content, only
 /// counts and server-side ids.
 pub trait Reporter: Sync {
-    fn info(&self, message: &str);
+    /// A step of the run, as a short verb, such as `Created`, and the rest
+    /// of the sentence, such as `9 items`.
+    fn status(&self, verb: &str, detail: &str);
     fn warn(&self, message: &str);
+    /// `done` of `total` units of a long step, such as `Writing`, 3, 9,
+    /// `items`. Only a terminal shows it; the step's status line follows.
+    fn progress(&self, _verb: &str, _done: usize, _total: usize, _unit: &str) {}
+}
+
+/// Counts finished units of a step that runs concurrently and reports them.
+pub(crate) struct Tally<'a> {
+    reporter: &'a dyn Reporter,
+    verb: &'static str,
+    unit: &'static str,
+    total: usize,
+    done: AtomicUsize,
+}
+
+impl<'a> Tally<'a> {
+    pub(crate) fn new(
+        reporter: &'a dyn Reporter,
+        verb: &'static str,
+        total: usize,
+        unit: &'static str,
+    ) -> Self {
+        Self {
+            reporter,
+            verb,
+            unit,
+            total,
+            done: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn add(&self, n: usize) {
+        let done = self.done.fetch_add(n, Ordering::Relaxed) + n;
+        self.reporter
+            .progress(self.verb, done, self.total, self.unit);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -212,15 +253,16 @@ impl Run<'_> {
 
     /// Removes source items the destination could not hold, with a warning.
     fn leave_out(&mut self, source: &mut Vault, unfit: impl Fn(&Item) -> bool, reason: &str) {
-        let count = source
+        let left_out = source
             .items
             .iter()
             .filter(|item| !item.in_trash && unfit(item))
             .count();
         source.items.retain(|item| !unfit(item));
-        if count > 0 {
+        if left_out > 0 {
             self.warn(format!(
-                "{count} item(s) are left out of the mirror because {reason}."
+                "Left {} out of the mirror because {reason}.",
+                count(left_out, "item")
             ));
         }
     }
@@ -250,15 +292,20 @@ impl Run<'_> {
         let before = source.items.iter().filter(|item| !item.in_trash).count();
         filter.apply(source, mode);
         let after = source.items.iter().filter(|item| !item.in_trash).count();
-        if !unmatched.is_empty() {
-            self.warn(format!(
-                "The filter names {}, which match(es) no {kind} in the source.",
-                unmatched.join(", ")
-            ));
+        match unmatched.as_slice() {
+            [] => {}
+            [name] => self.warn(format!(
+                "The filter name {name} matches no {kind} in the source."
+            )),
+            names => self.warn(format!(
+                "The filter names {} match no {kind} in the source.",
+                names.join(", ")
+            )),
         }
-        self.reporter.info(&format!(
-            "The {kind} filter selects {after} of {before} item(s)."
-        ));
+        self.reporter.status(
+            "Filtered",
+            &format!("{after} of {} by {kind}", count(before, "item")),
+        );
     }
 
     fn warn(&mut self, message: String) {
@@ -357,23 +404,16 @@ impl Run<'_> {
         let plan = plan::plan_with(&source_vault, &dest_vault, mode, self.copy_attachments);
         if plan.attachments_withheld > 0 {
             self.warn(format!(
-                "{} attachment(s) are not copied because the destination account has no premium \
-                 subscription, which Bitwarden requires for attachments. Everything else is \
-                 mirrored, and the attachments follow once the account has premium.",
-                plan.attachments_withheld
+                "Not copying {}: the destination account has no premium subscription, which \
+                 Bitwarden requires for attachments. Everything else is mirrored, and the \
+                 attachments follow once the account has premium.",
+                count(plan.attachments_withheld, "attachment")
             ));
         }
         let summary = plan.summary(&source_vault);
         self.summary = Some(summary);
-        self.reporter.info(&format!(
-            "{}: {}",
-            if self.options.dry_run {
-                "Dry-run plan"
-            } else {
-                "Plan"
-            },
-            describe_plan(&summary)
-        ));
+        let (verb, plan_text) = describe_plan(&summary, self.options.dry_run);
+        self.reporter.status(verb, &plan_text);
         plan::check_safety(&plan, &self.options.safety)?;
         if self.options.dry_run || !plan.has_changes() {
             return Ok(false);
@@ -383,7 +423,7 @@ impl Run<'_> {
 
         self.stage = "verifying the destination";
         self.verify(&source_vault, mode).await?;
-        self.reporter.info("Destination verified.");
+        self.reporter.status("Verified", "the destination");
         Ok(true)
     }
 
@@ -456,19 +496,23 @@ impl Run<'_> {
             .iter()
             .map(|(name, id)| (id.clone(), name.clone()))
             .collect();
+        let rewritten = plan
+            .updates
+            .iter()
+            .filter(|update| update.write_content || update.sync_attachments)
+            .count();
+        let writes = Tally::new(self.reporter, "Writing", drafts.len() + rewritten, "items");
         let new_items = dest
             .account
-            .create_items(&dest.scope, &drafts, &folder_names, concurrency)
+            .create_items(&dest.scope, &drafts, &folder_names, concurrency, &|n| {
+                writes.add(n)
+            })
             .await?;
         let created: Vec<(usize, Item)> = plan.creates.iter().copied().zip(new_items).collect();
-        if !created.is_empty() {
-            self.reporter
-                .info(&format!("Created {} item(s).", created.len()));
-        }
 
         let updated: Vec<(usize, Item)> =
             stream::iter(plan.updates.iter().enumerate().map(|(index, update)| {
-                let (folder_ids, collection_ids) = (&folder_ids, &collection_ids);
+                let (folder_ids, collection_ids, writes) = (&folder_ids, &collection_ids, &writes);
                 async move {
                     let existing = &dest_vault.items[update.dest];
                     let entry = &plan.entries[update.entry];
@@ -484,19 +528,19 @@ impl Run<'_> {
                         .update_item(&dest.scope, existing, &draft)
                         .await
                         .with_context(|| format!("updating destination item {}", existing.id))?;
+                    writes.add(1);
                     Ok((index, item))
                 }
             }))
             .buffer_unordered(concurrency)
             .try_collect()
             .await?;
-        let rewritten = plan
-            .updates
-            .iter()
-            .filter(|update| update.write_content || update.sync_attachments)
-            .count();
+        if !created.is_empty() {
+            self.reporter
+                .status("Created", &count(created.len(), "item"));
+        }
         if rewritten > 0 {
-            self.reporter.info(&format!("Updated {rewritten} item(s)."));
+            self.reporter.status("Updated", &count(rewritten, "item"));
         }
 
         self.stage = "copying attachments";
@@ -519,9 +563,23 @@ impl Run<'_> {
             }
         }
         let verify_attachments = self.options.verify_attachments;
+        let uploads = Tally::new(
+            self.reporter,
+            "Copying",
+            transfers
+                .iter()
+                .map(|(entry_index, ..)| {
+                    source_vault.items[plan.entries[*entry_index].source]
+                        .attachments
+                        .len()
+                })
+                .sum(),
+            "attachments",
+        );
         let copied: Vec<(usize, usize, Option<Item>)> =
             stream::iter(transfers.into_iter().map(|(entry_index, dest_item, old)| {
-                let (folder_ids, collection_ids) = (&folder_ids, &collection_ids);
+                let (folder_ids, collection_ids, uploads) =
+                    (&folder_ids, &collection_ids, &uploads);
                 async move {
                     let entry = &plan.entries[entry_index];
                     let source_item = &source_vault.items[entry.source];
@@ -555,6 +613,7 @@ impl Run<'_> {
                             attachment.file_name.as_str(),
                             <[u8; 32]>::from(Sha256::digest(&data)),
                         ));
+                        uploads.add(1);
                     }
                     if copied.is_empty() {
                         // Only removals: the marker written before is final.
@@ -607,17 +666,15 @@ impl Run<'_> {
             .try_collect()
             .await?;
         let mut finished: HashMap<usize, Item> = HashMap::new();
-        let mut count = 0;
+        let mut total = 0;
         for (entry_index, copied, item) in copied {
-            count += copied;
+            total += copied;
             if let Some(item) = item {
                 finished.insert(entry_index, item);
             }
         }
-        let copied = count;
-        if copied > 0 {
-            self.reporter
-                .info(&format!("Copied {copied} attachment(s)."));
+        if total > 0 {
+            self.reporter.status("Copied", &count(total, "attachment"));
         }
 
         self.stage = "setting archive state";
@@ -656,8 +713,8 @@ impl Run<'_> {
                 }
                 self.archive_unsupported = true;
                 self.warn(format!(
-                    "The destination refused to change the archive state of {} item(s): {error:#}",
-                    ids.len()
+                    "The destination refused to change the archive state of {}: {error:#}",
+                    count(ids.len(), "item")
                 ));
             }
         }
@@ -671,8 +728,7 @@ impl Run<'_> {
             .collect();
         if !ids.is_empty() {
             dest.account.delete_items(&ids).await?;
-            self.reporter
-                .info(&format!("Deleted {} item(s).", ids.len()));
+            self.reporter.status("Deleted", &count(ids.len(), "item"));
         }
         for folder in &plan.folders_to_delete {
             dest.account.delete_folder(&folder.id).await?;
@@ -778,8 +834,9 @@ pub(crate) fn refused(error: &anyhow::Error) -> bool {
         .is_some_and(|status| matches!(status.as_u16(), 400 | 402 | 403 | 404 | 405 | 501))
 }
 
-/// The plan's changes in a few words, leaving out what does not happen.
-fn describe_plan(summary: &Summary) -> String {
+/// The plan's changes in a few words, leaving out what does not happen, as
+/// a verb and the rest of the sentence.
+fn describe_plan(summary: &Summary, dry_run: bool) -> (&'static str, String) {
     let changes: Vec<String> = [
         (summary.items_created, "create", "item"),
         (summary.items_updated, "update", "item"),
@@ -792,14 +849,15 @@ fn describe_plan(summary: &Summary) -> String {
     ]
     .into_iter()
     .filter(|(count, ..)| *count > 0)
-    .map(|(count, verb, noun)| {
-        format!("{verb} {count} {noun}{}", if count == 1 { "" } else { "s" })
-    })
+    .map(|(n, verb, noun)| format!("{verb} {}", count(n, noun)))
     .collect();
-    let unchanged = format!("{} item(s) unchanged", summary.items_unchanged);
-    match changes.is_empty() {
-        true => format!("nothing to change, {unchanged}"),
-        false => format!("{}; {unchanged}", changes.join(", ")),
+    let unchanged = format!("{} unchanged", count(summary.items_unchanged, "item"));
+    let changes = changes.join(", ");
+    match (changes.is_empty(), dry_run) {
+        (true, false) => ("Planned", format!("no changes; {unchanged}")),
+        (true, true) => ("Would", format!("change nothing; {unchanged}")),
+        (false, false) => ("Planned", format!("to {changes}; {unchanged}")),
+        (false, true) => ("Would", format!("{changes}; {unchanged}")),
     }
 }
 
@@ -865,16 +923,26 @@ mod tests {
             attachments_copied: 4,
             ..Summary::default()
         };
+        let changes = "create 9 items, create 1 folder, copy 4 attachments; 1 item unchanged";
         assert_eq!(
-            describe_plan(&summary),
-            "create 9 items, create 1 folder, copy 4 attachments; 1 item(s) unchanged"
+            describe_plan(&summary, false),
+            ("Planned", format!("to {changes}"))
         );
         assert_eq!(
-            describe_plan(&Summary {
-                items_unchanged: 9,
-                ..Summary::default()
-            }),
-            "nothing to change, 9 item(s) unchanged"
+            describe_plan(&summary, true),
+            ("Would", changes.to_string())
+        );
+        let nothing = Summary {
+            items_unchanged: 9,
+            ..Summary::default()
+        };
+        assert_eq!(
+            describe_plan(&nothing, false),
+            ("Planned", "no changes; 9 items unchanged".to_string())
+        );
+        assert_eq!(
+            describe_plan(&nothing, true),
+            ("Would", "change nothing; 9 items unchanged".to_string())
         );
     }
 

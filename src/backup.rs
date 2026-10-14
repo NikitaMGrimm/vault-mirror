@@ -6,9 +6,10 @@ use serde::Serialize;
 use time::OffsetDateTime;
 
 use crate::{
-    mirror::Reporter,
+    mirror::{Reporter, Tally},
     snapshot::{self, SnapshotAttachment},
     store::{PruneReport, Retention, Store},
+    text::count,
     vault::{Account, Scope, Vault},
 };
 
@@ -70,6 +71,8 @@ pub async fn backup_loaded(
         }
     }
     let downloaded = missing.len();
+    let downloads = Tally::new(reporter, "Downloading", downloaded, "attachments");
+    let downloads = &downloads;
     stream::iter(missing.into_iter().map(|(item, attachment)| async move {
         let data = account
             .download_attachment(scope, item, attachment)
@@ -80,13 +83,15 @@ pub async fn backup_loaded(
                     attachment.id, item.id
                 )
             })?;
-        store.write_attachment(&attachment.id, &data)
+        store.write_attachment(&attachment.id, &data)?;
+        downloads.add(1);
+        anyhow::Ok(())
     }))
     .buffer_unordered(2)
     .try_collect::<()>()
     .await?;
     if downloaded > 0 {
-        reporter.info(&format!("Backed up {downloaded} new attachment(s)."));
+        reporter.status("Backed up", &count(downloaded, "new attachment"));
     }
 
     let stored_ids = records
@@ -101,12 +106,14 @@ pub async fn backup_loaded(
             .map(|name| name.to_string_lossy().into_owned())
     });
     match &snapshot {
-        Some(name) => reporter.info(&format!(
-            "Wrote snapshot {name} with {} item(s).",
-            live.len()
-        )),
-        None => reporter
-            .info("The vault is unchanged since the newest snapshot; no new snapshot written."),
+        Some(name) => reporter.status(
+            "Saved",
+            &format!("snapshot {name} with {}", count(live.len(), "item")),
+        ),
+        None => reporter.status(
+            "Skipped",
+            "a new snapshot; the vault is unchanged since the newest one",
+        ),
     }
 
     let pruned = match options.retention {
@@ -114,10 +121,14 @@ pub async fn backup_loaded(
         None => PruneReport::default(),
     };
     if pruned != PruneReport::default() {
-        reporter.info(&format!(
-            "Pruned {} snapshot(s) and {} attachment file(s).",
-            pruned.snapshots_removed, pruned.attachments_removed
-        ));
+        reporter.status(
+            "Pruned",
+            &format!(
+                "{} and {}",
+                count(pruned.snapshots_removed, "snapshot"),
+                count(pruned.attachments_removed, "attachment file")
+            ),
+        );
     }
     Ok(BackupReport {
         snapshot,
