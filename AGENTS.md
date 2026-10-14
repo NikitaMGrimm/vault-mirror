@@ -47,6 +47,7 @@ which item types and collections they show, and what they accept.
   what.
 - Every bug fix comes with a test that fails without it.
 - User-facing text is plain and specific: say what happened and what to do.
-- Update the README and the `Unreleased` section of CHANGELOG.md when users
-  would notice the change.
-- Conventional Commits, for example `fix(organization): ...`.
+- Update the README when users would notice the change. CHANGELOG.md is
+  generated from commit messages at release time; do not edit it.
+- Conventional Commits, for example `fix(organization): ...`. Only `feat`,
+  `fix` and `perf` reach the release notes, so word them for users.

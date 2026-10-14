@@ -1,0 +1,39 @@
+# Checked in CI with `cargo deny check`.
+
+[graph]
+targets = [
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+  "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+# Every RustSec advisory fails the check unless listed here with a reason.
+ignore = [
+  # The Marvin timing attack on RSA decryption needs an attacker who can time
+  # many decryptions of ciphertexts they choose. vault-mirror decrypts a few
+  # organization keys per run, locally. No fixed `rsa` release exists.
+  { id = "RUSTSEC-2023-0071", reason = "not exploitable here; see comment" },
+]
+
+[licenses]
+# Licences compatible with distributing vault-mirror under GPL-3.0-only.
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "GPL-3.0-only",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

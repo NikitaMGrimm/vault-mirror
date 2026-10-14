@@ -81,18 +81,20 @@ of 2000 items. Set `VAULT_MIRROR_SCALE_ITEMS` to change the size.
 - Keep each pull request to one change, with a test that fails without it.
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` with the sandbox running.
-- Update the README when behaviour or configuration changes, and add a line
-  to the `Unreleased` section of [CHANGELOG.md](CHANGELOG.md) for anything
-  users notice.
-- Use [Conventional Commits](https://www.conventionalcommits.org) for the
-  pull request title, for example `fix: keep archive state on edit`.
+- Update the README when behaviour or configuration changes.
+- Title the pull request as a [Conventional Commit](https://www.conventionalcommits.org),
+  for example `fix: keep archive state on edit`. Pull requests are squashed,
+  and the release notes are generated from these titles: `feat`, `fix` and
+  `perf` appear in them, other types do not.
 
 ## Releases
 
-The maintainer bumps `version` in `Cargo.toml`, renames the `Unreleased`
-section of the changelog to the version, and pushes a `vX.Y.Z` tag. The
-release workflow builds static binaries for x86-64 and arm64 Linux, publishes
-the container image, and uses the changelog section as the release notes.
+[Release-plz](https://release-plz.dev) keeps a release pull request open
+with the next version and its changelog. The maintainer edits the changelog
+there if needed and merges it. That publishes the crate to crates.io, tags the
+version, and runs the release workflow, which builds static binaries for
+x86-64 and arm64 Linux, publishes the container image, and attaches build
+provenance to both.
 
 ## License
 

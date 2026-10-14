@@ -1,55 +1,85 @@
 name: Release
 
-# A pushed version tag publishes binaries, checksums, a GitHub release and a
-# multi-architecture image. A manual run builds and smoke-tests everything
-# without publishing.
+# Publishes binaries, checksums, build provenance, a GitHub release and a
+# multi-architecture image for a version tag. Release-plz calls it after it
+# tags a release; a pushed tag or a manual run with a tag does the same. A
+# manual run without a tag builds and smoke-tests everything without
+# publishing.
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: The version tag to release, such as v0.2.0
+        type: string
+        required: true
   workflow_dispatch:
+    inputs:
+      tag:
+        description: The version tag to release; leave empty for a test build
+        type: string
+        required: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
 
 jobs:
   version:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.tag.outputs.tag }}
       publish: ${{ steps.version.outputs.publish }}
     steps:
+      - id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="$INPUT_TAG"
+          if [[ -z "$tag" && "$GITHUB_REF_TYPE" == tag ]]; then
+            tag="$GITHUB_REF_NAME"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ steps.tag.outputs.tag || github.sha }}
           persist-credentials: false
       - id: version
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            if [[ "$GITHUB_REF_NAME" != "v$crate" ]]; then
-              echo "::error::Tag $GITHUB_REF_NAME does not match the crate version $crate"
-              exit 1
-            fi
-            echo "version=$crate" >> "$GITHUB_OUTPUT"
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            # The release notes are the changelog section headed with the
-            # version, checked here so that nothing is published without them.
-            mkdir notes
-            awk -v heading="## $crate" '
-              $0 == heading { found = 1; next }
-              found && /^## / { exit }
-              found { print }
-            ' CHANGELOG.md > notes/notes.md
-            if ! grep -q '[^[:space:]]' notes/notes.md; then
-              echo "::error::CHANGELOG.md has no section headed '## $crate'"
-              exit 1
-            fi
-          else
+          if [[ -z "$TAG" ]]; then
             echo "version=$crate-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
             echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          if [[ "$TAG" != "v$crate" ]]; then
+            echo "::error::Tag $TAG does not match the crate version $crate"
+            exit 1
+          fi
+          # The release notes are the changelog section for the version,
+          # headed `## [X.Y.Z]` or `## X.Y.Z`, checked here so that nothing
+          # is published without them.
+          mkdir notes
+          awk -v v="$crate" '
+            function heading(line) {
+              return index(line, "## [" v "]") == 1 || index(line, "## " v " ") == 1 || line == "## " v
+            }
+            heading($0) { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes/notes.md
+          if ! grep -q '[^[:space:]]' notes/notes.md; then
+            echo "::error::CHANGELOG.md has no section for $crate"
+            exit 1
+          fi
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
       - if: steps.version.outputs.publish == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -72,12 +102,15 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.version.outputs.version }}
       PUBLISH: ${{ needs.version.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.version.outputs.tag || github.sha }}
           persist-credentials: false
       - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/vault-mirror" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -98,6 +131,12 @@ jobs:
           cp out/vault-mirror LICENSE README.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -r "dist/$name"
+      # Lets anyone check that a download was built here, from this source:
+      # `gh attestation verify FILE --repo NikitaMGrimm/vault-mirror`.
+      - if: env.PUBLISH == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.arch }}
@@ -141,6 +180,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     steps:
       - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/vault-mirror" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -159,16 +200,27 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
+            type=semver,pattern={{version}},value=${{ needs.version.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.version.outputs.tag }}
+            type=semver,pattern={{major}},value=${{ needs.version.outputs.tag }},enable=${{ !startsWith(needs.version.outputs.tag, 'v0.') }}
       - name: Create the multi-architecture manifest
         working-directory: digests
         run: |
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "$IMAGE@sha256:%s " *)
-      - run: docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
+      - id: manifest
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+          digest=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
 
   release:
     needs: [version, build, image]
@@ -188,11 +240,18 @@ jobs:
           merge-multiple: true
       - working-directory: dist
         run: sha256sum -- *.tar.gz > SHA256SUMS && cat SHA256SUMS
+      # Release-plz creates the release with its notes; a release from a
+      # pushed tag is created here.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+            exit 0
+          fi
           flags=()
-          [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "$GITHUB_REF_NAME" --notes-file notes/notes.md "${flags[@]}" dist/*
+          [[ "$TAG" == *-* ]] && flags+=(--prerelease)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$TAG" --notes-file notes/notes.md "${flags[@]}" dist/*

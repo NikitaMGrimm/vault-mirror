@@ -4,7 +4,7 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
-## Unreleased
+## [Unreleased]
 
 First release.
 

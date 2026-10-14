@@ -1,0 +1,19 @@
+# Release-plz opens a release pull request with the next version and its
+# changelog, generated from Conventional Commits; see CONTRIBUTING.md.
+
+[workspace]
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+# Release only when a release pull request is merged.
+release_always = false
+# The library is published only to build the command; it has no stable API.
+semver_check = false
+
+[changelog]
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^perf", group = "Performance" },
+  { message = "^revert", group = "Reverted" },
+  { message = ".*", skip = true },
+]

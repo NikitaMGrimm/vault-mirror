@@ -1,0 +1,80 @@
+name: Release-plz
+
+# Keeps a release pull request open with the next version and its changelog,
+# generated from Conventional Commits. Merging it publishes the crate to
+# crates.io through trusted publishing, tags the version, creates the GitHub
+# release and runs the release workflow for binaries and the image.
+#
+# Off until the repository variable RELEASE_PLZ is `true`: crates.io trusted
+# publishing can only be set up after the first version is published by hand.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release:
+    if: vars.RELEASE_PLZ == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      tag: ${{ steps.release.outputs.releases_created == 'true' && fromJSON(steps.release.outputs.releases)[0].tag || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          toolchain=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
+          rustup toolchain install "$toolchain" --profile minimal && rustup default "$toolchain"
+      - id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - id: release
+        uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e # v0.5.142
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  # A tag created with the workflow token does not start other workflows, so
+  # the release workflow is called directly.
+  build:
+    needs: release
+    if: needs.release.outputs.tag != ''
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release.outputs.tag }}
+
+  pull-request:
+    if: vars.RELEASE_PLZ == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-pull-request
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          toolchain=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
+          rustup toolchain install "$toolchain" --profile minimal && rustup default "$toolchain"
+      - uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e # v0.5.142
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
