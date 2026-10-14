@@ -84,7 +84,11 @@ fn vault(items: Vec<Item>) -> Vault {
 /// Applies a plan the way the engine does, without a server: the destination
 /// ends up holding exactly what the drafts describe.
 fn apply(source: &Vault, dest: &Vault, mode: Mode) -> Vault {
-    let plan = plan(source, dest, mode);
+    apply_with(source, dest, mode, true)
+}
+
+fn apply_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) -> Vault {
+    let plan = plan_with(source, dest, mode, copy_attachments);
     let mut next = dest.clone();
     let mut counter = dest.items.len() + dest.folders.len() + dest.collections.len();
     let mut fresh = |prefix: &str| {
@@ -137,11 +141,13 @@ fn apply(source: &Vault, dest: &Vault, mode: Mode) -> Vault {
         let mut item = login(&fresh("dest-item"), "", "");
         write(&mut item, entry);
         item.archived = source_item.archived;
-        item.attachments = source_item
-            .attachments
-            .iter()
-            .map(|a| attachment(&fresh("dest-attachment"), &a.file_name, a.size))
-            .collect();
+        if copy_attachments {
+            item.attachments = source_item
+                .attachments
+                .iter()
+                .map(|a| attachment(&fresh("dest-attachment"), &a.file_name, a.size))
+                .collect();
+        }
         next.items.push(item);
     }
     for update in &plan.updates {
@@ -335,6 +341,42 @@ fn a_malformed_marker_is_not_trusted() {
 }
 
 #[test]
+fn a_field_that_only_looks_like_a_marker_is_not_trusted() {
+    let source = vault(vec![login("s1", "One", "pw1")]);
+    let mut dest = vault(vec![login("d1", "Someone's item", "pw")]);
+    let Some(Node::List(fields)) = dest.items[0].content.get_mut("fields") else {
+        panic!()
+    };
+    fields.push(map(vec![
+        ("name", text(MARKER_FIELD)),
+        ("value", text("not-a-source-id not-a-hash")),
+    ]));
+
+    assert_eq!(marker_of(&dest.items[0]), None);
+    assert_eq!(
+        check_safety(&plan(&source, &dest, Mode::Personal), &Safety::default()),
+        Err(SafetyViolation::InitialOverwrite(1))
+    );
+}
+
+#[test]
+fn any_source_field_named_like_the_marker_counts_as_a_marker() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    let Some(Node::List(fields)) = source.items[0].content.get_mut("fields") else {
+        panic!()
+    };
+    fields.push(map(vec![
+        ("name", text(MARKER_FIELD)),
+        ("value", text("anything")),
+    ]));
+    assert_eq!(source_marker_count(&source), 1);
+    assert_eq!(
+        plan(&source, &vault(vec![]), Mode::Personal).source_markers,
+        1
+    );
+}
+
+#[test]
 fn items_in_the_source_trash_are_not_mirrored() {
     let mut source = vault(vec![login("s1", "One", "pw1"), login("s2", "Two", "pw2")]);
     let dest = mirrored(&source, Mode::Personal);
@@ -405,6 +447,78 @@ fn attachments_are_copied_again_only_when_they_changed() {
 }
 
 #[test]
+fn attachments_the_destination_cannot_take_follow_once_it_can() {
+    let mut source = vault(vec![login("s1", "One", "pw1"), login("s2", "Two", "pw2")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+
+    let first = plan_with(&source, &Vault::default(), Mode::Personal, false);
+    assert_eq!(first.attachments_withheld, 1);
+    assert_eq!(first.summary(&source).attachments_copied, 0);
+    let dest = apply_with(&source, &Vault::default(), Mode::Personal, false);
+    assert!(dest.items.iter().all(|item| item.attachments.is_empty()));
+    let again = plan_with(&source, &dest, Mode::Personal, false);
+    assert!(!again.has_changes(), "{again:#?}");
+    assert_eq!(again.attachments_withheld, 1);
+
+    // A content edit is still mirrored, and the marker goes on saying the
+    // attachment is missing.
+    let mut edited = source.clone();
+    edited.items[0]
+        .content
+        .insert("name".into(), text("Renamed"));
+    let dest = apply_with(&edited, &dest, Mode::Personal, false);
+    assert!(!plan_with(&edited, &dest, Mode::Personal, false).has_changes());
+
+    let able = plan(&edited, &dest, Mode::Personal);
+    assert_eq!(able.updates.len(), 1);
+    assert!(able.updates[0].sync_attachments);
+    assert_converged(
+        &edited,
+        &apply(&edited, &dest, Mode::Personal),
+        Mode::Personal,
+    );
+}
+
+#[test]
+fn attachments_already_mirrored_are_kept_when_no_more_can_be_copied() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let dest = mirrored(&source, Mode::Personal);
+    assert!(!plan_with(&source, &dest, Mode::Personal, false).has_changes());
+
+    source.items[0]
+        .attachments
+        .push(attachment("a2", "new.pdf", 50));
+    let withheld = plan_with(&source, &dest, Mode::Personal, false);
+    assert!(!withheld.has_changes(), "{withheld:#?}");
+    assert_eq!(withheld.attachments_withheld, 1);
+    assert!(plan(&source, &dest, Mode::Personal).updates[0].sync_attachments);
+}
+
+#[test]
+fn an_item_left_with_a_pending_marker_gets_its_attachments_again() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let mut dest = mirrored(&source, Mode::Personal);
+
+    // As a run leaves an item that stopped while copying: the files may be
+    // incomplete although their names match.
+    let plan_now = plan(&source, &Vault::default(), Mode::Personal);
+    let draft = plan_now
+        .pending_draft(
+            &plan_now.entries[0],
+            &source,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+    dest.items[0].content = draft.content;
+
+    let update = &plan(&source, &dest, Mode::Personal).updates[0];
+    assert!(update.sync_attachments && update.write_content);
+}
+
+#[test]
 fn attachment_sizes_on_the_destination_do_not_matter() {
     // Sizes are ciphertext sizes and depend on the encryption format in use.
     let mut source = vault(vec![login("s1", "One", "pw1")]);
@@ -429,7 +543,10 @@ fn markers_from_the_python_tool_are_adopted_in_place() {
         let source_id = marker_of_fields(fields);
         *fields.last_mut().unwrap() = map(vec![
             ("name", text(MARKER_FIELD)),
-            ("value", text(&format!("{source_id} 0123abcd"))),
+            (
+                "value",
+                text(&format!("{source_id} {}", "0123abcd".repeat(8))),
+            ),
         ]);
     }
 
@@ -772,6 +889,16 @@ fn deleting_most_of_the_mirror_is_refused() {
         ..Safety::default()
     };
     assert_eq!(check_safety(&shrunk, &confirmed), Ok(()));
+
+    // Just over half is refused, although it rounds down to the limit.
+    let large = mirrored(&numbered(200), Mode::Personal);
+    assert!(matches!(
+        check_safety(
+            &plan(&numbered(99), &large, Mode::Personal),
+            &Safety::default()
+        ),
+        Err(SafetyViolation::MassDelete { deleting: 101, .. })
+    ));
 
     // Half is still allowed, and so is anything at or below the floor.
     assert_eq!(

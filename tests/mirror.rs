@@ -6,7 +6,7 @@ use vault_mirror::{
     fixtures,
     mirror::{Filter, MirrorOptions},
     node::Node,
-    plan::{MARKER_FIELD, Safety, marker_of},
+    plan::{self, MARKER_FIELD, Safety, marker_of},
     vault::{Account, Draft, Scope},
 };
 
@@ -668,6 +668,101 @@ async fn a_destination_without_premium_gets_everything_but_attachments() -> Resu
                 .all(|item| item.attachments.is_empty())
         );
     }
+    assert!(!run(&source, &dest, &options()).await?.changed);
+    Ok(())
+}
+
+/// A destination that loses premium keeps the attachments it already has,
+/// and new ones are left out with a warning.
+#[tokio::test]
+async fn attachments_stay_when_the_destination_loses_premium() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, mut dest) = sandbox.pair().await?;
+    seed_extra(&source, 1).await?;
+    let vault = source.load(&PERSONAL).await?;
+    let item = by_name(&vault, "Extra note 0");
+    source
+        .upload_attachment(&PERSONAL, item, "kept.txt", b"kept")
+        .await?;
+    run(&source, &dest, &options()).await?;
+
+    dest.premium = false;
+    assert!(!run(&source, &dest, &options()).await?.changed);
+    source
+        .upload_attachment(&PERSONAL, item, "new.txt", b"new")
+        .await?;
+    let outcome = run(&source, &dest, &options()).await?;
+    assert!(
+        outcome.warnings.iter().any(|w| w.contains("no premium")),
+        "{:?}",
+        outcome.warnings
+    );
+    let mirrored = dest.load(&PERSONAL).await?;
+    assert_eq!(
+        attachment_bytes(&dest, &mirrored, "Extra note 0", "kept.txt").await?,
+        b"kept"
+    );
+    assert_eq!(by_name(&mirrored, "Extra note 0").attachments.len(), 1);
+
+    dest.premium = true;
+    assert!(run(&source, &dest, &options()).await?.changed);
+    let mirrored = dest.load(&PERSONAL).await?;
+    assert_eq!(
+        attachment_bytes(&dest, &mirrored, "Extra note 0", "new.txt").await?,
+        b"new"
+    );
+    Ok(())
+}
+
+/// A run that stops while replacing attachments leaves the item marked as
+/// pending, so the next run copies them again instead of trusting the files.
+#[tokio::test]
+async fn an_interrupted_attachment_copy_is_repaired() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    seed_extra(&source, 1).await?;
+    let vault = source.load(&PERSONAL).await?;
+    let item = by_name(&vault, "Extra note 0");
+    source
+        .upload_attachment(&PERSONAL, item, "file.txt", b"old")
+        .await?;
+    run(&source, &dest, &options()).await?;
+
+    let vault = source.load(&PERSONAL).await?;
+    let item = by_name(&vault, "Extra note 0");
+    source
+        .delete_attachment(&item.id, &item.attachments[0].id)
+        .await?;
+    source
+        .upload_attachment(&PERSONAL, item, "file.txt", b"new")
+        .await?;
+
+    // What a run leaves when it stops after writing the item and before
+    // replacing its attachments.
+    let source_vault = source.load(&PERSONAL).await?;
+    let dest_vault = dest.load(&PERSONAL).await?;
+    let plan = plan::plan(&source_vault, &dest_vault, plan::Mode::Personal);
+    let update = &plan.updates[0];
+    assert!(update.sync_attachments);
+    let draft = plan.pending_draft(
+        &plan.entries[update.entry],
+        &source_vault,
+        &Default::default(),
+        &Default::default(),
+    )?;
+    dest.update_item(&PERSONAL, &dest_vault.items[update.dest], &draft)
+        .await?;
+
+    assert!(run(&source, &dest, &options()).await?.changed);
+    let mirrored = dest.load(&PERSONAL).await?;
+    assert_eq!(
+        attachment_bytes(&dest, &mirrored, "Extra note 0", "file.txt").await?,
+        b"new"
+    );
     assert!(!run(&source, &dest, &options()).await?.changed);
     Ok(())
 }

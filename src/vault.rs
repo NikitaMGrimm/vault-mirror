@@ -478,6 +478,14 @@ impl Account {
 
     /// Replaces the content of `existing`. Fails if the item changed on the
     /// server since it was loaded.
+    /// Reads one item as the server now holds it. Collections are left
+    /// empty: not every server reports them here.
+    pub async fn get_item(&self, scope: &Scope, id: &str) -> Result<Item> {
+        let scope_key = self.scope_key(scope)?;
+        let cipher = self.session.get(&format!("/ciphers/{id}")).await?;
+        decrypt_item(&cipher, scope_key).context("reading the item")
+    }
+
     pub async fn update_item(&self, scope: &Scope, existing: &Item, draft: &Draft) -> Result<Item> {
         let scope_key = self.scope_key(scope)?;
         let item_key = self.item_key(scope, existing)?;

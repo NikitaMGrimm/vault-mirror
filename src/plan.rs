@@ -31,14 +31,26 @@ pub struct Marker {
 }
 
 impl Marker {
+    /// Accepts only what this tool and the original Python tool write: an
+    /// item id and hex SHA-256 hashes. Anything else is a field someone else
+    /// named `__source`, and must not make an item look mirrored.
     fn parse(value: &str) -> Option<Self> {
+        let is_hash = |part: &str| {
+            part.len() == 64 && part.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        };
         let mut parts = value.split_whitespace();
         let marker = Self {
             source_id: parts.next()?.to_string(),
             core_hash: parts.next()?.to_string(),
             attachments_hash: parts.next().map(str::to_string),
         };
-        parts.next().is_none().then_some(marker)
+        let valid = parts.next().is_none()
+            && is_hash(&marker.core_hash)
+            && marker
+                .attachments_hash
+                .as_deref()
+                .is_none_or(|hash| hash == NO_ATTACHMENTS || is_hash(hash));
+        valid.then_some(marker)
     }
 
     fn render(&self) -> String {
@@ -64,6 +76,17 @@ fn is_marker_field(field: &Node) -> bool {
         .and_then(|map| map.get("name"))
         .and_then(Node::as_str)
         == Some(MARKER_FIELD)
+}
+
+/// How many live source items carry a `__source` field, valid or not. Any
+/// such field means the source looks like a mirror, or holds a field the
+/// mirror could not copy faithfully.
+pub fn source_marker_count(source: &Vault) -> usize {
+    source
+        .items
+        .iter()
+        .filter(|item| !item.in_trash && item.fields().iter().any(is_marker_field))
+        .count()
 }
 
 /// The marker on a destination item. A malformed marker counts as none, so
@@ -134,6 +157,12 @@ pub struct Plan {
     pub tracked_before: usize,
     /// Source items that carry a marker themselves.
     pub source_markers: usize,
+    /// False when the destination cannot take attachments. Its existing
+    /// attachments are then left as they are.
+    pub copy_attachments: bool,
+    /// Source attachments the destination lacks and does not get, because it
+    /// cannot take attachments.
+    pub attachments_withheld: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
@@ -161,7 +190,10 @@ impl Plan {
     }
 
     pub fn summary(&self, source: &Vault) -> Summary {
-        let attachments = |entry: usize| source.items[self.entries[entry].source].attachments.len();
+        let attachments = |entry: usize| match self.copy_attachments {
+            true => source.items[self.entries[entry].source].attachments.len(),
+            false => 0,
+        };
         Summary {
             items_created: self.creates.len(),
             items_updated: self.updates.len(),
@@ -193,6 +225,34 @@ impl Plan {
         folder_ids: &HashMap<String, String>,
         collection_ids: &HashMap<String, String>,
     ) -> Result<Draft, PlanError> {
+        self.draft_marked(entry, &entry.marker, source, folder_ids, collection_ids)
+    }
+
+    /// Like `draft`, but the marker does not yet vouch for the attachments.
+    /// Written before attachments are copied, so that a run interrupted
+    /// before they are complete and verified copies them again next time.
+    pub fn pending_draft(
+        &self,
+        entry: &Entry,
+        source: &Vault,
+        folder_ids: &HashMap<String, String>,
+        collection_ids: &HashMap<String, String>,
+    ) -> Result<Draft, PlanError> {
+        let pending = Marker {
+            attachments_hash: Some(NO_ATTACHMENTS.to_string()),
+            ..entry.marker.clone()
+        };
+        self.draft_marked(entry, &pending, source, folder_ids, collection_ids)
+    }
+
+    fn draft_marked(
+        &self,
+        entry: &Entry,
+        marker: &Marker,
+        source: &Vault,
+        folder_ids: &HashMap<String, String>,
+        collection_ids: &HashMap<String, String>,
+    ) -> Result<Draft, PlanError> {
         let item = &source.items[entry.source];
         let mut content = item.content.clone();
         let mut fields: Vec<Node> = item
@@ -201,7 +261,7 @@ impl Plan {
             .filter(|field| !is_marker_field(field))
             .cloned()
             .collect();
-        fields.push(entry.marker.to_field());
+        fields.push(marker.to_field());
         content.insert("fields".to_string(), Node::List(fields));
 
         let folder_id = match &entry.folder {
@@ -250,6 +310,13 @@ pub enum Mode {
 }
 
 pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
+    plan_with(source, dest, mode, true)
+}
+
+/// Plans a mirror. Without `copy_attachments`, attachments are neither
+/// copied nor removed, and markers keep vouching for what the destination
+/// already holds, so that the attachments follow once they can.
+pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) -> Plan {
     let source_folders = names_by_id(source.folders.iter().map(|f| (&f.id, &f.name)));
     let source_collections = names_by_id(source.collections.iter().map(|c| (&c.id, &c.name)));
     // When the destination has two containers with one name, only the first
@@ -263,14 +330,17 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
         .map(|(name, id)| (*id, *name))
         .collect();
 
-    let mut plan = Plan::default();
+    let mut plan = Plan {
+        copy_attachments,
+        ..Plan::default()
+    };
 
     let mut entry_by_source_id: HashMap<&str, usize> = HashMap::new();
     for (index, item) in source.items.iter().enumerate() {
         if item.in_trash {
             continue;
         }
-        if marker_of(item).is_some() {
+        if item.fields().iter().any(is_marker_field) {
             plan.source_markers += 1;
         }
         let folder = match mode {
@@ -329,9 +399,14 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
         dest_by_entry.insert(entry, (index, marker));
     }
 
-    for (entry_index, entry) in plan.entries.iter().enumerate() {
-        let source_item = &source.items[entry.source];
+    for entry_index in 0..plan.entries.len() {
+        let source_item = &source.items[plan.entries[entry_index].source];
         let Some((dest_index, marker)) = dest_by_entry.get(&entry_index) else {
+            if !copy_attachments {
+                plan.attachments_withheld += source_item.attachments.len();
+                plan.entries[entry_index].marker.attachments_hash =
+                    Some(NO_ATTACHMENTS.to_string());
+            }
             plan.creates.push(entry_index);
             continue;
         };
@@ -361,8 +436,28 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
             // matters when there are attachments on either side.
             None => source_item.attachments.is_empty() && dest_item.attachments.is_empty(),
         };
-        let sync_attachments =
+        let mut sync_attachments =
             !attachments_recorded || attachment_names(dest_item) != attachment_names(source_item);
+        if !copy_attachments {
+            // The marker goes on vouching for whatever the destination holds,
+            // so that a later run that can copy attachments sees what is
+            // missing.
+            if sync_attachments {
+                let held = attachment_names(dest_item);
+                plan.attachments_withheld += attachment_names(source_item)
+                    .iter()
+                    .filter(|name| !held.contains(name))
+                    .count();
+            }
+            sync_attachments = false;
+            plan.entries[entry_index].marker.attachments_hash = Some(
+                marker
+                    .attachments_hash
+                    .clone()
+                    .unwrap_or_else(|| NO_ATTACHMENTS.to_string()),
+            );
+        }
+        let entry = &plan.entries[entry_index];
         let write_content = marker != &entry.marker || dest_core != entry.marker.core_hash;
         let set_archived =
             (dest_item.archived != source_item.archived).then_some(source_item.archived);
@@ -582,8 +677,9 @@ pub fn check_safety(plan: &Plan, safety: &Safety) -> Result<(), SafetyViolation>
         && deleting > safety.delete_floor
         && total > 0
     {
-        let percent = u32::try_from(deleting * 100 / total).unwrap_or(u32::MAX);
-        if percent > safety.max_delete_percent {
+        // Compared exactly: 101 of 200 is above a 50% limit.
+        if deleting as u128 * 100 > safety.max_delete_percent as u128 * total as u128 {
+            let percent = u32::try_from(deleting * 100 / total).unwrap_or(u32::MAX);
             return Err(SafetyViolation::MassDelete {
                 deleting,
                 total,
