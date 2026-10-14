@@ -144,7 +144,21 @@ pub async fn mirror(
     options: &MirrorOptions,
     reporter: &dyn Reporter,
 ) -> Result<Outcome, MirrorError> {
+    mirror_onto(source, dest, None, options, reporter).await
+}
+
+/// Like `mirror`, but plans against `dest_vault`, the destination as it was
+/// just backed up, instead of reading it again. An item added in between is
+/// then left alone until a later run has backed it up.
+pub async fn mirror_onto(
+    source: &Endpoint<'_>,
+    dest: &Endpoint<'_>,
+    dest_vault: Option<Vault>,
+    options: &MirrorOptions,
+    reporter: &dyn Reporter,
+) -> Result<Outcome, MirrorError> {
     let mut run = Run {
+        dest_vault,
         source,
         dest,
         options,
@@ -181,6 +195,8 @@ struct Run<'a> {
     archive_unsupported: bool,
     /// False when the destination account cannot take attachments.
     copy_attachments: bool,
+    /// The destination as already read, if it was.
+    dest_vault: Option<Vault>,
 }
 
 impl Run<'_> {
@@ -266,6 +282,7 @@ impl Run<'_> {
             bail!("the source and destination are the same organization");
         }
 
+        let loaded = self.dest_vault.take();
         let (source_vault, dest_vault) = tokio::try_join!(
             async {
                 self.source
@@ -275,11 +292,15 @@ impl Run<'_> {
                     .context("reading the source vault")
             },
             async {
-                self.dest
-                    .account
-                    .load(&self.dest.scope)
-                    .await
-                    .context("reading the destination vault")
+                match loaded {
+                    Some(vault) => Ok(vault),
+                    None => self
+                        .dest
+                        .account
+                        .load(&self.dest.scope)
+                        .await
+                        .context("reading the destination vault"),
+                }
             },
         )?;
 
@@ -478,46 +499,6 @@ impl Run<'_> {
             self.reporter.info(&format!("Updated {rewritten} item(s)."));
         }
 
-        self.stage = "setting archive state";
-        let mut to_archive: Vec<String> = Vec::new();
-        let mut to_unarchive: Vec<String> = Vec::new();
-        // Decided from what the server reports after the writes, not from the
-        // plan: servers differ in what a write does to an item's archive state.
-        let written = created
-            .iter()
-            .map(|(entry_index, item)| (*entry_index, item))
-            .chain(
-                updated
-                    .iter()
-                    .map(|(index, item)| (plan.updates[*index].entry, item)),
-            );
-        for (entry_index, item) in written {
-            let wanted = source_vault.items[plan.entries[entry_index].source].archived;
-            match (wanted, item.archived) {
-                (true, false) => to_archive.push(item.id.clone()),
-                (false, true) => to_unarchive.push(item.id.clone()),
-                _ => {}
-            }
-        }
-        for (ids, archived) in [(to_archive, true), (to_unarchive, false)] {
-            if ids.is_empty() {
-                continue;
-            }
-            if let Err(error) = dest.account.set_archived(&ids, archived).await {
-                // Archiving is a paid feature on some servers and missing on
-                // older ones. The items are mirrored either way, so a refusal
-                // does not fail the run; any other failure does.
-                if !refused(&error) {
-                    return Err(error);
-                }
-                self.archive_unsupported = true;
-                self.warn(format!(
-                    "The destination refused to change the archive state of {} item(s): {error:#}",
-                    ids.len()
-                ));
-            }
-        }
-
         self.stage = "copying attachments";
         // (entry, destination item, destination attachments to remove first)
         let mut transfers: Vec<(usize, &Item, Vec<String>)> = Vec::new();
@@ -538,7 +519,7 @@ impl Run<'_> {
             }
         }
         let verify_attachments = self.options.verify_attachments;
-        let copied: Vec<usize> =
+        let copied: Vec<(usize, usize, Option<Item>)> =
             stream::iter(transfers.into_iter().map(|(entry_index, dest_item, old)| {
                 let (folder_ids, collection_ids) = (&folder_ids, &collection_ids);
                 async move {
@@ -577,7 +558,7 @@ impl Run<'_> {
                     }
                     if copied.is_empty() {
                         // Only removals: the marker written before is final.
-                        return anyhow::Ok(0);
+                        return anyhow::Ok((entry_index, 0, None));
                     }
                     let mut stored = dest
                         .account
@@ -606,22 +587,79 @@ impl Run<'_> {
                             );
                         }
                     }
-                    let draft = plan.draft(entry, source_vault, folder_ids, collection_ids)?;
-                    dest.account
+                    let draft = plan.finished_draft(
+                        entry,
+                        source_vault,
+                        &stored,
+                        folder_ids,
+                        collection_ids,
+                    )?;
+                    let finished = dest
+                        .account
                         .update_item(&dest.scope, &stored, &draft)
                         .await
                         .with_context(|| format!("updating destination item {}", dest_item.id))?;
-                    Ok(copied.len())
+                    Ok((entry_index, copied.len(), Some(finished)))
                 }
             }))
             // Attachments are held in memory while they are re-encrypted.
             .buffer_unordered(concurrency.min(2))
             .try_collect()
             .await?;
-        let copied: usize = copied.into_iter().sum();
+        let mut finished: HashMap<usize, Item> = HashMap::new();
+        let mut count = 0;
+        for (entry_index, copied, item) in copied {
+            count += copied;
+            if let Some(item) = item {
+                finished.insert(entry_index, item);
+            }
+        }
+        let copied = count;
         if copied > 0 {
             self.reporter
                 .info(&format!("Copied {copied} attachment(s)."));
+        }
+
+        self.stage = "setting archive state";
+        let mut to_archive: Vec<String> = Vec::new();
+        let mut to_unarchive: Vec<String> = Vec::new();
+        // Decided from what the server reports after the writes, not from the
+        // plan: servers differ in what a write, or an attachment upload, does
+        // to an item's archive state.
+        let written = created
+            .iter()
+            .map(|(entry_index, item)| (*entry_index, item))
+            .chain(
+                updated
+                    .iter()
+                    .map(|(index, item)| (plan.updates[*index].entry, item)),
+            )
+            .map(|(entry_index, item)| (entry_index, finished.get(&entry_index).unwrap_or(item)));
+        for (entry_index, item) in written {
+            let wanted = source_vault.items[plan.entries[entry_index].source].archived;
+            match (wanted, item.archived) {
+                (true, false) => to_archive.push(item.id.clone()),
+                (false, true) => to_unarchive.push(item.id.clone()),
+                _ => {}
+            }
+        }
+        for (ids, archived) in [(to_archive, true), (to_unarchive, false)] {
+            if ids.is_empty() {
+                continue;
+            }
+            if let Err(error) = dest.account.set_archived(&ids, archived).await {
+                // Archiving is a paid feature on some servers and missing on
+                // older ones. The items are mirrored either way, so a refusal
+                // does not fail the run; any other failure does.
+                if !refused(&error) {
+                    return Err(error);
+                }
+                self.archive_unsupported = true;
+                self.warn(format!(
+                    "The destination refused to change the archive state of {} item(s): {error:#}",
+                    ids.len()
+                ));
+            }
         }
 
         // Deletions come last: until here a failed run has removed nothing.
@@ -732,7 +770,7 @@ fn collection_names(vault: &Vault, item: &Item, mode: Mode) -> Vec<String> {
 
 /// True when the server answered that it does not accept the request, as
 /// opposed to failing to answer, limiting the rate, or failing itself.
-fn refused(error: &anyhow::Error) -> bool {
+pub(crate) fn refused(error: &anyhow::Error) -> bool {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ApiError>())

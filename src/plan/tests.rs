@@ -135,6 +135,16 @@ fn apply_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) 
         item.folder_id = draft.folder_id;
         item.collection_ids = draft.collection_ids;
     };
+    // As the engine does once an item's attachments are copied.
+    let finish = |item: &mut Item, entry: &Entry| {
+        if item.attachments.is_empty() {
+            return;
+        }
+        let draft = plan
+            .finished_draft(entry, source, item, &folder_ids, &collection_ids)
+            .unwrap();
+        item.content = draft.content;
+    };
     for &entry_index in &plan.creates {
         let entry = &plan.entries[entry_index];
         let source_item = &source.items[entry.source];
@@ -147,6 +157,7 @@ fn apply_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) 
                 .iter()
                 .map(|a| attachment(&fresh("dest-attachment"), &a.file_name, a.size))
                 .collect();
+            finish(&mut item, entry);
         }
         next.items.push(item);
     }
@@ -164,6 +175,7 @@ fn apply_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) 
         }
         if update.sync_attachments {
             item.attachments = attachments;
+            finish(item, entry);
         }
         if let Some(archived) = update.set_archived {
             item.archived = archived;
@@ -187,7 +199,8 @@ fn assert_converged(source: &Vault, dest: &Vault, mode: Mode) {
     assert!(!again.has_changes(), "plan still has changes: {again:#?}");
     let live = source.items.iter().filter(|item| !item.in_trash).count();
     assert_eq!(again.unchanged, live);
-    assert_eq!(dest.items.len(), live);
+    let mirrored = dest.items.iter().filter(|item| !item.in_trash).count();
+    assert_eq!(mirrored, live);
 }
 
 fn mirrored(source: &Vault, mode: Mode) -> Vault {
@@ -304,7 +317,6 @@ fn destination_items_without_a_live_source_are_deleted_with_a_reason() {
         [
             ("dest-item-2", DeleteReason::Stale),
             ("manual", DeleteReason::Untracked),
-            ("in-trash", DeleteReason::Trashed),
             ("copy", DeleteReason::Duplicate),
         ]
     );
@@ -436,7 +448,7 @@ fn attachments_are_copied_again_only_when_they_changed() {
     let mut damaged = dest.clone();
     damaged.items[0].attachments.clear();
     let update = &plan(&source, &damaged, Mode::Personal).updates[0];
-    assert!(update.sync_attachments && !update.write_content);
+    assert!(update.sync_attachments);
 
     // Removing the last source attachment removes it from the destination.
     let mut removed = source.clone();
@@ -515,7 +527,34 @@ fn an_item_left_with_a_pending_marker_gets_its_attachments_again() {
     dest.items[0].content = draft.content;
 
     let update = &plan(&source, &dest, Mode::Personal).updates[0];
-    assert!(update.sync_attachments && update.write_content);
+    assert!(update.sync_attachments);
+}
+
+#[test]
+fn a_destination_file_replaced_under_the_same_name_is_copied_again() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let mut dest = mirrored(&source, Mode::Personal);
+    dest.items[0].attachments = vec![attachment("replaced", "scan.pdf", 100)];
+    let plan = plan(&source, &dest, Mode::Personal);
+    assert!(plan.updates[0].sync_attachments);
+    assert_converged(
+        &source,
+        &apply(&source, &dest, Mode::Personal),
+        Mode::Personal,
+    );
+}
+
+#[test]
+fn a_source_file_replaced_under_the_same_name_counts_as_withheld() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let dest = mirrored(&source, Mode::Personal);
+    source.items[0].attachments = vec![attachment("a2", "scan.pdf", 120)];
+    assert_eq!(
+        plan_with(&source, &dest, Mode::Personal, false).attachments_withheld,
+        1
+    );
 }
 
 #[test]

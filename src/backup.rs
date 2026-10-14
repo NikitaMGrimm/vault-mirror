@@ -9,7 +9,7 @@ use crate::{
     mirror::Reporter,
     snapshot::{self, SnapshotAttachment},
     store::{PruneReport, Retention, Store},
-    vault::{Account, Scope},
+    vault::{Account, Scope, Vault},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -37,6 +37,18 @@ pub async fn backup(
     reporter: &dyn Reporter,
 ) -> Result<BackupReport> {
     let vault = account.load(scope).await.context("reading the vault")?;
+    backup_loaded(account, scope, &vault, store, options, reporter).await
+}
+
+/// Backs up `vault`, as just read from `account`.
+pub async fn backup_loaded(
+    account: &Account,
+    scope: &Scope,
+    vault: &Vault,
+    store: &Store<'_>,
+    options: &BackupOptions<'_>,
+    reporter: &dyn Reporter,
+) -> Result<BackupReport> {
     let live: Vec<_> = vault.items.iter().filter(|item| !item.in_trash).collect();
 
     let mut records = Vec::new();
@@ -82,7 +94,7 @@ pub async fn backup(
         .filter(|r| r.stored)
         .map(|r| r.attachment_id.clone())
         .collect();
-    let document = snapshot::build(&vault, scope, &records);
+    let document = snapshot::build(vault, scope, &records);
     let written = store.write_snapshot(document, stored_ids, options.now, snapshot::stamp)?;
     let snapshot = written.and_then(|path| {
         path.file_name()

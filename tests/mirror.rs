@@ -4,7 +4,7 @@ use anyhow::Result;
 use common::*;
 use vault_mirror::{
     fixtures,
-    mirror::{Filter, MirrorOptions},
+    mirror::{Endpoint, Filter, MirrorOptions, mirror_onto},
     node::Node,
     plan::{self, MARKER_FIELD, Safety, marker_of},
     vault::{Account, Draft, Scope},
@@ -258,22 +258,23 @@ async fn changes_made_in_the_destination_are_undone() -> Result<()> {
 
     let outcome = run(&source, &dest, &options()).await?;
     assert!(outcome.changed);
-    // Identity and the trashed key are recreated; the stray item and the
-    // trashed copy are removed.
+    // Identity and the trashed key are recreated and the stray item is
+    // removed. The trashed copy stays in the trash.
     assert_eq!(outcome.summary.items_created, 2);
-    assert_eq!(outcome.summary.items_deleted, 2);
+    assert_eq!(outcome.summary.items_deleted, 1);
     assert_eq!(outcome.summary.items_updated, 3);
     assert_eq!(outcome.summary.folders_deleted, 1);
 
     let after = dest.load(&PERSONAL).await?;
-    assert_eq!(after.items.len(), fixtures::samples().len());
+    let live = after.items.iter().filter(|item| !item.in_trash).count();
+    assert_eq!(live, fixtures::samples().len());
     assert_eq!(
         by_name(&after, "Visa").content["card"].as_map().unwrap()["number"].as_str(),
         Some("4111111111111111")
     );
     assert_eq!(by_name(&after, "GitHub").attachments.len(), 2);
     assert!(by_name(&after, "Archived note").archived);
-    assert!(after.items.iter().all(|item| !item.in_trash));
+    assert_eq!(after.items.iter().filter(|item| item.in_trash).count(), 1);
     assert!(!run(&source, &dest, &options()).await?.changed);
     Ok(())
 }
@@ -839,6 +840,123 @@ async fn an_interrupted_attachment_copy_is_repaired() -> Result<()> {
         attachment_bytes(&dest, &mirrored, "Extra note 0", "file.txt").await?,
         b"new"
     );
+    assert!(!run(&source, &dest, &options()).await?.changed);
+    Ok(())
+}
+
+/// The mirror changes only what the destination backup holds: an item added
+/// after the backup was read is left for a later run.
+#[tokio::test]
+async fn an_item_added_after_the_backup_is_left_alone() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    seed(&source).await?;
+    run(&source, &dest, &options()).await?;
+
+    let backed_up = dest.load(&PERSONAL).await?;
+    let mut content = fixtures::samples().remove(2).content;
+    content.insert("name".into(), Node::secret("Added meanwhile"));
+    let added = dest
+        .create_item(
+            &PERSONAL,
+            &Draft {
+                content,
+                folder_id: None,
+                collection_ids: vec![],
+            },
+        )
+        .await?;
+    let endpoint = |account| Endpoint {
+        account,
+        scope: PERSONAL,
+    };
+    mirror_onto(
+        &endpoint(&source),
+        &endpoint(&dest),
+        Some(backed_up),
+        &options(),
+        &Capture::default(),
+    )
+    .await?;
+    let after = dest.load(&PERSONAL).await?;
+    assert!(after.items.iter().any(|item| item.id == added.id));
+
+    // The next run has it in its backup, and removes it.
+    run(&source, &dest, &options()).await?;
+    let after = dest.load(&PERSONAL).await?;
+    assert!(after.items.iter().all(|item| item.id != added.id));
+    Ok(())
+}
+
+/// Items in the destination's trash are the server's to purge.
+#[tokio::test]
+async fn the_destination_trash_is_left_alone() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    seed(&source).await?;
+    run(&source, &dest, &options()).await?;
+    let mirrored = dest.load(&PERSONAL).await?;
+    let trashed = mirrored.items[0].id.clone();
+    dest.trash_items(std::slice::from_ref(&trashed)).await?;
+
+    let again = run(&source, &dest, &options()).await?;
+    assert_eq!(again.summary.items_created, 1);
+    assert_eq!(again.summary.items_deleted, 0);
+    let after = dest.load(&PERSONAL).await?;
+    assert!(
+        after
+            .items
+            .iter()
+            .any(|item| item.id == trashed && item.in_trash)
+    );
+    assert!(!run(&source, &dest, &options()).await?.changed);
+    Ok(())
+}
+
+/// An archived item whose attachments are copied ends up archived, also on
+/// servers where an upload takes an item out of the archive.
+#[tokio::test]
+async fn archived_items_with_attachments_stay_archived() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    // Enough items that they are imported in bulk.
+    seed_extra(&source, 12).await?;
+    let vault = source.load(&PERSONAL).await?;
+    let item = by_name(&vault, "Extra note 0");
+    source
+        .upload_attachment(&PERSONAL, item, "file.txt", b"archived")
+        .await?;
+    source
+        .set_archived(std::slice::from_ref(&item.id), true)
+        .await?;
+
+    let first = run(&source, &dest, &options()).await?;
+    if first.warnings.iter().any(|w| w.contains("archive")) {
+        return Ok(());
+    }
+    let mirrored = dest.load(&PERSONAL).await?;
+    let copy = by_name(&mirrored, "Extra note 0");
+    assert!(copy.archived);
+    assert_eq!(
+        attachment_bytes(&dest, &mirrored, "Extra note 0", "file.txt").await?,
+        b"archived"
+    );
+
+    // Replaced attachments on an item that is already archived.
+    let vault = source.load(&PERSONAL).await?;
+    let item = by_name(&vault, "Extra note 0");
+    source
+        .upload_attachment(&PERSONAL, item, "second.txt", b"second")
+        .await?;
+    run(&source, &dest, &options()).await?;
+    let mirrored = dest.load(&PERSONAL).await?;
+    assert!(by_name(&mirrored, "Extra note 0").archived);
     assert!(!run(&source, &dest, &options()).await?.changed);
     Ok(())
 }

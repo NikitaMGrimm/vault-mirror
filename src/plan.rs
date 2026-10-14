@@ -91,6 +91,18 @@ pub fn source_marker_count(source: &Vault) -> usize {
 
 /// The marker on a destination item. A malformed marker counts as none, so
 /// the item is treated as not mirrored rather than trusted.
+/// True for a `__source` field this tool wrote, as opposed to a field
+/// someone else gave that name.
+pub fn is_mirror_marker(field: &Node) -> bool {
+    is_marker_field(field)
+        && field
+            .as_map()
+            .and_then(|map| map.get("value"))
+            .and_then(Node::as_str)
+            .and_then(Marker::parse)
+            .is_some()
+}
+
 pub fn marker_of(item: &Item) -> Option<Marker> {
     let field = item.fields().iter().rfind(|field| is_marker_field(field))?;
     Marker::parse(field.as_map()?.get("value")?.as_str()?)
@@ -125,8 +137,6 @@ pub enum DeleteReason {
     Untracked,
     /// A second copy of a source item that is already mirrored.
     Duplicate,
-    /// It sits in the destination's trash.
-    Trashed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -243,6 +253,23 @@ impl Plan {
             ..entry.marker.clone()
         };
         self.draft_marked(entry, &pending, source, folder_ids, collection_ids)
+    }
+
+    /// The draft that completes an item once its attachments are copied to
+    /// `dest`, the destination item as the server now holds it.
+    pub fn finished_draft(
+        &self,
+        entry: &Entry,
+        source: &Vault,
+        dest: &Item,
+        folder_ids: &HashMap<String, String>,
+        collection_ids: &HashMap<String, String>,
+    ) -> Result<Draft, PlanError> {
+        let finished = Marker {
+            attachments_hash: Some(attachments_hash(&source.items[entry.source], dest)),
+            ..entry.marker.clone()
+        };
+        self.draft_marked(entry, &finished, source, folder_ids, collection_ids)
     }
 
     fn draft_marked(
@@ -362,7 +389,8 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         let marker = Marker {
             source_id: item.id.clone(),
             core_hash: core_hash(item, folder.as_deref(), &collections, mode),
-            attachments_hash: Some(attachments_hash(item)),
+            // Final once the destination item is known.
+            attachments_hash: Some(NO_ATTACHMENTS.to_string()),
         };
         entry_by_source_id.insert(&item.id, plan.entries.len());
         plan.entries.push(Entry {
@@ -379,8 +407,10 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
             dest: index,
             reason,
         };
+        // The trash is left to the server, which empties it on its own
+        // schedule. Until then whoever put an item there can take it back,
+        // and backups do not cover it.
         if item.in_trash {
-            plan.deletes.push(delete(DeleteReason::Trashed));
             continue;
         }
         let Some(marker) = marker_of(item) else {
@@ -404,8 +434,6 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         let Some((dest_index, marker)) = dest_by_entry.get(&entry_index) else {
             if !copy_attachments {
                 plan.attachments_withheld += source_item.attachments.len();
-                plan.entries[entry_index].marker.attachments_hash =
-                    Some(NO_ATTACHMENTS.to_string());
             }
             plan.creates.push(entry_index);
             continue;
@@ -430,8 +458,9 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         // The marker alone is not trusted: a destination item edited by hand
         // still carries the old marker.
         let dest_core = core_hash(dest_item, dest_folder, &dest_item_collections, mode);
+        let current = attachments_hash(source_item, dest_item);
         let attachments_recorded = match &marker.attachments_hash {
-            Some(hash) => *hash == attachments_hash(source_item),
+            Some(hash) => *hash == current,
             // A legacy marker says nothing about attachments. That only
             // matters when there are attachments on either side.
             None => source_item.attachments.is_empty() && dest_item.attachments.is_empty(),
@@ -444,10 +473,15 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
             // missing.
             if sync_attachments {
                 let held = attachment_names(dest_item);
-                plan.attachments_withheld += attachment_names(source_item)
+                let missing = attachment_names(source_item)
                     .iter()
                     .filter(|name| !held.contains(name))
                     .count();
+                // Files replaced under the same name are all missing.
+                plan.attachments_withheld += match missing {
+                    0 => source_item.attachments.len(),
+                    missing => missing,
+                };
             }
             sync_attachments = false;
             plan.entries[entry_index].marker.attachments_hash = Some(
@@ -456,6 +490,8 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
                     .clone()
                     .unwrap_or_else(|| NO_ATTACHMENTS.to_string()),
             );
+        } else if !sync_attachments {
+            plan.entries[entry_index].marker.attachments_hash = Some(current);
         }
         let entry = &plan.entries[entry_index];
         let write_content = marker != &entry.marker || dest_core != entry.marker.core_hash;
@@ -585,19 +621,22 @@ fn core_hash(item: &Item, folder: Option<&str>, collections: &[String], mode: Mo
     hash(&comparable(item, folder, collections, mode))
 }
 
-/// Identifies the source item's attachments. Attachment ids never get reused,
-/// so replacing a file under the same name still changes this.
-fn attachments_hash(item: &Item) -> String {
-    if item.attachments.is_empty() {
+/// Identifies the source item's attachments and the destination files they
+/// were copied to. Attachment ids never get reused, so a file replaced under
+/// the same name on either side changes this.
+fn attachments_hash(source: &Item, dest: &Item) -> String {
+    if source.attachments.is_empty() && dest.attachments.is_empty() {
         return NO_ATTACHMENTS.to_string();
     }
-    let mut identity: Vec<(&str, &str, u64)> = item
+    let mut identity: Vec<(&str, &str, u64)> = source
         .attachments
         .iter()
         .map(|a| (a.id.as_str(), a.file_name.as_str(), a.size))
         .collect();
     identity.sort_unstable();
-    hash(&json!(identity))
+    let mut copies: Vec<&str> = dest.attachments.iter().map(|a| a.id.as_str()).collect();
+    copies.sort_unstable();
+    hash(&json!([identity, copies]))
 }
 
 fn hash(value: &Value) -> String {

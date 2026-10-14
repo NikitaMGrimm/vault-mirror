@@ -390,8 +390,8 @@ writable by that user, for example after `chown 65532:65532
 
 - Sends, organization members, groups, collection permissions, and account
   settings are not mirrored.
-- Items in the source's trash are not mirrored. Trashed items in the
-  destination are deleted.
+- Items in the source's trash are not mirrored. Items in the destination's
+  trash are left alone; the server empties its trash itself.
 - Bank accounts, driver's licences and passports are new item types. Bitwarden
   shows them only to accounts it has enabled them for. Copies made in a
   destination that hides them would be invisible, so they are left out of the

@@ -13,9 +13,9 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     api::{ApiCredentials, ClientOptions, ServerUrls, build_http_client},
-    backup::{BackupOptions, BackupReport, backup},
+    backup::{BackupOptions, BackupReport, backup, backup_loaded},
     config::{Config, VaultConfig},
-    mirror::{Endpoint, MirrorOptions, Reporter, mirror},
+    mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto},
     plan::{Safety, Summary},
     store::{Keys, Store},
     vault::{Account, Scope},
@@ -319,15 +319,19 @@ async fn execute(
     // be the only copy: one the source never had, one changed in the
     // destination, or one in a vault this tool did not fill. The mirror is
     // about to delete or replace such files.
+    let mut dest_vault = None;
     if let (Some(keys), Some(options)) = (&keys, &backup_options) {
         progress.stage = "destination backup";
         reporter.info("Backing up the destination vault before changing it.");
         let store = Store::open(&config.backups_dir, "dest", keys)?;
+        let vault = dest.load(&dest_scope).await.context("reading the vault")?;
         progress.status.dest_backup = Some(
-            backup(&dest, &dest_scope, &store, options, reporter)
+            backup_loaded(&dest, &dest_scope, &vault, &store, options, reporter)
                 .await?
                 .into(),
         );
+        // The mirror changes only what this backup holds.
+        dest_vault = Some(vault);
     }
 
     progress.stage = "mirror";
@@ -350,7 +354,7 @@ async fn execute(
         account: &dest,
         scope: dest_scope,
     };
-    match mirror(&source, &dest, &options, reporter).await {
+    match mirror_onto(&source, &dest, dest_vault, &options, reporter).await {
         Ok(outcome) => {
             progress.status.mirror = Some(SummaryRecord::new(outcome.summary, outcome.changed));
             progress.status.warnings = outcome.warnings;
