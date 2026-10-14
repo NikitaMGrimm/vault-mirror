@@ -22,6 +22,11 @@ const MAX_ATTEMPTS: u32 = 5;
 /// The longest a server's `Retry-After` is honoured for, per attempt.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
+/// How long one request waits out rate limits in total. Bitwarden's cloud
+/// accepts about 60 new items a minute, so a large first run is mostly
+/// waiting.
+const RATE_LIMIT_PATIENCE: Duration = Duration::from_secs(15 * 60);
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("{context}: the server answered {status}: {message}")]
@@ -301,6 +306,7 @@ impl Session {
         let context = format!("{method} {path}");
         let mut reauthenticated = false;
         let mut attempt = 1;
+        let mut rate_limited_for = Duration::ZERO;
         loop {
             let token = self.token.read().await.clone();
             let mut request = self.http.request(method.clone(), &url).bearer_auth(&token);
@@ -322,10 +328,14 @@ impl Session {
                 Retry::Safe => error.transient(),
                 Retry::OnlyIfNotApplied => error.not_applied(),
             };
-            if !retryable || attempt >= MAX_ATTEMPTS {
+            let delay = match retryable {
+                true => next_attempt(&error, attempt, &mut rate_limited_for),
+                false => None,
+            };
+            let Some(delay) = delay else {
                 return Err(error);
-            }
-            tokio::time::sleep(error.retry_delay(attempt)).await;
+            };
+            tokio::time::sleep(delay).await;
             attempt += 1;
         }
     }
@@ -335,15 +345,18 @@ impl Session {
     pub async fn download(&self, url: &str) -> Result<Vec<u8>> {
         let context = "downloading attachment".to_string();
         let mut attempt = 1;
+        let mut rate_limited_for = Duration::ZERO;
         loop {
-            match self.download_once(url, &context).await {
+            let error = match self.download_once(url, &context).await {
                 Ok(bytes) => return Ok(bytes),
-                Err(error) if error.transient() && attempt < MAX_ATTEMPTS => {
-                    tokio::time::sleep(error.retry_delay(attempt)).await;
-                    attempt += 1;
-                }
+                Err(error) if error.transient() => error,
                 Err(error) => return Err(error),
-            }
+            };
+            let Some(delay) = next_attempt(&error, attempt, &mut rate_limited_for) else {
+                return Err(error);
+            };
+            tokio::time::sleep(delay).await;
+            attempt += 1;
         }
     }
 
@@ -450,6 +463,24 @@ fn retry_after(
     Some(wait.min(MAX_RETRY_AFTER))
 }
 
+/// The wait before the next attempt at a request that failed with a
+/// retryable error, or `None` to give up. A rate limit is the server asking
+/// to slow down, not a failure, so it is waited out for longer than other
+/// errors are retried.
+fn next_attempt(
+    error: &ApiError,
+    attempt: u32,
+    rate_limited_for: &mut Duration,
+) -> Option<Duration> {
+    let delay = error.retry_delay(attempt);
+    if error.status() == Some(StatusCode::TOO_MANY_REQUESTS) {
+        let delay = delay.max(Duration::from_secs(1));
+        *rate_limited_for += delay;
+        return (*rate_limited_for <= RATE_LIMIT_PATIENCE).then_some(delay);
+    }
+    (attempt < MAX_ATTEMPTS).then_some(delay)
+}
+
 fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(500 * 2u64.pow(attempt.saturating_sub(1)).min(16))
 }
@@ -536,19 +567,22 @@ async fn request_token(
         ("deviceName", "vault-mirror"),
     ];
     let mut attempt = 1;
+    let mut rate_limited_for = Duration::ZERO;
     let value = loop {
         let request = http
             .post(format!("{}/connect/token", urls.identity))
             .form(&form);
-        match send(request, context).await {
+        let error = match send(request, context).await {
             Ok(value) => break value,
             // A login request changes nothing, so every transient failure is retryable.
-            Err(error) if error.transient() && attempt < MAX_ATTEMPTS => {
-                tokio::time::sleep(error.retry_delay(attempt)).await;
-                attempt += 1;
-            }
+            Err(error) if error.transient() => error,
             Err(error) => return Err(error),
-        }
+        };
+        let Some(delay) = next_attempt(&error, attempt, &mut rate_limited_for) else {
+            return Err(error);
+        };
+        tokio::time::sleep(delay).await;
+        attempt += 1;
     };
     let token = value
         .get("access_token")
@@ -647,6 +681,30 @@ mod tests {
         let camel = json!({"kdf": 0, "kdfIterations": 600000, "kdfMemory": null});
         assert_eq!(login_kdf(&camel), Some((0, 600000, None, None)));
         assert_eq!(login_kdf(&json!({"access_token": "x"})), None);
+    }
+
+    #[test]
+    fn rate_limits_are_waited_out_longer_than_other_errors() {
+        let error = |status, retry_after| ApiError::Status {
+            context: String::new(),
+            status,
+            message: String::new(),
+            retry_after,
+        };
+        let mut waited = Duration::ZERO;
+        let unavailable = error(StatusCode::SERVICE_UNAVAILABLE, None);
+        assert!(next_attempt(&unavailable, MAX_ATTEMPTS - 1, &mut waited).is_some());
+        assert!(next_attempt(&unavailable, MAX_ATTEMPTS, &mut waited).is_none());
+
+        let limited = error(StatusCode::TOO_MANY_REQUESTS, Some(MAX_RETRY_AFTER));
+        let mut attempts = 0;
+        while next_attempt(&limited, attempts + 1, &mut waited).is_some() {
+            attempts += 1;
+        }
+        assert_eq!(
+            attempts as u64,
+            RATE_LIMIT_PATIENCE.as_secs() / MAX_RETRY_AFTER.as_secs()
+        );
     }
 
     #[test]
