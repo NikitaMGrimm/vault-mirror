@@ -25,9 +25,10 @@ for backups is an example: point rclone or restic at the backup directory.
 
 ## AI-assisted contributions
 
-AI-assisted contributions are welcome if they are disclosed. Say in the pull
-request which tool or model you used and for what. Agent-written issues and
-comments must say so at the top. You are responsible for every line you
+AI-assisted contributions are welcome if they are disclosed. End the pull
+request description with the model and tool that did the work, in the form the
+template shows, or with "No AI assistance." Agent-written issues and comments
+must say so at the top. You are responsible for every line you
 submit: read it, run it, and be ready to explain it.
 
 Agents should read [AGENTS.md](AGENTS.md).
@@ -79,6 +80,11 @@ of 2000 items. Set `VAULT_MIRROR_SCALE_ITEMS` to change the size.
 ## Pull requests
 
 - Keep each pull request to one change, with a test that fails without it.
+- Fill in the template: the problem, the change, and how you verified it. A
+  check fails until the description has these sections and the AI disclosure
+  line. Show before and after for changes to output or documentation, as
+  screenshots or a short recording uploaded to the pull request; do not
+  commit them.
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` with the sandbox running.
 - Update the README or `docs/` when behaviour or configuration changes.
