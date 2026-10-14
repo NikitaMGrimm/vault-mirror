@@ -8,8 +8,8 @@ keeps encrypted, restorable backups of both.
   tool re-reads the destination after every change and fails loudly if the two
   vaults differ.
 - **Incremental.** An unchanged vault costs two syncs and changes nothing on
-  either server. A changed
-  item is updated in place, so its id, and links to it, stay stable.
+  either server. A changed item is updated in place, so its id, and links to
+  it, stay stable.
 - **Complete backups.** Each run writes an [age](https://age-encryption.org)-
   encrypted snapshot of each vault, including attachment content. A snapshot is
   only written when the vault changed. Snapshots are Bitwarden's own
@@ -38,9 +38,8 @@ keeps encrypted, restorable backups of both.
 - [Backups](#backups)
 - [Commands](#commands)
 - [Scheduling](#scheduling)
-- [Migrating from the Python vault-mirror](#migrating-from-the-python-vault-mirror)
 - [Limitations](#limitations)
-- [Development](#development)
+- [Contributing](#contributing)
 
 ## Quick start
 
@@ -147,10 +146,10 @@ which suits Docker and systemd credentials.
 | `SOURCE_SERVER` | required | Server URL. `https://vault.bitwarden.com` and `https://vault.bitwarden.eu` select Bitwarden's cloud. |
 | `SOURCE_CLIENT_ID`, `SOURCE_CLIENT_SECRET` | required | Personal API key. |
 | `SOURCE_PASSWORD` | required | Master password. |
-| `SOURCE_ORGANIZATION_ID` | — | Mirror this organization's vault instead of the personal vault. The account must be assigned to every collection, with Can manage permission, and every item must be in a collection: Bitwarden's servers hide other collections and items from owners, so the run stops if there are any. |
+| `SOURCE_ORGANIZATION_ID` | — | Mirror this organization instead of the personal vault; see [Organizations](#organizations). |
 | `DEST_SERVER`, `DEST_CLIENT_ID`, `DEST_CLIENT_SECRET`, `DEST_PASSWORD`, `DEST_ORGANIZATION_ID` | — | The destination, in the same form as the source. Without a destination, runs only back up the source. Organizations are mirrored to organizations: set both organization ids or neither. |
-| `INCLUDE_FOLDERS`, `EXCLUDE_FOLDERS` | — | Comma-separated folder names. Only items in the included folders are mirrored, minus those in excluded ones. A name includes its subfolders, so `Work` covers `Work/Infra`. With `INCLUDE_FOLDERS`, items in no folder are not mirrored. Copies of items that the filter no longer selects are deleted from the destination. Backups always hold the whole vault. |
-| `INCLUDE_COLLECTIONS`, `EXCLUDE_COLLECTIONS` | — | The same for collections, in organization mode. An item in an excluded collection is left out even if it is also in an included one. |
+| `INCLUDE_FOLDERS`, `EXCLUDE_FOLDERS` | — | Comma-separated folder names; see [Mirroring part of a vault](#mirroring-part-of-a-vault). |
+| `INCLUDE_COLLECTIONS`, `EXCLUDE_COLLECTIONS` | — | The same for collections, in organization mode. |
 | `BACKUP_PASSPHRASE` | — | Passphrase that protects the backup key. Either this or `BACKUP_RECIPIENTS` is required while backups are on. `ENCRYPTION_PASSWORD` is accepted as an older name. |
 | `BACKUP_RECIPIENTS` | — | age public keys (`age1…`), separated by commas or spaces, to encrypt backups to instead. Restoring then needs `--identity`. |
 | `BACKUP_ENABLED` | `true` | Set `false` to mirror without backups. |
@@ -171,6 +170,39 @@ which suits Docker and systemd credentials.
 
 `SOURCE_ACCOUNT`, `DEST_ACCOUNT`, `PUID`, `PGID`, `TEMP_DIR`, and
 `DEST_DELETE_WORKERS` belong to earlier tools. They are accepted and ignored.
+
+### Organizations
+
+Set `SOURCE_ORGANIZATION_ID` and `DEST_ORGANIZATION_ID` to mirror one
+organization into another. The organization id is in the web vault's address
+when the organization is open. Bitwarden's servers show an owner only the
+collections they are assigned to, and no item outside a collection. So that
+nothing looks deleted, the run stops if anything is hidden:
+
+- Assign the account to every collection, with **Can manage** permission.
+- Put every item in a collection.
+
+Members, groups, permissions, favorites, and folders are not mirrored.
+
+### Mirroring part of a vault
+
+```sh
+# Only these folders and their subfolders...
+INCLUDE_FOLDERS=Work, Family
+# ...except these.
+EXCLUDE_FOLDERS=Work/Private
+```
+
+- A name includes its subfolders, so `Work` covers `Work/Infra`.
+- With `INCLUDE_FOLDERS`, items in no folder are not mirrored.
+- A name that matches no folder produces a warning.
+- When the filter changes, the destination follows: copies the filter no
+  longer selects are deleted, within the [safety rules](#safety-rules).
+- Backups always hold the whole vault.
+
+`INCLUDE_COLLECTIONS` and `EXCLUDE_COLLECTIONS` work the same way for
+organizations. An item in an excluded collection is left out even if it is
+also in an included one.
 
 ## Backups
 
@@ -270,27 +302,6 @@ The container runs as user 65532. A bind-mounted backup directory must be
 writable by that user, for example after `chown 65532:65532
 /var/lib/vault-mirror`.
 
-## Migrating from the Python vault-mirror
-
-The environment variables are the same, so you can replace the image and keep
-your env file.
-
-- **The first run adopts the existing mirror in place.** It recognises the
-  older `__source` markers and keeps every destination item and its id. The
-  run rewrites each marker in the new form and copies attachments once more,
-  because the old tool did not record which copies were current. Later runs
-  change nothing until the source changes.
-- **Old backups stay where they are.** The existing `*.json.enc` files are
-  neither read nor pruned. Decrypt them with `openssl` as before, and delete
-  them once you no longer need them.
-- **Point `BACKUPS_DIR` at the same directory if you like.** New backups go to
-  `source/snapshots` and `dest/snapshots` inside it, next to the old files.
-- **`PUID` and `PGID` no longer apply.** The image runs as user 65532. Either
-  give that user the backup directory, or start the container as the
-  directory's owner, for example with `--user 1000:1000`.
-- **Going back is costly.** If you switch back to the Python tool afterwards,
-  it does not recognise the new markers and recreates every destination item.
-
 ## Limitations
 
 - Sends, organization members, groups, collection permissions, and account
@@ -307,46 +318,19 @@ your env file.
   Bitwarden's cloud runs the same server code but has not been tested yet. The
   cloud stores attachments in Azure, and that upload path is tested against
   Microsoft's Azurite emulator.
-- In organization mode, favorites and folders are not mirrored: Bitwarden
-  keeps them per member.
 - Bitwarden's servers require every organization item to be in a collection.
   Source items in no collection are left out of such a destination, with a
   warning.
 - Attachments are held in memory while they are copied, so a large attachment
   needs a few times its size in free memory.
 
-## Development
+## Contributing
 
-The sandbox runs two throwaway Vaultwarden servers and a TLS proxy in Docker,
-so you can develop without a Bitwarden account:
-
-```sh
-sandbox/up.sh                   # http://127.0.0.1:18081 and :18082, https on :18443 and :18444
-cargo test                      # unit and end-to-end tests
-cargo run -- sandbox --seed     # prints an env file for two new accounts with sample data
-docker compose -f sandbox/compose.yaml --profile official down
-```
-
-When the sandbox is not running, the end-to-end tests are skipped. In CI they
-are required: `VAULT_MIRROR_REQUIRE_SANDBOX=1`. One test checks that a
-snapshot imports into the official Bitwarden CLI. Set `VAULT_MIRROR_BW` to a
-`bw` binary to run it.
-
-`sandbox/up.sh --official` also starts Bitwarden's own server, which needs a
-2.7 GB image. The server runs entirely locally: its installation id is made
-up, and it has no installation key, so it never contacts Bitwarden. Like
-Bitwarden's cloud, it stores attachments in Azure blob storage, here provided
-by the Azurite emulator. The sandbox makes every account on it premium,
-because attachments need premium.
-Point the tests at it by URL:
-
-```sh
-VAULT_MIRROR_SANDBOX_SOURCE=http://127.0.0.1:18085 cargo test
-VAULT_MIRROR_SANDBOX_DEST=http://127.0.0.1:18085 VAULT_MIRROR_SANDBOX_DEST_TLS=https://127.0.0.1:18445 cargo test
-```
-
-`cargo test --release --test scale -- --ignored --nocapture` measures a vault
-of 2000 items. Set `VAULT_MIRROR_SCALE_ITEMS` to change the size.
+Questions and ideas go to
+[Discussions](https://github.com/NikitaMGrimm/vault-mirror-rs/discussions),
+bugs to [Issues](https://github.com/NikitaMGrimm/vault-mirror-rs/issues), and
+vulnerabilities to a [private report](SECURITY.md). Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 
