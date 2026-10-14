@@ -151,7 +151,8 @@ same pull request and give the reason.
 - Update the README or `docs/` when behaviour or configuration changes.
 - The maintainer turns on auto-merge after review. A pull request merges as
   soon as the required checks pass. Fix a problem found later in a new pull
-  request.
+  request. Dependabot's patch and minor updates merge on their own the same
+  way; major updates wait for the maintainer.
 - Title the pull request as a [Conventional Commit](https://www.conventionalcommits.org),
   for example `fix: keep archive state on edit`. Pull requests are squashed,
   and the release notes are generated from these titles: `feat`, `fix` and
