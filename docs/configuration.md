@@ -7,6 +7,38 @@ as a file instead: set `NAME_FILE` to a path and the file's content is used,
 which suits Docker and systemd credentials. Passwords and passphrases are
 used exactly as given, spaces included; a file's final newline is dropped.
 
+## Settings file
+
+`vault-mirror init` writes the settings to `vault-mirror.env`, one
+`NAME=value` per line. Values are taken literally, without quotes or
+variables, so a password may contain any character. Lines starting with `#`
+are comments. Docker Compose reads the file with `format: raw`, `docker run`
+with `--env-file`, and the binary with `vault-mirror --env-file PATH`. When a
+setting is in both the file and the environment, the environment wins.
+
+To set up by hand instead, write that file and a `compose.yaml` like this:
+
+```yaml
+services:
+  vault-mirror:
+    image: ghcr.io/nikitamgrimm/vault-mirror:0.1
+    command: daemon
+    # The image runs unprivileged. Run it as the owner of ./backups: create
+    # the directory first, and put your `id -u`:`id -g` here.
+    user: "1000:1000"
+    env_file:
+      - path: vault-mirror.env
+        format: raw
+    volumes:
+      - ./backups:/data
+    restart: unless-stopped
+```
+
+Then run `docker compose run --rm vault-mirror check`, which logs in and
+shows the plan without writing anything.
+
+## Variables
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SOURCE_SERVER` | required | Server URL. `https://vault.bitwarden.com` and `https://vault.bitwarden.eu` select Bitwarden's cloud. |

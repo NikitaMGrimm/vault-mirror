@@ -6,6 +6,7 @@
 
 | Command | Does |
 | --- | --- |
+| `vault-mirror init [--dir DIR]` | Asks for the accounts, checks the logins, writes `vault-mirror.env` and `compose.yaml`, and shows the plan. |
 | `vault-mirror` or `vault-mirror run` | One run. Flags: `--dry-run`, `--allow-initial-overwrite`, `--allow-mass-delete`. |
 | `vault-mirror daemon` | Runs on `SCHEDULE` or every `INTERVAL`, and stops cleanly on `SIGTERM` between runs. |
 | `vault-mirror check` | Logs in, counts items, and prints the plan. Writes nothing. |
@@ -16,6 +17,9 @@
 
 A dry run makes backups and prints the plan, but does not change the
 destination.
+
+Every command takes `--env-file PATH` to read settings from a file; see
+[Settings file](configuration.md#settings-file).
 
 ## Output
 
