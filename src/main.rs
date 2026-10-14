@@ -56,8 +56,8 @@ enum Command {
     /// List the snapshots in the backup directory.
     Snapshots {
         /// Whose backups to list.
-        #[arg(long, value_enum, default_value_t = Role::Source)]
-        vault: Role,
+        #[arg(long, alias = "vault", value_enum, default_value_t = Role::Source)]
+        from: Role,
     },
     /// Write a snapshot into a vault.
     Restore(RestoreArgs),
@@ -93,7 +93,7 @@ struct SnapshotArgs {
     /// Whose backups to read from.
     #[arg(long, value_enum, default_value_t = Role::Source)]
     from: Role,
-    /// A snapshot file, or `latest`.
+    /// A snapshot file or name, as `snapshots` lists it, or `latest`.
     #[arg(long, default_value = "latest")]
     snapshot: String,
     /// An age identity file, needed when backups are made with BACKUP_RECIPIENTS.
@@ -194,7 +194,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Some(Command::Run(args)) => run(args).await,
         Some(Command::Daemon) => daemon().await,
         Some(Command::Check) => check().await,
-        Some(Command::Snapshots { vault }) => snapshots(vault),
+        Some(Command::Snapshots { from }) => snapshots(from),
         Some(Command::Restore(args)) => restore_command(args).await,
         Some(Command::Export { snapshot, output }) => export(snapshot, &output),
         Some(Command::Healthcheck { max_age_hours }) => healthcheck(max_age_hours),
