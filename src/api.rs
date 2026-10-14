@@ -19,6 +19,9 @@ const DEVICE_TYPE: &str = "25";
 
 const MAX_ATTEMPTS: u32 = 5;
 
+/// The longest a server's `Retry-After` is honoured for, per attempt.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("{context}: the server answered {status}: {message}")]
@@ -26,6 +29,8 @@ pub enum ApiError {
         context: String,
         status: StatusCode,
         message: String,
+        /// How long the server asked to wait before trying again.
+        retry_after: Option<Duration>,
     },
     #[error("{context}: {}", describe_transport(cause))]
     Transport {
@@ -54,6 +59,18 @@ impl ApiError {
             Self::Status { status, .. } => *status == StatusCode::TOO_MANY_REQUESTS,
             Self::Transport { cause, .. } => cause.is_connect() && !is_certificate_error(cause),
             _ => false,
+        }
+    }
+
+    /// How long to wait before the next attempt: as long as the server
+    /// asked, if it did, otherwise an exponential backoff.
+    fn retry_delay(&self, attempt: u32) -> Duration {
+        match self {
+            Self::Status {
+                retry_after: Some(wait),
+                ..
+            } => *wait,
+            _ => backoff(attempt),
         }
     }
 
@@ -308,7 +325,7 @@ impl Session {
             if !retryable || attempt >= MAX_ATTEMPTS {
                 return Err(error);
             }
-            tokio::time::sleep(backoff(attempt)).await;
+            tokio::time::sleep(error.retry_delay(attempt)).await;
             attempt += 1;
         }
     }
@@ -322,7 +339,7 @@ impl Session {
             match self.download_once(url, &context).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) if error.transient() && attempt < MAX_ATTEMPTS => {
-                    tokio::time::sleep(backoff(attempt)).await;
+                    tokio::time::sleep(error.retry_delay(attempt)).await;
                     attempt += 1;
                 }
                 Err(error) => return Err(error),
@@ -336,13 +353,8 @@ impl Session {
             cause: source,
         };
         let response = self.http.get(url).send().await.map_err(transport)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(ApiError::Status {
-                context: context.to_string(),
-                status,
-                message: error_message(&response.text().await.unwrap_or_default()),
-            });
+        if !response.status().is_success() {
+            return Err(status_error(context, response).await);
         }
         Ok(response.bytes().await.map_err(transport)?.to_vec())
     }
@@ -401,15 +413,41 @@ async fn expect_success(request: reqwest::RequestBuilder, context: &str) -> Resu
         .send()
         .await
         .map_err(|source| transport(context, source))?;
-    let status = response.status();
-    if status.is_success() {
+    if response.status().is_success() {
         return Ok(());
     }
-    Err(ApiError::Status {
+    Err(status_error(context, response).await)
+}
+
+async fn status_error(context: &str, response: reqwest::Response) -> ApiError {
+    let status = response.status();
+    let retry_after = retry_after(response.headers(), std::time::SystemTime::now());
+    ApiError::Status {
         context: context.to_string(),
         status,
         message: error_message(&response.text().await.unwrap_or_default()),
-    })
+        retry_after,
+    }
+}
+
+/// Reads `Retry-After`, which is either a number of seconds or a date.
+fn retry_after(
+    headers: &reqwest::header::HeaderMap,
+    now: std::time::SystemTime,
+) -> Option<Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    let wait = match value.parse::<u64>() {
+        Ok(seconds) => Duration::from_secs(seconds),
+        Err(_) => httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(now)
+            .unwrap_or(Duration::ZERO),
+    };
+    Some(wait.min(MAX_RETRY_AFTER))
 }
 
 fn backoff(attempt: u32) -> Duration {
@@ -421,7 +459,9 @@ async fn send(request: reqwest::RequestBuilder, context: &str) -> Result<Value> 
         context: context.to_string(),
         cause: source,
     })?;
-    let status = response.status();
+    if !response.status().is_success() {
+        return Err(status_error(context, response).await);
+    }
     let text = response
         .text()
         .await
@@ -429,13 +469,6 @@ async fn send(request: reqwest::RequestBuilder, context: &str) -> Result<Value> 
             context: context.to_string(),
             cause: source,
         })?;
-    if !status.is_success() {
-        return Err(ApiError::Status {
-            context: context.to_string(),
-            status,
-            message: error_message(&text),
-        });
-    }
     if text.trim().is_empty() {
         return Ok(Value::Null);
     }
@@ -487,7 +520,7 @@ async fn request_token(
             Ok(value) => break value,
             // A login request changes nothing, so every transient failure is retryable.
             Err(error) if error.transient() && attempt < MAX_ATTEMPTS => {
-                tokio::time::sleep(backoff(attempt)).await;
+                tokio::time::sleep(error.retry_delay(attempt)).await;
                 attempt += 1;
             }
             Err(error) => return Err(error),
@@ -584,5 +617,40 @@ mod tests {
         let camel = json!({"kdf": 0, "kdfIterations": 600000, "kdfMemory": null});
         assert_eq!(login_kdf(&camel), Some((0, 600000, None, None)));
         assert_eq!(login_kdf(&json!({"access_token": "x"})), None);
+    }
+
+    #[test]
+    fn retry_after_is_read_as_seconds_or_a_date_and_capped() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let read = |value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(RETRY_AFTER, HeaderValue::from_static(value));
+            retry_after(&headers, now)
+        };
+        assert_eq!(read("7"), Some(Duration::from_secs(7)));
+        assert_eq!(read("3600"), Some(MAX_RETRY_AFTER));
+        let in_ten_seconds = httpdate::fmt_http_date(now + Duration::from_secs(10));
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, in_ten_seconds.parse().unwrap());
+        assert_eq!(retry_after(&headers, now), Some(Duration::from_secs(10)));
+        assert_eq!(read("Thu, 01 Jan 1970 00:00:00 GMT"), Some(Duration::ZERO));
+        assert_eq!(read("soon"), None);
+        assert_eq!(retry_after(&HeaderMap::new(), now), None);
+    }
+
+    #[test]
+    fn a_requested_wait_replaces_the_backoff() {
+        let error = |retry_after| ApiError::Status {
+            context: "test".into(),
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: String::new(),
+            retry_after,
+        };
+        assert_eq!(error(None).retry_delay(3), backoff(3));
+        assert_eq!(
+            error(Some(Duration::from_secs(20))).retry_delay(1),
+            Duration::from_secs(20)
+        );
     }
 }
