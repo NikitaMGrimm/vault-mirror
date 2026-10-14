@@ -295,6 +295,10 @@ your env file.
   settings are not mirrored.
 - Items in the source's trash are not mirrored. Trashed items in the
   destination are deleted.
+- Bank accounts, driver's licences and passports are new item types. Bitwarden
+  shows them only to accounts it has enabled them for. Copies made in a
+  destination that hides them would be invisible, so they are left out of the
+  mirror, with a warning, until Bitwarden enables them.
 - Archived items need a server that supports archiving. If the destination
   does not, items are mirrored unarchived, and the run reports a warning.
 - Tested against Vaultwarden 1.37 and Bitwarden's self-hosted server 2026.9.

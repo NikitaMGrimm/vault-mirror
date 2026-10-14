@@ -157,6 +157,30 @@ impl Run<'_> {
             },
         )?;
 
+        let mut source_vault = source_vault;
+        let hidden = match self.dest.account.hidden_item_types().await {
+            Ok(types) => types,
+            Err(error) => {
+                self.warn(format!(
+                    "Could not read the destination's settings, so every item type is mirrored: {error:#}"
+                ));
+                Vec::new()
+            }
+        };
+        let is_hidden = |item: &Item| item.item_type().is_some_and(|kind| hidden.contains(&kind));
+        let left_out = source_vault
+            .items
+            .iter()
+            .filter(|item| !item.in_trash && is_hidden(item))
+            .count();
+        source_vault.items.retain(|item| !is_hidden(item));
+        if left_out > 0 {
+            self.warn(format!(
+                "The destination server does not show bank accounts, driver's licences or passports yet, \
+                 so {left_out} item(s) of these types are left out of the mirror."
+            ));
+        }
+
         self.stage = "planning";
         let plan = plan::plan(&source_vault, &dest_vault, mode);
         let summary = plan.summary(&source_vault);

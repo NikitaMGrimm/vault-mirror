@@ -45,6 +45,9 @@ const LIST_CONTENT_KEYS: &[&str] = &["fields", "passwordHistory"];
 /// The largest batch the Bitwarden server accepts for bulk item operations.
 const BULK_LIMIT: usize = 500;
 
+/// Bank account, driver's licence and passport.
+const FLAGGED_ITEM_TYPES: [u64; 3] = [6, 7, 8];
+
 /// Which part of an account a run works on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -104,6 +107,13 @@ pub struct Item {
 }
 
 impl Item {
+    pub fn item_type(&self) -> Option<u64> {
+        match self.content.get("type") {
+            Some(Node::Number(number)) => number.as_u64(),
+            _ => None,
+        }
+    }
+
     pub fn name(&self) -> &str {
         self.content
             .get("name")
@@ -443,6 +453,12 @@ impl Account {
         Ok(())
     }
 
+    /// Item types the server accepts but leaves out of syncs, so copies of
+    /// such items would never be seen and would be created again every run.
+    pub async fn hidden_item_types(&self) -> Result<Vec<u64>> {
+        Ok(hidden_item_types(&self.session.get("/config").await?))
+    }
+
     pub async fn set_archived(&self, ids: &[String], archived: bool) -> Result<()> {
         let path = if archived {
             "/ciphers/archive"
@@ -661,9 +677,53 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
     })
 }
 
+/// Bitwarden's own server shows bank accounts, driver's licences and passports
+/// only where a feature flag is on. Vaultwarden always shows them.
+fn hidden_item_types(config: &Value) -> Vec<u64> {
+    let vaultwarden = config.pointer("/server/name").and_then(Value::as_str) == Some("Vaultwarden");
+    let enabled = config
+        .pointer("/featureStates/pm-32009-new-item-types")
+        .and_then(Value::as_bool)
+        == Some(true);
+    if vaultwarden || enabled {
+        Vec::new()
+    } else {
+        FLAGGED_ITEM_TYPES.to_vec()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flagged_item_types_are_hidden_only_by_bitwarden_without_the_flag() {
+        let flagged = FLAGGED_ITEM_TYPES.to_vec();
+        // Bitwarden's cloud and self-hosted server send no server name.
+        assert_eq!(
+            hidden_item_types(
+                &json!({"server": null, "featureStates": {"pm-32009-new-item-types": false}})
+            ),
+            flagged
+        );
+        assert_eq!(
+            hidden_item_types(&json!({"server": null, "featureStates": {}})),
+            flagged
+        );
+        assert!(
+            hidden_item_types(
+                &json!({"server": null, "featureStates": {"pm-32009-new-item-types": true}})
+            )
+            .is_empty()
+        );
+        assert!(
+            hidden_item_types(&json!({
+                "server": {"name": "Vaultwarden", "url": "https://github.com/dani-garcia/vaultwarden"},
+                "featureStates": {}
+            }))
+            .is_empty()
+        );
+    }
 
     #[test]
     fn items_decrypt_into_content_and_metadata() {
