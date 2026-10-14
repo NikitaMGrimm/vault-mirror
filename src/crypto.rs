@@ -107,25 +107,21 @@ impl KdfParams {
 /// The vault model is decrypted without a schema, so this decides which JSON
 /// strings are ciphertext. Plain values the server stores next to ciphertext
 /// are ids, dates, numbers, booleans and short enum values, none of which
-/// have this shape. The check is deliberately looser than a parse: a value
-/// that passes here and then fails to parse or decrypt is an error, never
-/// plaintext, so a damaged or newer kind of ciphertext is not copied as text.
+/// have this shape. The check is deliberately looser than a parse, so that
+/// truncated or otherwise damaged ciphertext also counts: a value that passes
+/// here and then fails to parse or decrypt is an error, never plaintext.
 pub fn looks_encrypted(value: &str) -> bool {
     let Some((kind, rest)) = value.split_once('.') else {
         return false;
     };
-    let base64 = |part: &str| {
-        !part.is_empty()
-            && part
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    let allowed = |b: u8| {
+        b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_' | b'|' | b'.')
     };
-    // The shortest real part is a 16-byte IV, 24 characters in base64.
     (1..=2).contains(&kind.len())
         && kind.bytes().all(|b| b.is_ascii_digit())
-        && rest.len() >= 24
-        && rest.split('|').all(base64)
-        && !rest.bytes().all(|b| b.is_ascii_digit() || b == b'|')
+        && rest.len() >= 16
+        && rest.bytes().all(allowed)
+        && rest.bytes().any(|b| b.is_ascii_alphabetic())
 }
 
 /// A symmetric vault key: a user key, organization key, item key or attachment key.
@@ -355,12 +351,8 @@ mod tests {
             "v2.local",
             "2.has space|x|y",
             "7.1234",
-            "2.AAAAAAAAAAAAAAAAAAAA",
             "3.14159265358979323846264338327950288",
             "100.AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAA==",
-            "2.AAAAAAAAAAAAAAAAAAAAAA==||AAAA",
-            "2.AAAAAAAAAAAAAAAAAAAAAA==.AAAAAAAAAAAAAAAAAAAAAA==",
-            "2.public-key-AAAAAAAAAAAAAAAAAAAAAA",
         ] {
             assert!(!looks_encrypted(plain), "{plain}");
         }
@@ -377,6 +369,10 @@ mod tests {
             // A part missing, or truncated.
             "2.AAAAAAAAAAAAAAAAAAAAAA==|AAAA".to_string(),
             enc[..enc.len() - 8].to_string(),
+            enc[..20].to_string(),
+            // Damaged separators.
+            enc.replacen('|', "||", 1),
+            enc.replacen('|', ".", 1),
         ] {
             assert!(looks_encrypted(&unreadable), "{unreadable}");
             assert!(
