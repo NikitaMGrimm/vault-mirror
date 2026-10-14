@@ -13,20 +13,16 @@ flowchart LR
     mirror -- "4. change, 5. verify" --> dest
 ```
 
-1. **Source backup.** Log in to the source and back it up with its attachments.
-2. **Destination backup.** Log in to the destination and back it up with its
-   attachments, so anything the mirror deletes or replaces can be restored.
-3. **Plan.** Compare the two vaults and run the
-   [safety checks](#safety-checks).
-4. **Change the destination.**
-   - Create folders and collections.
-   - Create and update items.
-   - Copy attachments that are new or changed.
-   - Delete what is no longer in the source.
-5. **Verify.** Read the destination again and compare it with the source,
-   including a SHA-256 of every copied attachment.
-6. **Report.** Write `last-run.json` and send the notification, if one is
-   configured.
+1. Back up the source, with its attachments.
+2. Back up the destination, with its attachments, so that anything the run
+   deletes or replaces can be restored.
+3. Compare the two vaults and run the [safety checks](#safety-checks).
+4. Change the destination: create folders and collections, create and update
+   items, copy new or changed attachments, and delete what is no longer in
+   the source.
+5. Read the destination again and compare it with the source. Copied
+   attachments are downloaded again and compared by SHA-256.
+6. Write `last-run.json`, and send the notification if one is configured.
 
 If any step fails, the run stops there. A failed backup means the destination
 is not touched.

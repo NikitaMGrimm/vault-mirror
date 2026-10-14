@@ -21,17 +21,17 @@ backups/
     └── …
 ```
 
-- **Key.** On first use, the tool generates an age key. It is stored only in
-  `key.age`, encrypted with your passphrase. Changing `BACKUP_PASSPHRASE`
-  later does not re-encrypt `key.age`. Keep the old passphrase, or start a
-  new backup directory.
-- **Snapshots.** Each snapshot is a complete vault export with all secrets in
-  the clear, encrypted as a whole. A snapshot is only written when the vault
-  changed since the last one.
-- **Attachments.** Each attachment is stored once, however many snapshots
-  refer to it. Pruning deletes attachments that no remaining snapshot needs.
-  Each vault's backups hold their own attachments, so a mirrored attachment is
-  stored twice: once for the source and once for the destination.
+On first use, vault-mirror generates an age key and stores it only in
+`key.age`, encrypted with your passphrase. Changing `BACKUP_PASSPHRASE` later
+does not re-encrypt `key.age`, so keep the old passphrase or start a new
+backup directory.
+
+A snapshot is a complete vault export, secrets included, encrypted as a whole.
+A new one is written only when the vault changed since the last.
+
+Each attachment is stored once, however many snapshots refer to it, and
+pruning deletes the ones no remaining snapshot needs. The source and the
+destination keep separate backups, so a mirrored attachment is stored twice.
 
 ## Recovering without vault-mirror
 
