@@ -87,7 +87,7 @@ docker compose up -d
 ```
 
 You can run the binary from the
-[releases](https://github.com/NikitaMGrimm/vault-mirror-rs/releases) the same
+[releases](https://github.com/NikitaMGrimm/vault-mirror/releases) the same
 way. It reads the same environment variables and keeps its backups in
 `./backups` unless `BACKUPS_DIR` is set.
 
@@ -327,8 +327,8 @@ writable by that user, for example after `chown 65532:65532
 ## Contributing
 
 Questions and ideas go to
-[Discussions](https://github.com/NikitaMGrimm/vault-mirror-rs/discussions),
-bugs to [Issues](https://github.com/NikitaMGrimm/vault-mirror-rs/issues), and
+[Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions),
+bugs to [Issues](https://github.com/NikitaMGrimm/vault-mirror/issues), and
 vulnerabilities to a [private report](SECURITY.md). Read
 [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 

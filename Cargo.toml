@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.89"
 license = "GPL-3.0-only"
 description = "Mirror and back up a Bitwarden or Vaultwarden vault, without the Bitwarden CLI."
-repository = "https://github.com/NikitaMGrimm/vault-mirror-rs"
+repository = "https://github.com/NikitaMGrimm/vault-mirror"
 publish = false
 
 [dependencies]

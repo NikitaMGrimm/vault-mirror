@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question or idea
-    url: https://github.com/NikitaMGrimm/vault-mirror-rs/discussions
+    url: https://github.com/NikitaMGrimm/vault-mirror/discussions
     about: Ask how to do something, or discuss an idea before proposing it.
   - name: Security vulnerability
-    url: https://github.com/NikitaMGrimm/vault-mirror-rs/security/advisories/new
+    url: https://github.com/NikitaMGrimm/vault-mirror/security/advisories/new
     about: Report it privately, not in a public issue.

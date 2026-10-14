@@ -6,8 +6,8 @@ reviewed for safety first and features second.
 ## Before you start
 
 - **Questions and ideas** go to
-  [Discussions](https://github.com/NikitaMGrimm/vault-mirror-rs/discussions).
-- **Bugs** go to [Issues](https://github.com/NikitaMGrimm/vault-mirror-rs/issues).
+  [Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions).
+- **Bugs** go to [Issues](https://github.com/NikitaMGrimm/vault-mirror/issues).
   Never paste secrets or vault content. vault-mirror's own logs contain
   neither, but check anything else you paste.
 - **Security problems** are reported privately; see [SECURITY.md](SECURITY.md).
