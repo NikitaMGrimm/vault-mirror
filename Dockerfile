@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Alpine's native target is musl, so the binary is statically linked.
-FROM rust:1.95-alpine AS build
+FROM rust:1.99-alpine AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
