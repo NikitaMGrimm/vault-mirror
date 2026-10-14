@@ -244,7 +244,7 @@ fn the_marker_is_the_last_field_and_names_the_source_item() {
     assert_eq!(fields[1].as_map().unwrap()["type"], Node::Number(1.into()));
     let marker = marker_of(&dest.items[0]).unwrap();
     assert_eq!(marker.source_id, "s1");
-    assert_eq!(marker.attachments_hash.as_deref(), Some("-"));
+    assert_eq!(marker.attachments_hash, "-");
 }
 
 #[test]
@@ -338,6 +338,15 @@ fn a_malformed_marker_is_not_trusted() {
     fields[0] = map(vec![
         ("name", text(MARKER_FIELD)),
         ("value", text("only-one-part")),
+    ]);
+    assert_eq!(marker_of(&dest.items[0]), None);
+    let without_attachments = format!("s1 {}", "0123abcd".repeat(8));
+    let Some(Node::List(fields)) = dest.items[0].content.get_mut("fields") else {
+        panic!()
+    };
+    fields[0] = map(vec![
+        ("name", text(MARKER_FIELD)),
+        ("value", text(&without_attachments)),
     ]);
 
     assert_eq!(marker_of(&dest.items[0]), None);
@@ -565,50 +574,6 @@ fn attachment_sizes_on_the_destination_do_not_matter() {
     let mut dest = mirrored(&source, Mode::Personal);
     dest.items[0].attachments[0].size = 164;
     assert_converged(&source, &dest, Mode::Personal);
-}
-
-#[test]
-fn markers_from_the_python_tool_are_adopted_in_place() {
-    let mut source = vault(vec![
-        login("s1", "Plain", "pw1"),
-        login("s2", "With file", "pw2"),
-    ]);
-    source.items[1].attachments = vec![attachment("a1", "scan.pdf", 100)];
-    let mut dest = mirrored(&source, Mode::Personal);
-    for item in &mut dest.items {
-        let Some(Node::List(fields)) = item.content.get_mut("fields") else {
-            panic!()
-        };
-        let source_id = marker_of_fields(fields);
-        *fields.last_mut().unwrap() = map(vec![
-            ("name", text(MARKER_FIELD)),
-            (
-                "value",
-                text(&format!("{source_id} {}", "0123abcd".repeat(8))),
-            ),
-        ]);
-    }
-
-    let plan = plan(&source, &dest, Mode::Personal);
-    assert!(plan.creates.is_empty() && plan.deletes.is_empty());
-    assert_eq!(plan.updates.len(), 2);
-    assert!(plan.updates.iter().all(|u| u.write_content));
-    // Without attachments there is nothing to re-copy; with them the old
-    // marker cannot vouch for the files.
-    assert!(!plan.updates[0].sync_attachments);
-    assert!(plan.updates[1].sync_attachments);
-    assert_converged(
-        &source,
-        &apply(&source, &dest, Mode::Personal),
-        Mode::Personal,
-    );
-}
-
-fn marker_of_fields(fields: &[Node]) -> String {
-    let value = fields.last().unwrap().as_map().unwrap()["value"]
-        .as_str()
-        .unwrap();
-    value.split_whitespace().next().unwrap().to_string()
 }
 
 #[test]

@@ -3,3 +3,5 @@
 /backups
 /sandbox/tls
 *.age
+# Recorded by CI into the `assets` branch; see .github/workflows/demo.yml.
+/assets/demo.gif

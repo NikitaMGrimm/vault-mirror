@@ -314,7 +314,9 @@ fn compose_file(backups: &Path) -> Result<String> {
                  format: raw\n    \
              volumes:\n      \
                - ./backups:/data\n    \
-             restart: unless-stopped\n"
+             restart: unless-stopped\n    \
+             # Lets a run in progress finish when the container is stopped.\n    \
+             stop_grace_period: 5m\n"
     ))
 }
 
@@ -396,6 +398,17 @@ mod tests {
         assert_eq!(first.len(), 35);
         assert_eq!(first.split('-').count(), 6);
         assert_ne!(first, generate_passphrase().unwrap());
+    }
+
+    #[test]
+    fn the_compose_file_lets_a_run_finish_on_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let compose = compose_file(&dir.path().join("backups")).unwrap();
+        assert!(compose.contains("\n    command: daemon\n"), "{compose}");
+        assert!(
+            compose.contains("\n    stop_grace_period: 5m\n"),
+            "{compose}"
+        );
     }
 
     #[test]

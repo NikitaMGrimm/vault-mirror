@@ -13,7 +13,6 @@ use anyhow::Result;
 use common::*;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use vault_mirror::{
-    fixtures,
     mirror::MirrorOptions,
     node::Node,
     vault::{Draft, Scope},

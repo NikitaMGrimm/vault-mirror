@@ -52,7 +52,6 @@ thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["formatting", "parsing", "macros", "serde"] }
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "signal", "sync", "process"] }
 uuid = { version = "1.28.0", features = ["v4"] }
-zeroize = "1.9.1"
 
 # Key derivation and RSA key generation are unusably slow without
 # optimisation, and the test suite runs them constantly.

@@ -2,16 +2,18 @@
 //! `sandbox/compose.yaml`.
 #![allow(dead_code)]
 
+pub mod fixtures;
+pub mod provision;
+
 use std::{collections::HashMap, sync::Mutex};
 
 use anyhow::Result;
+use provision::TestAccount;
 use vault_mirror::{
     api::{ClientOptions, ServerUrls, build_http_client},
     crypto::KdfParams,
-    fixtures,
     mirror::{Endpoint, MirrorOptions, Outcome, Reporter, mirror},
     node::Node,
-    provision::{self, TestAccount},
     vault::{Account, Draft, Item, Scope, Vault},
 };
 

@@ -2,68 +2,71 @@
 
 ## Reporting a vulnerability
 
-1. Open **Security → Report a vulnerability** in this GitHub repository.
-2. Submit a private vulnerability report.
+Please report vulnerabilities privately: open **Security → Report a
+vulnerability** in this repository and submit a report. Don't use public
+issues for them. Fixes go into the latest release only.
 
-Do not report vulnerabilities in public issues.
-Only the latest release receives fixes.
+## What vault-mirror can access
 
-## What vault-mirror has access to
-
-vault-mirror needs each configured vault's API key and master password.
-It decrypts items to compare and copy their content.
+vault-mirror needs each vault's API key and master password, because it has to
+decrypt items to compare and copy them.
 
 > [!WARNING]
-> Anyone who reads vault-mirror's secrets can open the configured vaults.
-> Protect the settings file and secret files as carefully as the vaults.
+> Anyone who can read vault-mirror's settings can open your vaults. Protect the
+> settings file, and any secret files, as carefully as the vaults themselves.
 
-Pass secrets through files with `*_FILE`, such as Docker or systemd credentials.
-Other host processes might read secrets from environment variables.
+Environment variables can be visible to other processes on the same host. To
+keep secrets out of them, put each one in a file and point to it with
+`NAME_FILE`, for example with Docker secrets or systemd credentials. See
+[Secrets in files](docs/configuration.md#secrets-in-files).
 
 > [!WARNING]
-> Use a dedicated destination account.
-> vault-mirror permanently deletes destination items that do not match the source.
+> Use a new, dedicated account as the destination. vault-mirror permanently
+> deletes destination items that don't come from the source.
 
-## What is stored, and how
+## What it stores
 
 | File | Contents | Protection |
 | --- | --- | --- |
-| `key.age` | Backup key in passphrase mode. | The tool encrypts the key with `BACKUP_PASSPHRASE` and scrypt. |
-| `*/snapshots/*.json.age` | Complete vault exports, including unencrypted secrets inside the encrypted file. | The tool encrypts snapshots with age. |
-| `*/attachments/*.age` | Attachment content. | The tool encrypts attachments with age. |
-| `*/snapshots/*.meta.json` | Creation time, item count, attachment ids, and a salted fingerprint. | No encryption. The file contains no vault content. |
-| `last-run.json` | Time, result, and counts from the last run. | No encryption. The file contains no vault content. |
-| `state.json` | Login device ids for this installation. | No encryption. |
-| `run.lock` | No content. The tool locks this file during a run or restore. | No encryption. |
+| `key.age` | The backup key, when you use `BACKUP_PASSPHRASE`. | Encrypted with your passphrase, using scrypt. |
+| `*/snapshots/*.json.age` | Complete vault exports, secrets included. | Encrypted with age. |
+| `*/attachments/*.age` | Attachment content. | Encrypted with age. |
+| `*/snapshots/*.meta.json` | Creation time, item count, attachment ids, and a salted fingerprint. | None. No vault content. |
+| `last-run.json` | Time, result and counts of the last run. | None. No vault content. |
+| `state.json` | The device ids vault-mirror logs in with. | None. |
+| `run.lock` | Nothing. It's locked while a run or restore is using the directory. | None. |
 
-vault-mirror creates backup and state files with access limited to their owner on Unix.
-In passphrase mode, it encrypts snapshots and attachments to the backup key.
-With `BACKUP_RECIPIENTS`, it encrypts directly to the specified age public keys.
+On Unix, backup and state files are readable only by their owner. With
+`BACKUP_PASSPHRASE`, snapshots and attachments are encrypted to the backup key in
+`key.age`. With `BACKUP_RECIPIENTS`, they're encrypted to your own age public
+keys, so the machine making the backups can't read them back.
 
 > [!WARNING]
-> Recovery requires `BACKUP_PASSPHRASE` or the age identity file for `BACKUP_RECIPIENTS` backups.
-> Without the required secret, you cannot decrypt backups.
-> Keep the passphrase or identity file separate from the backup disk.
+> You need `BACKUP_PASSPHRASE`, or your age identity file when you use
+> `BACKUP_RECIPIENTS`, to read the backups. Without it nobody can decrypt them.
+> Keep it somewhere other than the backup disk.
 
-## What leaves the host
+## What leaves the machine
 
-vault-mirror contacts only the configured servers and notification URLs.
+vault-mirror connects only to your two servers, the attachment storage they
+point it to, and, if you configure them, your notification URLs.
 
-| Destination | Data |
+| Destination | What is sent |
 | --- | --- |
-| Configured source and destination servers | API requests and attachment transfers. |
-| `NOTIFY_SUCCESS_URL` or `NOTIFY_FAILURE_URL`, when configured | A one-line run summary with counts and error messages. The summary contains no vault content. |
+| The source and destination servers | API requests and attachment transfers. |
+| Attachment storage named by those servers, such as the Azure storage that Bitwarden's cloud uses | Encrypted attachment files. |
+| `NOTIFY_SUCCESS_URL` and `NOTIFY_FAILURE_URL`, if set | A one-line summary of the run, with counts and error messages. No vault content. |
 
-vault-mirror omits request URLs from errors and logs.
-Attachment download URLs contain access tokens.
-The tool reduces server error responses to their message and removes URLs and request credentials.
+Error messages and logs never include request URLs, because attachment download
+URLs contain access tokens. Server error responses are cut down to their message,
+with URLs and the credentials that were sent removed.
 
-## The mirror marker
+## The marker on each copy
 
-Each copy has a marker: the `__source` custom field.
-The marker uses Bitwarden's **Hidden** type, which masks the value until you reveal the value.
-The marker contains the source item's id and hashes of item content and attachments.
+Every copy carries a marker: a custom field called `__source`, of Bitwarden's
+**Hidden** type, so apps show it masked until you reveal it. It holds the source
+item's id and hashes of the item's content and attachments.
 
-The tool encrypts the marker with the destination vault's keys, like other fields.
-Only users who can open the destination can read the marker.
-The marker adds source item ids to information that these users can already see.
+The marker is encrypted with the destination's keys like any other field, so
+only people who can open the destination can read it. What it adds to what they
+can already see is the source item's id.

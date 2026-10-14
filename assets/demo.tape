@@ -1,7 +1,9 @@
 # Terminal demo for the README, recorded with VHS (https://github.com/charmbracelet/vhs).
 # Regenerate from the repository root, with Docker running:
 #
-#   cargo build --release && sandbox/up.sh && vhs assets/demo.tape
+#   cargo build --release --bin vault-mirror --example sandbox && sandbox/up.sh && vhs assets/demo.tape
+#
+# CI does this for every release and publishes the result; see .github/workflows/demo.yml.
 #
 # The hidden setup creates two throwaway sandbox accounts with sample data and
 # loads their settings from a temporary directory without printing them.
@@ -27,7 +29,7 @@ Set Theme { "name": "vault-mirror", "background": "#14171c", "foreground": "#d0d
 
 Hide
 Type `export PATH="$PWD/target/release:$PATH" DEMO=$(mktemp -d)` Enter
-Type `vault-mirror sandbox --seed > "$DEMO/env"` Enter
+Type `target/release/examples/sandbox --seed > "$DEMO/env"` Enter
 Type `set -a && . "$DEMO/env" && set +a && cd "$DEMO" && export BACKUPS_DIR=backups` Enter
 Type `PS1='\[\e[90m\]$\[\e[0m\] ' && clear` Enter
 Sleep 500ms

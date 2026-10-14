@@ -3,17 +3,15 @@ mod common;
 use std::{collections::HashMap, path::Path, process::Command};
 
 use anyhow::Result;
-use common::*;
+use common::{provision::TestAccount, *};
 use time::OffsetDateTime;
 use vault_mirror::{
     app::{self, RunFlags},
     backup::{BackupOptions, backup},
     config::Config,
-    fixtures,
     mirror::Endpoint,
     node::Node,
     plan::marker_of,
-    provision::TestAccount,
     restore::{RestoreOptions, restore},
     snapshot,
     store::{Keys, Protection, Retention, Store},

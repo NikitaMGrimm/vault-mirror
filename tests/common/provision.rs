@@ -1,6 +1,6 @@
 //! Creates throwaway accounts and organizations on a test server.
 //!
-//! The integration suite and the `sandbox` developer command use this to get
+//! The integration suite and `examples/sandbox.rs` use this to get
 //! API credentials without a human or the official CLI. It registers accounts
 //! the way a real client does, so it works against any server that has open
 //! registration and no email verification, which is how the sandbox servers
@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow};
 use reqwest::header::ACCEPT;
 use serde_json::{Value, json};
 
-use crate::{
+use vault_mirror::{
     api::{ApiCredentials, ServerUrls},
     crypto::{self, KdfParams, MasterSecret, SymKey},
 };

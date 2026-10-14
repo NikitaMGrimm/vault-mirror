@@ -7,122 +7,124 @@
 </p>
 
 <p align="center">
+  <a href="docs/getting-started.md">Getting started</a> |
+  <a href="docs/README.md">Documentation</a> |
+  <a href="https://github.com/NikitaMGrimm/vault-mirror/releases">Releases</a> |
+  <a href="https://github.com/NikitaMGrimm/vault-mirror/discussions">Discussions</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/NikitaMGrimm/vault-mirror/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/NikitaMGrimm/vault-mirror/ci.yml?branch=main&style=flat-square&label=CI"></a>
   <a href="https://github.com/NikitaMGrimm/vault-mirror/releases"><img alt="Release" src="https://img.shields.io/github/v/release/NikitaMGrimm/vault-mirror?sort=semver&style=flat-square"></a>
   <a href="https://crates.io/crates/vault-mirror"><img alt="crates.io" src="https://img.shields.io/crates/v/vault-mirror?style=flat-square"></a>
-  <a href="https://github.com/NikitaMGrimm/vault-mirror/pkgs/container/vault-mirror"><img alt="Container image" src="https://img.shields.io/badge/image-ghcr.io-blue?style=flat-square"></a>
-  <a href="Cargo.toml"><img alt="Minimum Rust version" src="https://img.shields.io/crates/msrv/vault-mirror?style=flat-square"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square"></a>
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" alt="vault-mirror checks the vaults, copies items, and finds no changes on the second run" width="860">
+  <img src="https://raw.githubusercontent.com/NikitaMGrimm/vault-mirror/assets/demo.gif" alt="vault-mirror checks the vaults, copies items, and finds no changes on the second run" width="860">
 </p>
 
-vault-mirror copies one Bitwarden or Vaultwarden vault into another and keeps the destination up to date.
-On a schedule, it creates new items, updates edited items in place, and removes deleted items.
+vault-mirror copies one Bitwarden or Vaultwarden vault into another and keeps it
+up to date. On every run it creates new items, updates the ones you edited, and
+removes the ones you deleted, so the second vault is always ready to use. That's
+useful when your self-hosted server is down, when you move between servers, or
+when you want a separate copy of one folder or collection. Without a second
+vault, it keeps encrypted backups of one vault on a schedule.
 
-It copies every item type, custom field, passkey, password history entry, folder, and attachment, subject to [server limitations](docs/limitations.md).
-It reads the destination again to check the result.
+## Why vault-mirror?
 
-With backups enabled, each run backs up both vaults before changing the destination.
-It encrypts backups with [age](https://age-encryption.org) in Bitwarden's export format.
-You can recover data with the standard `age` tool and any Bitwarden client.
+- **A vault you can use, not just a file.** The destination is an ordinary
+  account. Open it in any Bitwarden app when you need it.
+- **Backups anyone can read.** Each run first backs up both vaults in Bitwarden's
+  own export format, encrypted with [age](https://age-encryption.org). You can
+  restore them with the standard `age` tool and any Bitwarden client, without
+  vault-mirror.
+- **Careful with your data.** It shows you the plan before the first run. It stops
+  when the vaults look swapped, when the destination holds items it didn't make,
+  and when a run would delete every copy at once. After each run it reads the
+  destination back to check the result.
+- **Small.** One static binary or a small container image. It talks to the
+  Bitwarden API directly, without the `bw` CLI or Node.js, and contacts only
+  your two servers (and the attachment storage they use) and, if you set one,
+  a notification URL.
 
-The tool runs as one binary or a 14 MB container image.
-It uses the Bitwarden API directly, without the `bw` CLI.
-It contacts only the two configured servers and, if you set one, a notification URL.
-
-Common uses include:
-
-- Keep a destination in Bitwarden's cloud when your self-hosted Vaultwarden server is unavailable.
-- Copy items between servers before changing servers.
-- Copy one folder or selected collections to another account.
-- Keep encrypted backups of one source without a destination.
-
-Tests cover Vaultwarden and Bitwarden's own server, each as source and destination.
-The tool has also run against Bitwarden's cloud.
-Start with `check` and `--dry-run` before enabling scheduled runs.
-
-## Install
-
-```sh
-docker pull ghcr.io/nikitamgrimm/vault-mirror:0.2   # linux/amd64, linux/arm64
-cargo binstall vault-mirror                          # or: cargo install vault-mirror --locked
-```
-
-The [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases) has binaries for these systems:
-
-| System | Architectures |
-| --- | --- |
-| Linux, static binaries | x86-64, arm64 |
-| macOS | Apple silicon, Intel |
-
-Releases include checksums and [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations).
-Verify a downloaded file with `gh attestation verify FILE --repo NikitaMGrimm/vault-mirror`.
-
-The macOS binaries have no notarization.
-After a browser download, remove the quarantine flag with `xattr -d com.apple.quarantine vault-mirror`.
+It copies every item type, custom field, passkey, password history, folder,
+collection and attachment, within [what the servers allow](docs/limitations.md).
 
 ## Quick start
 
+You need a second, empty account for the destination and Docker. In a new
+directory, run:
+
+```console
+$ docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
+    ghcr.io/nikitamgrimm/vault-mirror:0.2 init
+$ docker compose up -d
+```
+
+`init` asks for both accounts, checks that it can log in, writes the settings
+and a `compose.yaml`, and shows what the first run would do. The
+[getting started guide](docs/getting-started.md) walks through every step.
+
 > [!WARNING]
-> vault-mirror logs in with your master password.
-> Use a dedicated, empty destination account.
-> It permanently deletes destination items that do not come from the source.
+> Use a new, dedicated account as the destination. vault-mirror deletes
+> everything in it that doesn't come from the source. Read
+> [SECURITY.md](SECURITY.md) to see what it can access and what it stores.
 
-Read [SECURITY.md](SECURITY.md) before setup.
+## Installation
 
-1. Open **Settings → Security → Keys → View API key** in each account's web vault.
-2. Create a personal API key for each account.
+The container image runs on linux/amd64 and linux/arm64:
 
-In an empty directory, run the setup command:
-
-```sh
-vault-mirror init
+```console
+$ docker pull ghcr.io/nikitamgrimm/vault-mirror:0.2
 ```
 
-`init` asks for both accounts and checks their logins.
-It writes `vault-mirror.env` and `compose.yaml`.
-It also shows the first run's plan.
+The [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases) has
+static Linux binaries (x86-64, arm64) and macOS binaries (Apple silicon, Intel),
+with checksums and [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations).
+With Rust installed, you can also use Cargo:
 
-With only Docker installed, run this command instead:
-
-```sh
-docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
-  ghcr.io/nikitamgrimm/vault-mirror:0.2 init
+```console
+$ cargo binstall vault-mirror     # downloads the release binary
+$ cargo install vault-mirror --locked
 ```
 
-Start the container with this command:
+The macOS binaries aren't notarized. After downloading one in a browser, run
+`xattr -d com.apple.quarantine vault-mirror`.
 
-```sh
-docker compose up -d
-```
+## A note on maturity
 
-The container runs on the schedule you chose during setup.
-Without Docker, start scheduled runs with `vault-mirror --env-file vault-mirror.env daemon`.
-[Configuration](docs/configuration.md) describes every setting and manual setup.
+vault-mirror is new. Its test suite runs against Vaultwarden and Bitwarden's own
+server, each as source and as destination, and it has been used with
+Bitwarden's cloud. Still, it handles your passwords: keep backups enabled,
+and look at `check` or `run --dry-run` before you let it run on a schedule.
 
 ## Documentation
 
-- [How it works](docs/how-it-works.md): run stages, matching copies, and [safety checks](docs/how-it-works.md#safety-checks) that prevent damage.
-- [Configuration](docs/configuration.md): every setting, [organizations](docs/configuration.md#organizations), and [mirroring part of a vault](docs/configuration.md#mirroring-part-of-a-vault).
+- [Getting started](docs/getting-started.md): a first setup, step by step.
+- [How it works](docs/how-it-works.md): what a run does, and the safety checks.
+- [Configuration](docs/configuration.md): every setting, organizations, and
+  mirroring part of a vault.
 - [Backups and restoring](docs/backups.md)
 - [Commands and scheduling](docs/running.md)
-- [Limitations](docs/limitations.md): vault-mirror does not copy Sends, members, permissions, or account settings. Bitwarden attachments require Premium.
+- [Limitations](docs/limitations.md)
+
+## Getting help
+
+Ask questions in [Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions)
+and report bugs in [Issues](https://github.com/NikitaMGrimm/vault-mirror/issues).
+vault-mirror's logs never contain secrets or vault content, so you can paste
+them. Report security problems privately, as [SECURITY.md](SECURITY.md)
+describes.
 
 ## Contributing
 
-Post questions and ideas in [Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions).
-Report bugs in [Issues](https://github.com/NikitaMGrimm/vault-mirror/issues).
-Report vulnerabilities through a [private report](SECURITY.md).
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-vault-mirror uses the [GPL-3.0-only](LICENSE) license.
-It uses Bitwarden's `bitwarden-crypto` crate, which also uses the GPL.
+vault-mirror is licensed under the [GPL-3.0-only](LICENSE), like Bitwarden's
+`bitwarden-crypto` crate that it uses.
 
-This is an independent project.
-Bitwarden, Inc. and the Vaultwarden project do not affiliate with or endorse it.
+This is an independent project. It isn't affiliated with or endorsed by
+Bitwarden, Inc. or the Vaultwarden project.

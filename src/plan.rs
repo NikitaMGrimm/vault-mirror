@@ -26,15 +26,14 @@ const NO_ATTACHMENTS: &str = "-";
 pub struct Marker {
     pub source_id: String,
     pub core_hash: String,
-    /// `None` for markers written by the original Python tool, which stored a
-    /// single combined hash.
-    pub attachments_hash: Option<String>,
+    pub attachments_hash: String,
 }
 
 impl Marker {
-    /// Accepts only what this tool and the original Python tool write: an
-    /// item id and hex SHA-256 hashes. Anything else is a field someone else
-    /// named `__source`, and must not make an item look mirrored.
+    /// Accepts only what this tool writes: an item id and two hex SHA-256
+    /// hashes, the second of which may be [`NO_ATTACHMENTS`]. Anything else is
+    /// a field someone else named `__source`, and must not make an item look
+    /// mirrored.
     fn parse(value: &str) -> Option<Self> {
         let is_hash = |part: &str| {
             part.len() == 64 && part.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
@@ -43,22 +42,19 @@ impl Marker {
         let marker = Self {
             source_id: parts.next()?.to_string(),
             core_hash: parts.next()?.to_string(),
-            attachments_hash: parts.next().map(str::to_string),
+            attachments_hash: parts.next()?.to_string(),
         };
         let valid = parts.next().is_none()
             && is_hash(&marker.core_hash)
-            && marker
-                .attachments_hash
-                .as_deref()
-                .is_none_or(|hash| hash == NO_ATTACHMENTS || is_hash(hash));
+            && (marker.attachments_hash == NO_ATTACHMENTS || is_hash(&marker.attachments_hash));
         valid.then_some(marker)
     }
 
     fn render(&self) -> String {
-        match &self.attachments_hash {
-            Some(attachments) => format!("{} {} {attachments}", self.source_id, self.core_hash),
-            None => format!("{} {}", self.source_id, self.core_hash),
-        }
+        format!(
+            "{} {} {}",
+            self.source_id, self.core_hash, self.attachments_hash
+        )
     }
 
     fn to_field(&self) -> Node {
@@ -250,7 +246,7 @@ impl Plan {
         collection_ids: &HashMap<String, String>,
     ) -> Result<Draft, PlanError> {
         let pending = Marker {
-            attachments_hash: Some(NO_ATTACHMENTS.to_string()),
+            attachments_hash: NO_ATTACHMENTS.to_string(),
             ..entry.marker.clone()
         };
         self.draft_marked(entry, &pending, source, folder_ids, collection_ids)
@@ -267,7 +263,7 @@ impl Plan {
         collection_ids: &HashMap<String, String>,
     ) -> Result<Draft, PlanError> {
         let finished = Marker {
-            attachments_hash: Some(attachments_hash(&source.items[entry.source], dest)),
+            attachments_hash: attachments_hash(&source.items[entry.source], dest),
             ..entry.marker.clone()
         };
         self.draft_marked(entry, &finished, source, folder_ids, collection_ids)
@@ -391,7 +387,7 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
             source_id: item.id.clone(),
             core_hash: core_hash(item, folder.as_deref(), &collections, mode),
             // Final once the destination item is known.
-            attachments_hash: Some(NO_ATTACHMENTS.to_string()),
+            attachments_hash: NO_ATTACHMENTS.to_string(),
         };
         entry_by_source_id.insert(&item.id, plan.entries.len());
         plan.entries.push(Entry {
@@ -460,14 +456,8 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         // still carries the old marker.
         let dest_core = core_hash(dest_item, dest_folder, &dest_item_collections, mode);
         let current = attachments_hash(source_item, dest_item);
-        let attachments_recorded = match &marker.attachments_hash {
-            Some(hash) => *hash == current,
-            // A legacy marker says nothing about attachments. That only
-            // matters when there are attachments on either side.
-            None => source_item.attachments.is_empty() && dest_item.attachments.is_empty(),
-        };
-        let mut sync_attachments =
-            !attachments_recorded || attachment_names(dest_item) != attachment_names(source_item);
+        let mut sync_attachments = marker.attachments_hash != current
+            || attachment_names(dest_item) != attachment_names(source_item);
         if !copy_attachments {
             // The marker goes on vouching for whatever the destination holds,
             // so that a later run that can copy attachments sees what is
@@ -485,14 +475,9 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
                 };
             }
             sync_attachments = false;
-            plan.entries[entry_index].marker.attachments_hash = Some(
-                marker
-                    .attachments_hash
-                    .clone()
-                    .unwrap_or_else(|| NO_ATTACHMENTS.to_string()),
-            );
+            plan.entries[entry_index].marker.attachments_hash = marker.attachments_hash.clone();
         } else if !sync_attachments {
-            plan.entries[entry_index].marker.attachments_hash = Some(current);
+            plan.entries[entry_index].marker.attachments_hash = current;
         }
         let entry = &plan.entries[entry_index];
         let write_content = marker != &entry.marker || dest_core != entry.marker.core_hash;

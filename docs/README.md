@@ -1,10 +1,17 @@
 # Documentation
 
-- [How it works](how-it-works.md): run stages, matching copies, and safety checks.
-- [Configuration](configuration.md): every setting, organizations, and copying selected items.
-- [Backups and restoring](backups.md): backup layout, recovery with `age`, and `restore`.
-- [Commands and scheduling](running.md): every command, systemd, and the container user.
-- [Limitations](limitations.md): unsupported data and Bitwarden server restrictions.
-- [Migrating from the Python version](migrating-from-python.md).
+New to vault-mirror? Start with [Getting started](getting-started.md), which sets
+up a mirror from scratch and explains each step.
 
-Post other questions in [Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions).
+- [Getting started](getting-started.md): a first setup, step by step.
+- [How it works](how-it-works.md): what a run does, how copies are recognized,
+  and the safety checks.
+- [Configuration](configuration.md): every setting, organizations, and mirroring
+  part of a vault.
+- [Backups and restoring](backups.md): what is in the backup directory, and how
+  to get data back out, with or without vault-mirror.
+- [Commands and scheduling](running.md): every command, output, and systemd.
+- [Limitations](limitations.md): what isn't copied, and server restrictions.
+
+Can't find something? Ask in
+[Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions).

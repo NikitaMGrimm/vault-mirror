@@ -1,0 +1,75 @@
+name: Demo
+
+# Records the terminal demo in the README with VHS, against the sandbox
+# servers, from assets/demo.tape. The release workflow calls this for every
+# release and publishes the result to the `assets` branch, which the README
+# loads it from. The branch holds one commit, replaced each time, so the GIF
+# never adds to the history of main.
+#
+# A manual run records the chosen branch and uploads the GIF as an artifact,
+# to preview a change to the demo. Choose `publish` to also replace the
+# published one.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The tag or commit to record
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Replace the demo the README shows
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: demo
+
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          toolchain=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
+          rustup toolchain install "$toolchain" --profile minimal && rustup default "$toolchain"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --release --locked --bin vault-mirror --example sandbox
+      - run: sandbox/up.sh
+      # The font the tape asks for.
+      - run: sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+      - uses: charmbracelet/vhs-action@f6d7db07a432fcd3b06772628d36a57f96d95dcf # v2.1.1
+        with:
+          path: assets/demo.tape
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: demo
+          path: assets/demo.gif
+          if-no-files-found: error
+      - name: Publish to the assets branch
+        # Calls from the release pass a ref; a manual run of this workflow does not.
+        if: inputs.ref != '' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref || github.ref_name }}
+        run: |
+          mkdir "$RUNNER_TEMP/assets"
+          cp assets/demo.gif "$RUNNER_TEMP/assets/"
+          cd "$RUNNER_TEMP/assets"
+          git init -q -b assets
+          git add demo.gif
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Record the demo for $REF"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" assets
+      - if: failure()
+        run: docker compose -f sandbox/compose.yaml logs

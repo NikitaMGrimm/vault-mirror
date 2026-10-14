@@ -4,7 +4,6 @@ use anyhow::Result;
 use common::*;
 use vault_mirror::{
     crypto::KdfParams,
-    fixtures,
     mirror::{Endpoint, MirrorOptions},
     node::Node,
     restore::{RestoreOptions, restore},

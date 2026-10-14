@@ -40,9 +40,9 @@ Docker. You don't need a Bitwarden account: the sandbox runs throwaway servers
 locally.
 
 ```sh
-sandbox/up.sh                   # two Vaultwarden servers, plus a TLS proxy
-cargo test                      # unit and end-to-end tests
-cargo run -- sandbox --seed     # prints an env file for two new accounts with sample data
+sandbox/up.sh                           # two Vaultwarden servers, plus a TLS proxy
+cargo test                              # unit and end-to-end tests
+cargo run --example sandbox -- --seed   # prints a settings file for two new accounts with sample data
 ```
 
 When the sandbox is not running, the end-to-end tests are skipped. CI requires
@@ -115,16 +115,18 @@ same pull request and give the reason.
 
 ### Documentation
 
-- Write in Simplified Technical English. Keep a procedure step to 20 words
-  and a descriptive sentence to 25. Use the active voice and one instruction
-  per step.
+- Write for someone setting vault-mirror up for the first time: plain
+  English, addressed to "you", with short sentences and an example where one
+  helps. Say why as well as what.
 - Use one term for one meaning: source, destination, run, snapshot, copy (a
   destination item that vault-mirror made), marker (the `__source` field),
   settings file (`vault-mirror.env`).
-- Do not use marketing words, idioms or hedges, such as "simply", "seamless"
-  or "robust".
+- Do not use marketing words or filler, such as "simply", "seamless" or
+  "robust".
 - Keep the README to an overview, installation, a quick start and links. Put
-  details in `docs/`.
+  details and walkthroughs in `docs/`, starting with
+  [Getting started](docs/getting-started.md).
+- Keep sample output in the docs the same as what the command prints.
 
 ## Pull requests
 
@@ -155,6 +157,8 @@ there if needed and merges it. That publishes the crate to crates.io, tags the
 version, and runs the release workflow, which builds static binaries for
 x86-64 and arm64 Linux and native binaries for both macOS architectures,
 publishes the container image, and attaches build provenance to all of them.
+Last, it records the terminal demo in the README from `assets/demo.tape`
+against the sandbox, and publishes it to the `assets` branch.
 
 ## License
 
