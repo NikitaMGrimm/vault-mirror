@@ -37,7 +37,7 @@ pub struct RunFlags {
 /// and file names, never vault content.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Status {
-    pub status: String,
+    pub status: RunResult,
     pub dry_run: bool,
     pub started_at: String,
     pub finished_at: String,
@@ -57,9 +57,17 @@ pub struct Status {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RunResult {
+    Success,
+    #[default]
+    Failed,
+}
+
 impl Status {
     pub fn succeeded(&self) -> bool {
-        self.status == "success"
+        self.status == RunResult::Success
     }
 }
 
@@ -224,7 +232,7 @@ struct Progress {
 }
 
 /// Runs once and records the result. Never returns an error: a failed run is
-/// a `Status` with `status == "failed"`.
+/// a `Status` with `RunResult::Failed`.
 pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter) -> Status {
     let started = OffsetDateTime::now_utc();
     let mut progress = Progress {
@@ -249,9 +257,9 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
     status.finished_at = finished.format(&Rfc3339).unwrap_or_default();
     status.duration_seconds = ((finished - started).as_seconds_f64() * 1000.0).round() / 1000.0;
     match result {
-        Ok(()) => status.status = "success".into(),
+        Ok(()) => status.status = RunResult::Success,
         Err(error) => {
-            status.status = "failed".into();
+            status.status = RunResult::Failed;
             status.failure_stage = Some(progress.stage.to_string());
             let message: String = format!("{error:#}")
                 .split_whitespace()
@@ -402,8 +410,8 @@ pub fn describe(status: &Status) -> String {
     )];
     if let Some(mirror) = &status.mirror {
         parts.push(format!(
-            "{} items created, {} updated, {} deleted, {} unchanged",
-            mirror.items_created,
+            "{} created, {} updated, {} deleted, {} unchanged",
+            count(mirror.items_created, "item"),
             mirror.items_updated,
             mirror.items_deleted,
             mirror.items_unchanged
@@ -488,7 +496,7 @@ mod tests {
 
     fn success() -> Status {
         Status {
-            status: "success".into(),
+            status: RunResult::Success,
             finished_at: "2026-10-14T02:00:00Z".into(),
             mirror: Some(SummaryRecord {
                 items_created: 2,
@@ -577,7 +585,7 @@ mod tests {
         let stale = health(&success(), day, datetime!(2026-10-16 02:00:00 UTC)).unwrap_err();
         assert!(stale.contains("48 hour"), "{stale}");
         let failed = Status {
-            status: "failed".into(),
+            status: RunResult::Failed,
             failure_stage: Some("source login".into()),
             error: Some("bad key".into()),
             ..success()
@@ -596,7 +604,7 @@ mod tests {
             "vault-mirror succeeded; 2 items created, 0 updated, 0 deleted, 40 unchanged"
         );
         let failed = Status {
-            status: "failed".into(),
+            status: RunResult::Failed,
             dry_run: true,
             mirror: None,
             failure_stage: Some("planning".into()),
