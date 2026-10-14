@@ -954,6 +954,14 @@ async fn archived_items_with_attachments_stay_archived() -> Result<()> {
     source
         .upload_attachment(&PERSONAL, item, "second.txt", b"second")
         .await?;
+    // Bitwarden's server takes the source item out of the archive too.
+    let vault = source.load(&PERSONAL).await?;
+    let item = by_name(&vault, "Extra note 0");
+    if !item.archived {
+        source
+            .set_archived(std::slice::from_ref(&item.id), true)
+            .await?;
+    }
     run(&source, &dest, &options()).await?;
     let mirrored = dest.load(&PERSONAL).await?;
     assert!(by_name(&mirrored, "Extra note 0").archived);
