@@ -1,0 +1,39 @@
+[package]
+name = "vault-mirror"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-only"
+description = "Mirror and back up a Bitwarden or Vaultwarden vault, without the Bitwarden CLI."
+repository = "https://github.com/NikitaMGrimm/vault-mirror-rs"
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+bitwarden-crypto = "4.0.0"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+hex = "0.4.3"
+httpdate = "1.0.3"
+rand = "0.10.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "multipart", "stream", "gzip", "form", "query", "http2"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting", "parsing", "macros", "serde"] }
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "signal", "sync", "process"] }
+uuid = { version = "1.28.0", features = ["v4"] }
+zeroize = "1.9.1"
+
+# Key derivation and RSA key generation are unusably slow without
+# optimisation, and the test suite runs them constantly.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

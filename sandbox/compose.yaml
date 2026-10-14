@@ -1,0 +1,40 @@
+# Two disposable Vaultwarden servers for integration tests: a mirror source and
+# a mirror destination. Data lives in tmpfs, so `down` discards everything.
+name: vault-mirror-sandbox
+
+x-vaultwarden: &vaultwarden
+  image: vaultwarden/server:1.37.4@sha256:efb3cde962015fcc036b2ea625242248611943b27212ebf4392841fb30fad055
+  tmpfs:
+    - /data
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/alive"]
+    interval: 1s
+    timeout: 3s
+    retries: 30
+
+x-environment: &environment
+  SIGNUPS_ALLOWED: "true"
+  SIGNUPS_VERIFY: "false"
+  INVITATIONS_ALLOWED: "true"
+  ENABLE_WEBSOCKET: "false"
+  LOG_LEVEL: "warn"
+  # The suite creates many accounts and logs in constantly.
+  LOGIN_RATELIMIT_MAX_BURST: "100000"
+  LOGIN_RATELIMIT_SECONDS: "1"
+  ADMIN_RATELIMIT_MAX_BURST: "100000"
+
+services:
+  source:
+    <<: *vaultwarden
+    environment:
+      <<: *environment
+      DOMAIN: "http://127.0.0.1:18081"
+    ports:
+      - "127.0.0.1:18081:80"
+  dest:
+    <<: *vaultwarden
+    environment:
+      <<: *environment
+      DOMAIN: "http://127.0.0.1:18082"
+    ports:
+      - "127.0.0.1:18082:80"
