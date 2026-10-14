@@ -631,3 +631,68 @@ async fn a_folder_filter_mirrors_part_of_the_vault() -> Result<()> {
     );
     Ok(())
 }
+
+/// Bitwarden accepts attachments only from premium accounts. A destination
+/// without premium gets everything else, and a warning, instead of a failed
+/// run.
+#[tokio::test]
+async fn a_destination_without_premium_gets_everything_but_attachments() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source = sandbox
+        .open(&sandbox.register(&sandbox.source_url).await?)
+        .await?;
+    let dest = sandbox
+        .open(&sandbox.register_free(&sandbox.dest_url).await?)
+        .await?;
+    seed(&source).await?;
+
+    let first = run(&source, &dest, &options()).await?;
+    assert_eq!(first.summary.items_created, fixtures::samples().len());
+    if dest.premium {
+        assert_eq!(first.summary.attachments_copied, 4);
+        assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    } else {
+        assert_eq!(first.summary.attachments_copied, 0);
+        assert!(
+            first.warnings.iter().any(|w| w.contains("no premium")),
+            "{:?}",
+            first.warnings
+        );
+        let mirrored = dest.load(&PERSONAL).await?;
+        assert!(
+            mirrored
+                .items
+                .iter()
+                .all(|item| item.attachments.is_empty())
+        );
+    }
+    assert!(!run(&source, &dest, &options()).await?.changed);
+    Ok(())
+}
+
+/// A first run that creates more than a few items imports them in bulk, and
+/// the result is the same as creating them one by one.
+#[tokio::test]
+async fn many_new_items_are_imported_in_bulk() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    seed(&source).await?;
+    seed_extra(&source, 12).await?;
+    let total = fixtures::samples().len() + 12;
+
+    let first = run(&source, &dest, &options()).await?;
+    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    assert_eq!(first.summary.items_created, total);
+    assert_eq!(first.summary.attachments_copied, 4);
+    let mirrored = dest.load(&PERSONAL).await?;
+    assert_eq!(mirrored.items.len(), total);
+    let extra = by_name(&mirrored, "Extra note 0");
+    assert_eq!(folder_of(&mirrored, extra).as_deref(), Some("Work"));
+    assert!(mirrored.items.iter().any(|item| item.archived));
+    assert!(!run(&source, &dest, &options()).await?.changed);
+    Ok(())
+}

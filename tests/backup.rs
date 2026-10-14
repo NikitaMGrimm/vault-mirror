@@ -101,6 +101,8 @@ async fn a_backup_restores_into_an_identical_vault() -> Result<()> {
         .open(&sandbox.register(&sandbox.source_url).await?)
         .await?;
     seed(&source).await?;
+    // Enough items that the restore imports them in bulk.
+    seed_extra(&source, 12).await?;
     let dir = tempfile::tempdir()?;
     let keys = keys(dir.path());
     let store = Store::open(dir.path(), "source", &keys)?;
@@ -113,7 +115,7 @@ async fn a_backup_restores_into_an_identical_vault() -> Result<()> {
         &Capture::default(),
     )
     .await?;
-    assert_eq!(report.items, fixtures::samples().len());
+    assert_eq!(report.items, fixtures::samples().len() + 12);
     assert_eq!(report.attachments_downloaded, 4);
     assert!(report.snapshot.is_some());
 

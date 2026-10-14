@@ -114,6 +114,17 @@ impl Sandbox {
         provision::register(&self.http, server, &email, PASSWORD, kdf).await
     }
 
+    /// An account without premium on the sandbox's Bitwarden server, where
+    /// `sandbox/up.sh` makes every other account premium. Vaultwarden makes
+    /// every account premium regardless.
+    pub async fn register_free(&self, server: &str) -> Result<TestAccount> {
+        let email = format!("free-{}@example.com", uuid::Uuid::new_v4().simple());
+        let kdf = KdfParams::Pbkdf2 {
+            iterations: 600_000,
+        };
+        provision::register(&self.http, server, &email, PASSWORD, &kdf).await
+    }
+
     pub async fn open(&self, account: &TestAccount) -> Result<Account> {
         let urls = ServerUrls::from_server(&account.server)?;
         Account::open(
@@ -156,6 +167,40 @@ pub async fn seed(account: &Account) -> Result<()> {
                 .set_archived(std::slice::from_ref(&item.id), true)
                 .await?;
         }
+    }
+    Ok(())
+}
+
+/// Adds `count` notes, alternately in the "Work" folder and in none, so that
+/// together with the samples a first run creates enough items to import them
+/// in bulk.
+pub async fn seed_extra(account: &Account, count: usize) -> Result<()> {
+    let work = account
+        .load(&Scope::Personal)
+        .await?
+        .folders
+        .into_iter()
+        .find(|folder| folder.name == "Work")
+        .map(|folder| folder.id);
+    for index in 0..count {
+        let draft = Draft {
+            content: [
+                ("type".to_string(), Node::Number(2.into())),
+                (
+                    "name".to_string(),
+                    Node::secret(format!("Extra note {index}")),
+                ),
+                ("notes".to_string(), Node::secret("bulk")),
+                (
+                    "secureNote".to_string(),
+                    Node::Map([("type".to_string(), Node::Number(0.into()))].into()),
+                ),
+            ]
+            .into(),
+            folder_id: if index % 2 == 0 { work.clone() } else { None },
+            collection_ids: Vec::new(),
+        };
+        account.create_item(&Scope::Personal, &draft).await?;
     }
     Ok(())
 }

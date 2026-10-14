@@ -128,7 +128,7 @@ pub struct Outcome {
 
 /// A run that failed, with the phase it failed in for the status file.
 #[derive(Debug, thiserror::Error)]
-#[error("{stage} failed: {source:#}")]
+#[error("{stage} failed")]
 pub struct MirrorError {
     pub stage: &'static str,
     /// What the plan intended, when the run got far enough to have one.
@@ -301,6 +301,24 @@ impl Run<'_> {
             },
             "the destination server does not show bank accounts, driver's licences or passports yet",
         );
+        if mode == Mode::Personal && !self.dest.account.premium {
+            let count: usize = source_vault
+                .items
+                .iter()
+                .filter(|item| !item.in_trash)
+                .map(|item| item.attachments.len())
+                .sum();
+            if count > 0 {
+                for item in &mut source_vault.items {
+                    item.attachments.clear();
+                }
+                self.warn(format!(
+                    "{count} attachment(s) are not copied because the destination account has no \
+                     premium subscription, which Bitwarden requires for attachments. They are \
+                     copied once it has one."
+                ));
+            }
+        }
         if mode == Mode::Organization && traits.items_need_collections {
             self.leave_out(
                 &mut source_vault,
@@ -394,22 +412,27 @@ impl Run<'_> {
         self.stage = "writing items";
         // Each write yields the entry it was for and the destination item as
         // the server now holds it.
-        let created: Vec<(usize, Item)> = stream::iter(plan.creates.iter().map(|&entry_index| {
-            let (folder_ids, collection_ids) = (&folder_ids, &collection_ids);
-            async move {
-                let draft = plan.draft(
+        let drafts = plan
+            .creates
+            .iter()
+            .map(|&entry_index| {
+                plan.draft(
                     &plan.entries[entry_index],
                     source_vault,
-                    folder_ids,
-                    collection_ids,
-                )?;
-                let item = dest.account.create_item(&dest.scope, &draft).await?;
-                anyhow::Ok((entry_index, item))
-            }
-        }))
-        .buffer_unordered(concurrency)
-        .try_collect()
-        .await?;
+                    &folder_ids,
+                    &collection_ids,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let folder_names: HashMap<String, String> = folder_ids
+            .iter()
+            .map(|(name, id)| (id.clone(), name.clone()))
+            .collect();
+        let new_items = dest
+            .account
+            .create_items(&dest.scope, &drafts, &folder_names, concurrency)
+            .await?;
+        let created: Vec<(usize, Item)> = plan.creates.iter().copied().zip(new_items).collect();
         if !created.is_empty() {
             self.reporter
                 .info(&format!("Created {} item(s).", created.len()));

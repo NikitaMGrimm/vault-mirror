@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow, bail};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 
@@ -44,6 +45,10 @@ const LIST_CONTENT_KEYS: &[&str] = &["fields", "passwordHistory"];
 
 /// The largest batch the Bitwarden server accepts for bulk item operations.
 const BULK_LIMIT: usize = 500;
+
+/// Up to this many new items are created one by one, which avoids the
+/// extra sync an import needs.
+const SINGLE_CREATE_LIMIT: usize = 10;
 
 /// Bank account, driver's licence and passport.
 const FLAGGED_ITEM_TYPES: [u64; 3] = [6, 7, 8];
@@ -159,6 +164,10 @@ pub struct Account {
     memberships: Memberships,
     pub user_id: String,
     pub email: String,
+    /// Whether the account may upload attachments to its individual vault.
+    /// Bitwarden requires a premium subscription; Vaultwarden reports every
+    /// account as premium.
+    pub premium: bool,
 }
 
 impl Account {
@@ -179,6 +188,9 @@ impl Account {
         };
         let user_id = text("id")?;
         let email = text("email")?;
+        let flag = |name: &str| profile.get(name).and_then(Value::as_bool);
+        let premium =
+            flag("premium").unwrap_or(true) || flag("premiumFromOrganization") == Some(true);
 
         let kdf = match session.login_kdf {
             Some(kdf) => Some(kdf),
@@ -225,6 +237,7 @@ impl Account {
             memberships: member_ids,
             user_id,
             email,
+            premium,
         })
     }
 
@@ -386,6 +399,85 @@ impl Account {
             item.collection_ids = draft.collection_ids.clone();
         }
         Ok(item)
+    }
+
+    /// Creates items, returned in the order of `drafts`. In an individual
+    /// vault, more than a few items are imported in bulk: Bitwarden's cloud
+    /// accepts only about 60 single creations a minute. `folder_names` maps
+    /// the drafts' folder ids to names, which an import must repeat.
+    pub async fn create_items(
+        &self,
+        scope: &Scope,
+        drafts: &[Draft],
+        folder_names: &HashMap<String, String>,
+        concurrency: usize,
+    ) -> Result<Vec<Item>> {
+        if *scope != Scope::Personal || drafts.len() <= SINGLE_CREATE_LIMIT {
+            return stream::iter(drafts.iter().map(|draft| self.create_item(scope, draft)))
+                .buffered(concurrency.max(1))
+                .try_collect()
+                .await;
+        }
+        let key = &self.keys.user;
+        let mut sent_names = Vec::with_capacity(drafts.len());
+        for chunk in drafts.chunks(BULK_LIMIT) {
+            let mut ciphers = Vec::with_capacity(chunk.len());
+            let mut folders: Vec<Value> = Vec::new();
+            let mut folder_positions: HashMap<&str, usize> = HashMap::new();
+            let mut relationships = Vec::new();
+            for (index, draft) in chunk.iter().enumerate() {
+                let cipher = self.cipher_body(scope, draft, key, None)?;
+                sent_names.push(required_str(&cipher, "name", "item to import")?);
+                ciphers.push(cipher);
+                let Some(folder) = draft.folder_id.as_deref() else {
+                    continue;
+                };
+                let position = match folder_positions.get(folder) {
+                    Some(&position) => position,
+                    None => {
+                        let name = folder_names
+                            .get(folder)
+                            .ok_or_else(|| anyhow!("no name for folder {folder}"))?;
+                        // An existing folder id is kept; the name is required
+                        // all the same.
+                        folders.push(json!({ "id": folder, "name": key.encrypt_str(name)? }));
+                        folder_positions.insert(folder, folders.len() - 1);
+                        folders.len() - 1
+                    }
+                };
+                relationships.push(json!({ "key": index, "value": position }));
+            }
+            let body = json!({
+                "ciphers": ciphers,
+                "folders": folders,
+                "folderRelationships": relationships,
+            });
+            self.session
+                .send_once(Method::POST, "/ciphers/import", Some(&body))
+                .await?;
+        }
+
+        // An import does not report the new ids. Every encryption is
+        // randomised and servers store ciphertext as sent, so each new item
+        // is found by its encrypted name.
+        let sync = self.session.get("/sync?excludeDomains=true").await?;
+        let by_name: HashMap<&str, &Value> = sync
+            .get("ciphers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|cipher| cipher.get("organizationId").is_none_or(Value::is_null))
+            .filter_map(|cipher| Some((cipher.get("name")?.as_str()?, cipher)))
+            .collect();
+        sent_names
+            .iter()
+            .map(|name| {
+                let cipher = by_name.get(name.as_str()).ok_or_else(|| {
+                    anyhow!("an imported item is missing from the vault after the import")
+                })?;
+                decrypt_item(cipher, key).context("reading an imported item")
+            })
+            .collect()
     }
 
     /// Replaces the content of `existing`. Fails if the item changed on the

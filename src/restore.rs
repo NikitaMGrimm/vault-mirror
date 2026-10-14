@@ -21,6 +21,8 @@ pub struct RestoreReport {
     pub attachments_restored: usize,
     /// Attachments the snapshot lists but whose content is not in the backup.
     pub attachments_missing: usize,
+    /// Attachments left out because the account may not upload attachments.
+    pub attachments_skipped: usize,
 }
 
 pub struct RestoreOptions {
@@ -110,50 +112,78 @@ pub async fn restore(
         }
     }
 
-    let (folder_ids, collection_ids) = (&folder_ids, &collection_ids);
-    let outcomes: Vec<(bool, String, usize, usize)> =
-        stream::iter(snapshot.items.iter().map(|item| async move {
-            let draft = Draft {
-                content: item.content.clone(),
-                folder_id: item
-                    .folder_id
-                    .as_deref()
-                    .and_then(|id| folder_ids.get(id))
-                    .cloned(),
-                collection_ids: item
-                    .collection_ids
-                    .iter()
-                    .filter_map(|id| collection_ids.get(id.as_str()))
-                    .cloned()
-                    .collect(),
-            };
-            let created = account.create_item(scope, &draft).await?;
-            let (mut restored, mut missing) = (0, 0);
-            for attachment in &item.attachments {
-                let data = match store {
-                    Some(store)
-                        if attachment.stored && store.has_attachment(&attachment.attachment_id) =>
-                    {
-                        store.read_attachment(&attachment.attachment_id)?
-                    }
-                    _ => {
-                        missing += 1;
-                        continue;
-                    }
-                };
-                account
-                    .upload_attachment(scope, &created, &attachment.file_name, &data)
-                    .await
-                    .with_context(|| {
-                        format!("restoring an attachment of snapshot item {}", item.id)
-                    })?;
-                restored += 1;
-            }
-            anyhow::Ok((item.archived, created.id, restored, missing))
-        }))
-        .buffer_unordered(options.concurrency.max(1))
-        .try_collect()
+    let drafts: Vec<Draft> = snapshot
+        .items
+        .iter()
+        .map(|item| Draft {
+            content: item.content.clone(),
+            folder_id: item
+                .folder_id
+                .as_deref()
+                .and_then(|id| folder_ids.get(id))
+                .cloned(),
+            collection_ids: item
+                .collection_ids
+                .iter()
+                .filter_map(|id| collection_ids.get(id.as_str()))
+                .cloned()
+                .collect(),
+        })
+        .collect();
+    let folder_names: HashMap<String, String> = snapshot
+        .folders
+        .iter()
+        .filter_map(|folder| {
+            Some((
+                folder_ids.get(folder.id.as_str())?.clone(),
+                folder.name.clone(),
+            ))
+        })
+        .collect();
+    let concurrency = options.concurrency.max(1);
+    // Bitwarden accepts attachments only from premium accounts.
+    let attachments_allowed = *scope != Scope::Personal || account.premium;
+    let created = account
+        .create_items(scope, &drafts, &folder_names, concurrency)
         .await?;
+
+    let outcomes: Vec<(bool, String, usize, usize)> = stream::iter(
+        snapshot
+            .items
+            .iter()
+            .zip(&created)
+            .map(|(item, created)| async move {
+                let (mut restored, mut missing) = (0, 0);
+                if !attachments_allowed {
+                    return anyhow::Ok((item.archived, created.id.clone(), 0, 0));
+                }
+                for attachment in &item.attachments {
+                    let data = match store {
+                        Some(store)
+                            if attachment.stored
+                                && store.has_attachment(&attachment.attachment_id) =>
+                        {
+                            store.read_attachment(&attachment.attachment_id)?
+                        }
+                        _ => {
+                            missing += 1;
+                            continue;
+                        }
+                    };
+                    account
+                        .upload_attachment(scope, created, &attachment.file_name, &data)
+                        .await
+                        .with_context(|| {
+                            format!("restoring an attachment of snapshot item {}", item.id)
+                        })?;
+                    restored += 1;
+                }
+                anyhow::Ok((item.archived, created.id.clone(), restored, missing))
+            }),
+    )
+    .buffer_unordered(concurrency)
+    .try_collect()
+    .await?;
 
     let archived: Vec<String> = outcomes
         .iter()
@@ -171,6 +201,20 @@ pub async fn restore(
     report.items = outcomes.len();
     report.attachments_restored = outcomes.iter().map(|(_, _, restored, _)| restored).sum();
     report.attachments_missing = outcomes.iter().map(|(_, _, _, missing)| missing).sum();
+    if !attachments_allowed {
+        report.attachments_skipped = snapshot
+            .items
+            .iter()
+            .map(|item| item.attachments.len())
+            .sum();
+    }
+    if report.attachments_skipped > 0 {
+        reporter.warn(&format!(
+            "{} attachment(s) are not restored because the account has no premium subscription, \
+             which Bitwarden requires for attachments.",
+            report.attachments_skipped
+        ));
+    }
     if report.attachments_missing > 0 {
         reporter.warn(&format!(
             "{} attachment(s) are listed in the snapshot but their content is not in the backup.",

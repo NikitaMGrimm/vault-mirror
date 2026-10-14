@@ -40,12 +40,15 @@ done
 
 # Attachments need a premium account with storage, which a self-hosted server
 # grants only through a license. The sandbox makes every account premium
-# instead.
+# instead, except those whose email starts with `free-`, which stand in for
+# accounts without a subscription.
 docker compose exec -T official-db psql -U bitwarden -d vault -v ON_ERROR_STOP=1 -q <<'SQL'
 CREATE OR REPLACE FUNCTION sandbox_premium() RETURNS trigger AS $$
 BEGIN
-  NEW."Premium" := true;
-  NEW."MaxStorageGb" := 10;
+  IF NEW."Email" COLLATE "C" NOT LIKE 'free-%' THEN
+    NEW."Premium" := true;
+    NEW."MaxStorageGb" := 10;
+  END IF;
   RETURN NEW;
 END $$ LANGUAGE plpgsql;
 CREATE OR REPLACE TRIGGER sandbox_premium BEFORE INSERT OR UPDATE ON "User"
