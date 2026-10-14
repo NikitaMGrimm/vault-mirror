@@ -261,6 +261,7 @@ impl<'a> Store<'a> {
             attachments: backups.join(role).join("attachments"),
         };
         create_private_dir(backups)?;
+        create_private_dir(&backups.join(role))?;
         create_private_dir(&store.snapshots)?;
         create_private_dir(&store.attachments)?;
         Ok(store)

@@ -1,0 +1,5 @@
+target
+.git
+sandbox
+tests
+*.md
