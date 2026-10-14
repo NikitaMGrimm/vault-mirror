@@ -46,7 +46,8 @@ than the backup disk.
   content.
 
 Error messages and logs leave out request URLs, because attachment download
-links carry access tokens. Server error bodies are reduced to their message.
+links carry access tokens. Server error bodies are reduced to their message,
+with any URL and any credential sent with the request removed.
 
 ## The mirror marker
 

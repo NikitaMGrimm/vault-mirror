@@ -112,6 +112,15 @@ impl Env<'_> {
         }
     }
 
+    /// A secret that cannot contain spaces at its ends, such as an API key or
+    /// a URL, unlike a password.
+    fn token(&self, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .secret(name)?
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()))
+    }
+
     fn parse<T: FromStr>(&self, name: &str, default: T) -> Result<T> {
         match self.get(name) {
             None => Ok(default),
@@ -147,8 +156,8 @@ impl Env<'_> {
     fn vault(&self, prefix: &str) -> Result<Option<VaultConfig>> {
         let name = |suffix: &str| format!("{prefix}_{suffix}");
         let server = self.get(&name("SERVER"));
-        let client_id = self.secret(&name("CLIENT_ID"))?;
-        let client_secret = self.secret(&name("CLIENT_SECRET"))?;
+        let client_id = self.token(&name("CLIENT_ID"))?;
+        let client_secret = self.token(&name("CLIENT_SECRET"))?;
         let password = self.secret(&name("PASSWORD"))?;
         let organization_id = self.get(&name("ORGANIZATION_ID"));
 
@@ -318,8 +327,8 @@ impl Config {
             ca_cert_file: env.get("CA_CERT_FILE").map(PathBuf::from),
             schedule,
             timezone: env.get("TZ"),
-            notify_success_url: env.secret("NOTIFY_SUCCESS_URL")?,
-            notify_failure_url: env.secret("NOTIFY_FAILURE_URL")?,
+            notify_success_url: env.token("NOTIFY_SUCCESS_URL")?,
+            notify_failure_url: env.token("NOTIFY_FAILURE_URL")?,
             ignored: LEGACY
                 .iter()
                 .copied()
@@ -515,9 +524,11 @@ mod tests {
     }
 
     #[test]
-    fn secrets_from_the_environment_keep_their_spaces() {
+    fn passwords_from_the_environment_keep_their_spaces() {
         let config = Config::from_env(&with(&[
             ("DEST_SERVER", " https://vw.example.com/ "),
+            ("DEST_CLIENT_SECRET", " api secret\n"),
+            ("NOTIFY_FAILURE_URL", " https://ntfy.example.com/topic "),
             ("DEST_PASSWORD", "  "),
             ("ENCRYPTION_PASSWORD", ""),
             ("BACKUP_PASSPHRASE", " backup passphrase\t"),
@@ -527,6 +538,11 @@ mod tests {
         let dest = config.dest.unwrap();
         assert_eq!(dest.password, "  ");
         assert_eq!(dest.server, "https://vw.example.com/");
+        assert_eq!(dest.client_secret, "api secret");
+        assert_eq!(
+            config.notify_failure_url.as_deref(),
+            Some("https://ntfy.example.com/topic")
+        );
         assert!(
             matches!(config.backup.unwrap().protection, Protection::Passphrase(ref p) if p == " backup passphrase\t")
         );

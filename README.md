@@ -204,7 +204,8 @@ destination snapshot taken earlier in the same run keeps a copy.
 
 All configuration comes from environment variables. You can pass any secret
 as a file instead: set `NAME_FILE` to a path and the file's content is used,
-which suits Docker and systemd credentials.
+which suits Docker and systemd credentials. Passwords and passphrases are
+used exactly as given, spaces included; a file's final newline is dropped.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
