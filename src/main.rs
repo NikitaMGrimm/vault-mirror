@@ -16,7 +16,7 @@ use console::{Console, ERROR};
 use time::OffsetDateTime;
 use vault_mirror::{
     app::{self, RunFlags},
-    config::{Config, VaultConfig},
+    config::{self, Config, VaultConfig},
     mirror::{Endpoint, MirrorOptions, mirror},
     restore::{RestoreOptions, restore},
     schedule::Timetable,
@@ -577,8 +577,7 @@ fn safe(id: &str) -> String {
 }
 
 fn healthcheck(max_age_hours: u64) -> Result<ExitCode> {
-    let backups_dir = std::env::var("BACKUPS_DIR").unwrap_or_else(|_| "backups".into());
-    let status = app::read_status(Path::new(&backups_dir))?;
+    let status = app::read_status(&config::backups_dir(&settings()))?;
     match app::health(
         &status,
         Duration::from_secs(max_age_hours * 3600),

@@ -314,7 +314,7 @@ impl Config {
         Ok(Self {
             source,
             dest,
-            backups_dir: PathBuf::from(env.get("BACKUPS_DIR").unwrap_or_else(|| "backups".into())),
+            backups_dir: backups_dir(env.0),
             backup,
             safety: Safety {
                 max_delete_percent,
@@ -338,6 +338,16 @@ impl Config {
                 .collect(),
         })
     }
+}
+
+/// `BACKUPS_DIR`, on its own: `healthcheck` needs it without the rest of the
+/// configuration.
+pub fn backups_dir(env: &HashMap<String, String>) -> PathBuf {
+    PathBuf::from(
+        Env(env)
+            .get("BACKUPS_DIR")
+            .unwrap_or_else(|| "backups".into()),
+    )
 }
 
 /// Parses an interval such as `90s`, `30m`, `6h` or `1d`.
