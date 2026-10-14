@@ -1,0 +1,52 @@
+name: Bug report
+description: vault-mirror did something wrong.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste secrets, API keys, or vault content. vault-mirror's own logs contain neither, but check anything else you paste.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: The output of the failing run, or `vault-mirror check`.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: vault-mirror version
+      description: The output of `vault-mirror --version`, or the image tag.
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Source server
+      options: [Bitwarden cloud, Bitwarden self-hosted, Vaultwarden, Other]
+    validations:
+      required: true
+  - type: dropdown
+    id: dest
+    attributes:
+      label: Destination server
+      options: [Bitwarden cloud, Bitwarden self-hosted, Vaultwarden, Other, None (backups only)]
+    validations:
+      required: true
+  - type: input
+    id: server-versions
+    attributes:
+      label: Self-hosted server versions
+      placeholder: Vaultwarden 1.37.0
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Vault
+      options: [Personal vault, Organization]

@@ -5,6 +5,8 @@
 Report vulnerabilities privately through GitHub: **Security → Report a
 vulnerability** on this repository. Please do not open a public issue.
 
+Only the latest release receives fixes.
+
 ## What vault-mirror has access to
 
 vault-mirror needs each vault's API key and master password, because it
