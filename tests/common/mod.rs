@@ -10,6 +10,7 @@ use vault_mirror::{
     crypto::KdfParams,
     fixtures,
     mirror::{Endpoint, MirrorOptions, Outcome, Reporter, mirror},
+    node::Node,
     provision::{self, TestAccount},
     vault::{Account, Draft, Item, Scope, Vault},
 };
@@ -62,13 +63,35 @@ pub async fn sandbox() -> Option<Sandbox> {
             return None;
         }
     }
-    // Bitwarden's server fills some caches on first use without locking, so
-    // the first registrations and logins must not run in parallel.
+    // Bitwarden's server fills some caches on first use without locking: mail
+    // templates on registration and login, and blob containers on the first
+    // attachment upload. Those first requests must not run in parallel.
     WARMED_UP
         .get_or_init(|| async {
             for url in [&sandbox.source_url, &sandbox.dest_url] {
                 let account = sandbox.register(url).await.expect("warm-up registration");
-                sandbox.open(&account).await.expect("warm-up login");
+                let account = sandbox.open(&account).await.expect("warm-up login");
+                let draft = Draft {
+                    content: [
+                        ("type".to_string(), Node::Number(2.into())),
+                        ("name".to_string(), Node::secret("Warm-up")),
+                        (
+                            "secureNote".to_string(),
+                            Node::Map([("type".to_string(), Node::Number(0.into()))].into()),
+                        ),
+                    ]
+                    .into(),
+                    folder_id: None,
+                    collection_ids: Vec::new(),
+                };
+                let item = account
+                    .create_item(&Scope::Personal, &draft)
+                    .await
+                    .expect("warm-up item");
+                account
+                    .upload_attachment(&Scope::Personal, &item, "warm-up.txt", b"warm-up")
+                    .await
+                    .expect("warm-up attachment");
             }
         })
         .await;
