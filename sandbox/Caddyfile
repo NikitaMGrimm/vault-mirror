@@ -1,0 +1,16 @@
+{
+	auto_https off
+	# Clients connect by IP address and therefore send no server name.
+	default_sni 127.0.0.1
+	admin off
+}
+
+https://127.0.0.1:18443 {
+	tls /tls/cert.pem /tls/key.pem
+	reverse_proxy source:80
+}
+
+https://127.0.0.1:18444 {
+	tls /tls/cert.pem /tls/key.pem
+	reverse_proxy dest:80
+}

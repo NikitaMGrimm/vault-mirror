@@ -215,16 +215,32 @@ impl Session {
     }
 
     /// A write that is safe to repeat, such as a delete or a full replacement.
-    pub async fn send_idempotent(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
+    pub async fn send_idempotent(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value> {
         self.call(method, path, body, Retry::Safe).await
     }
 
     /// A write that creates something, so a blind retry could duplicate it.
-    pub async fn send_once(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
+    pub async fn send_once(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value> {
         self.call(method, path, body, Retry::OnlyIfNotApplied).await
     }
 
-    async fn call(&self, method: Method, path: &str, body: Option<&Value>, retry: Retry) -> Result<Value> {
+    async fn call(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        retry: Retry,
+    ) -> Result<Value> {
         let url = format!("{}{}", self.urls.api, path);
         let context = format!("{method} {path}");
         let mut reauthenticated = false;
@@ -317,7 +333,10 @@ impl Session {
             .http
             .put(url)
             .header("x-ms-blob-type", "BlockBlob")
-            .header("x-ms-date", httpdate::fmt_http_date(std::time::SystemTime::now()));
+            .header(
+                "x-ms-date",
+                httpdate::fmt_http_date(std::time::SystemTime::now()),
+            );
         // The signed URL names the storage API version it was issued for.
         let version = reqwest::Url::parse(url).ok().and_then(|parsed| {
             parsed
@@ -339,7 +358,10 @@ fn transport(context: &str, source: reqwest::Error) -> ApiError {
 }
 
 async fn expect_success(request: reqwest::RequestBuilder, context: &str) -> Result<()> {
-    let response = request.send().await.map_err(|source| transport(context, source))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|source| transport(context, source))?;
     let status = response.status();
     if status.is_success() {
         return Ok(());
@@ -361,10 +383,13 @@ async fn send(request: reqwest::RequestBuilder, context: &str) -> Result<Value> 
         source,
     })?;
     let status = response.status();
-    let text = response.text().await.map_err(|source| ApiError::Transport {
-        context: context.to_string(),
-        source,
-    })?;
+    let text = response
+        .text()
+        .await
+        .map_err(|source| ApiError::Transport {
+            context: context.to_string(),
+            source,
+        })?;
     if !status.is_success() {
         return Err(ApiError::Status {
             context: context.to_string(),
@@ -444,7 +469,9 @@ fn login_kdf(value: &Value) -> LoginKdf {
     // Servers have spelled these fields in both PascalCase and camelCase.
     let field = |name: &str| {
         value.as_object()?.iter().find_map(|(key, value)| {
-            key.eq_ignore_ascii_case(name).then(|| value.as_u64()).flatten()
+            key.eq_ignore_ascii_case(name)
+                .then(|| value.as_u64())
+                .flatten()
         })
     };
     Some((
@@ -497,12 +524,18 @@ mod tests {
 
     #[test]
     fn error_messages_are_reduced_to_the_server_message() {
-        assert_eq!(error_message(r#"{"message":"Invalid  item","x":"secret"}"#), "Invalid item");
+        assert_eq!(
+            error_message(r#"{"message":"Invalid  item","x":"secret"}"#),
+            "Invalid item"
+        );
         assert_eq!(
             error_message(r#"{"error":"invalid_client","error_description":"Bad\nkey"}"#),
             "Bad key"
         );
-        assert_eq!(error_message("<html>secret dump</html>"), "no error message");
+        assert_eq!(
+            error_message("<html>secret dump</html>"),
+            "no error message"
+        );
     }
 
     #[test]

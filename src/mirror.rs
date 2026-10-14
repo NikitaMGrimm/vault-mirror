@@ -120,7 +120,9 @@ impl Run<'_> {
         match (&self.source.scope, &self.dest.scope) {
             (Scope::Personal, Scope::Personal) => Ok(Mode::Personal),
             (Scope::Organization(_), Scope::Organization(_)) => Ok(Mode::Organization),
-            _ => bail!("the source and destination must both be individual vaults or both be organizations"),
+            _ => bail!(
+                "the source and destination must both be individual vaults or both be organizations"
+            ),
         }
     }
 
@@ -139,8 +141,20 @@ impl Run<'_> {
         }
 
         let (source_vault, dest_vault) = tokio::try_join!(
-            async { self.source.account.load(&self.source.scope).await.context("reading the source vault") },
-            async { self.dest.account.load(&self.dest.scope).await.context("reading the destination vault") },
+            async {
+                self.source
+                    .account
+                    .load(&self.source.scope)
+                    .await
+                    .context("reading the source vault")
+            },
+            async {
+                self.dest
+                    .account
+                    .load(&self.dest.scope)
+                    .await
+                    .context("reading the destination vault")
+            },
         )?;
 
         self.stage = "planning";
@@ -150,7 +164,11 @@ impl Run<'_> {
         self.reporter.info(&format!(
             "{}: items create {} update {} delete {} unchanged {}; folders create {} delete {}; \
              collections create {} delete {}; attachments copy {}",
-            if self.options.dry_run { "Dry-run plan" } else { "Plan" },
+            if self.options.dry_run {
+                "Dry-run plan"
+            } else {
+                "Plan"
+            },
             summary.items_created,
             summary.items_updated,
             summary.items_deleted,
@@ -174,13 +192,22 @@ impl Run<'_> {
         Ok(true)
     }
 
-    async fn apply(&mut self, plan: &Plan, source_vault: &Vault, dest_vault: &Vault) -> Result<Vec<Copied>> {
+    async fn apply(
+        &mut self,
+        plan: &Plan,
+        source_vault: &Vault,
+        dest_vault: &Vault,
+    ) -> Result<Vec<Copied>> {
         let source = self.source;
         let dest = self.dest;
         let concurrency = self.options.concurrency.max(1);
 
         self.stage = "creating folders and collections";
-        let doomed_folders: Vec<&str> = plan.folders_to_delete.iter().map(|f| f.id.as_str()).collect();
+        let doomed_folders: Vec<&str> = plan
+            .folders_to_delete
+            .iter()
+            .map(|f| f.id.as_str())
+            .collect();
         let mut folder_ids: HashMap<String, String> = dest_vault
             .folders
             .iter()
@@ -191,7 +218,11 @@ impl Run<'_> {
             let folder = dest.account.create_folder(name).await?;
             folder_ids.insert(folder.name, folder.id);
         }
-        let doomed_collections: Vec<&str> = plan.collections_to_delete.iter().map(|c| c.id.as_str()).collect();
+        let doomed_collections: Vec<&str> = plan
+            .collections_to_delete
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
         let mut collection_ids: HashMap<String, String> = dest_vault
             .collections
             .iter()
@@ -214,7 +245,12 @@ impl Run<'_> {
         let created: Vec<(usize, Item)> = stream::iter(plan.creates.iter().map(|&entry_index| {
             let (folder_ids, collection_ids) = (&folder_ids, &collection_ids);
             async move {
-                let draft = plan.draft(&plan.entries[entry_index], source_vault, folder_ids, collection_ids)?;
+                let draft = plan.draft(
+                    &plan.entries[entry_index],
+                    source_vault,
+                    folder_ids,
+                    collection_ids,
+                )?;
                 let item = dest.account.create_item(&dest.scope, &draft).await?;
                 anyhow::Ok((entry_index, item))
             }
@@ -223,29 +259,40 @@ impl Run<'_> {
         .try_collect()
         .await?;
         if !created.is_empty() {
-            self.reporter.info(&format!("Created {} item(s).", created.len()));
+            self.reporter
+                .info(&format!("Created {} item(s).", created.len()));
         }
 
-        let updated: Vec<(usize, Item)> = stream::iter(plan.updates.iter().enumerate().map(|(index, update)| {
-            let (folder_ids, collection_ids) = (&folder_ids, &collection_ids);
-            async move {
-                let existing = &dest_vault.items[update.dest];
-                if !update.write_content {
-                    return anyhow::Ok((index, existing.clone()));
+        let updated: Vec<(usize, Item)> =
+            stream::iter(plan.updates.iter().enumerate().map(|(index, update)| {
+                let (folder_ids, collection_ids) = (&folder_ids, &collection_ids);
+                async move {
+                    let existing = &dest_vault.items[update.dest];
+                    if !update.write_content {
+                        return anyhow::Ok((index, existing.clone()));
+                    }
+                    let draft = plan.draft(
+                        &plan.entries[update.entry],
+                        source_vault,
+                        folder_ids,
+                        collection_ids,
+                    )?;
+                    let item = dest
+                        .account
+                        .update_item(&dest.scope, existing, &draft)
+                        .await
+                        .with_context(|| format!("updating destination item {}", existing.id))?;
+                    Ok((index, item))
                 }
-                let draft = plan.draft(&plan.entries[update.entry], source_vault, folder_ids, collection_ids)?;
-                let item = dest
-                    .account
-                    .update_item(&dest.scope, existing, &draft)
-                    .await
-                    .with_context(|| format!("updating destination item {}", existing.id))?;
-                Ok((index, item))
-            }
-        }))
-        .buffer_unordered(concurrency)
-        .try_collect()
-        .await?;
-        let rewritten = plan.updates.iter().filter(|update| update.write_content).count();
+            }))
+            .buffer_unordered(concurrency)
+            .try_collect()
+            .await?;
+        let rewritten = plan
+            .updates
+            .iter()
+            .filter(|update| update.write_content)
+            .count();
         if rewritten > 0 {
             self.reporter.info(&format!("Updated {rewritten} item(s)."));
         }
@@ -293,48 +340,72 @@ impl Run<'_> {
             let update = &plan.updates[*index];
             if update.sync_attachments {
                 let source_item = &source_vault.items[plan.entries[update.entry].source];
-                let old = dest_vault.items[update.dest].attachments.iter().map(|a| a.id.clone()).collect();
+                let old = dest_vault.items[update.dest]
+                    .attachments
+                    .iter()
+                    .map(|a| a.id.clone())
+                    .collect();
                 transfers.push((source_item, item, old));
             }
         }
-        let copied: Vec<Vec<Copied>> = stream::iter(transfers.into_iter().map(|(source_item, dest_item, old)| async move {
-            for attachment_id in &old {
-                dest.account.delete_attachment(&dest_item.id, attachment_id).await?;
-            }
-            let mut copied = Vec::new();
-            for attachment in &source_item.attachments {
-                let data = source
-                    .account
-                    .download_attachment(&source.scope, source_item, attachment)
-                    .await
-                    .with_context(|| format!("downloading attachment {} of source item {}", attachment.id, source_item.id))?;
-                dest.account
-                    .upload_attachment(&dest.scope, dest_item, &attachment.file_name, &data)
-                    .await
-                    .with_context(|| format!("uploading an attachment to destination item {}", dest_item.id))?;
-                copied.push(Copied {
-                    source_id: source_item.id.clone(),
-                    file_name: attachment.file_name.clone(),
-                    sha256: Sha256::digest(&data).into(),
-                });
-            }
-            anyhow::Ok(copied)
-        }))
+        let copied: Vec<Vec<Copied>> = stream::iter(transfers.into_iter().map(
+            |(source_item, dest_item, old)| async move {
+                for attachment_id in &old {
+                    dest.account
+                        .delete_attachment(&dest_item.id, attachment_id)
+                        .await?;
+                }
+                let mut copied = Vec::new();
+                for attachment in &source_item.attachments {
+                    let data = source
+                        .account
+                        .download_attachment(&source.scope, source_item, attachment)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "downloading attachment {} of source item {}",
+                                attachment.id, source_item.id
+                            )
+                        })?;
+                    dest.account
+                        .upload_attachment(&dest.scope, dest_item, &attachment.file_name, &data)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "uploading an attachment to destination item {}",
+                                dest_item.id
+                            )
+                        })?;
+                    copied.push(Copied {
+                        source_id: source_item.id.clone(),
+                        file_name: attachment.file_name.clone(),
+                        sha256: Sha256::digest(&data).into(),
+                    });
+                }
+                anyhow::Ok(copied)
+            },
+        ))
         // Attachments are held in memory while they are re-encrypted.
         .buffer_unordered(concurrency.min(2))
         .try_collect()
         .await?;
         let copied: Vec<Copied> = copied.into_iter().flatten().collect();
         if !copied.is_empty() {
-            self.reporter.info(&format!("Copied {} attachment(s).", copied.len()));
+            self.reporter
+                .info(&format!("Copied {} attachment(s).", copied.len()));
         }
 
         // Deletions come last: until here a failed run has removed nothing.
         self.stage = "deleting obsolete items";
-        let ids: Vec<String> = plan.deletes.iter().map(|delete| dest_vault.items[delete.dest].id.clone()).collect();
+        let ids: Vec<String> = plan
+            .deletes
+            .iter()
+            .map(|delete| dest_vault.items[delete.dest].id.clone())
+            .collect();
         if !ids.is_empty() {
             dest.account.delete_items(&ids).await?;
-            self.reporter.info(&format!("Deleted {} item(s).", ids.len()));
+            self.reporter
+                .info(&format!("Deleted {} item(s).", ids.len()));
         }
         for folder in &plan.folders_to_delete {
             dest.account.delete_folder(&folder.id).await?;
@@ -353,18 +424,28 @@ impl Run<'_> {
         let dest_vault = dest.account.load(&dest.scope).await?;
         let mut again = plan::plan(source_vault, &dest_vault, mode);
         if self.archive_unsupported {
-            again.updates.retain(|update| update.write_content || update.sync_attachments);
+            again
+                .updates
+                .retain(|update| update.write_content || update.sync_attachments);
         }
         if again.has_changes() {
             let mut details = Vec::new();
             for update in again.updates.iter().take(5) {
                 let entry = &again.entries[update.entry];
-                let wanted = comparable(&source_vault.items[entry.source], entry.folder.as_deref(), &entry.collections);
+                let wanted = comparable(
+                    &source_vault.items[entry.source],
+                    entry.folder.as_deref(),
+                    &entry.collections,
+                );
                 let dest_item = &dest_vault.items[update.dest];
                 let folder = folder_name(&dest_vault, dest_item, mode);
                 let collections = collection_names(&dest_vault, dest_item, mode);
                 let found = comparable(dest_item, folder.as_deref(), &collections);
-                details.push(format!("item {} differs at [{}]", dest_item.id, differing_paths(&wanted, &found).join(", ")));
+                details.push(format!(
+                    "item {} differs at [{}]",
+                    dest_item.id,
+                    differing_paths(&wanted, &found).join(", ")
+                ));
             }
             let summary = again.summary(source_vault);
             bail!(
@@ -382,7 +463,10 @@ impl Run<'_> {
         }
         let mut expected: BTreeMap<&str, Vec<(&str, [u8; 32])>> = BTreeMap::new();
         for copy in copied {
-            expected.entry(&copy.source_id).or_default().push((&copy.file_name, copy.sha256));
+            expected
+                .entry(&copy.source_id)
+                .or_default()
+                .push((&copy.file_name, copy.sha256));
         }
         let by_source: HashMap<String, &Item> = dest_vault
             .items
@@ -395,13 +479,22 @@ impl Run<'_> {
                 .ok_or_else(|| anyhow!("the mirror of source item {source_id} is missing"))?;
             let mut found = Vec::new();
             for attachment in &item.attachments {
-                let data = dest.account.download_attachment(&dest.scope, item, attachment).await?;
-                found.push((attachment.file_name.as_str(), <[u8; 32]>::from(Sha256::digest(&data))));
+                let data = dest
+                    .account
+                    .download_attachment(&dest.scope, item, attachment)
+                    .await?;
+                found.push((
+                    attachment.file_name.as_str(),
+                    <[u8; 32]>::from(Sha256::digest(&data)),
+                ));
             }
             expected.sort_unstable();
             found.sort_unstable();
             if expected != found {
-                bail!("the attachments of destination item {} do not match the source", item.id);
+                bail!(
+                    "the attachments of destination item {} do not match the source",
+                    item.id
+                );
             }
         }
         Ok(())
@@ -413,7 +506,11 @@ fn folder_name(vault: &Vault, item: &Item, mode: Mode) -> Option<String> {
         return None;
     }
     let id = item.folder_id.as_deref()?;
-    vault.folders.iter().find(|folder| folder.id == id).map(|folder| folder.name.clone())
+    vault
+        .folders
+        .iter()
+        .find(|folder| folder.id == id)
+        .map(|folder| folder.name.clone())
 }
 
 fn collection_names(vault: &Vault, item: &Item, mode: Mode) -> Vec<String> {

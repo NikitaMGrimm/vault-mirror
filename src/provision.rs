@@ -26,66 +26,81 @@ pub struct TestAccount {
     public_key: String,
 }
 
-pub async fn register(http: &reqwest::Client, server: &str, email: &str, password: &str, kdf: &KdfParams) -> Result<TestAccount> {
+pub async fn register(
+    http: &reqwest::Client,
+    server: &str,
+    email: &str,
+    password: &str,
+    kdf: &KdfParams,
+) -> Result<TestAccount> {
     let urls = ServerUrls::from_server(server)?;
     let master = MasterSecret::derive(password, email, kdf)?;
     let keys = master.new_account_keys()?;
     let hash = master.server_hash(password);
     let kdf_json = match *kdf {
         KdfParams::Pbkdf2 { iterations } => json!({ "kdfType": 0, "iterations": iterations }),
-        KdfParams::Argon2id { iterations, memory_mib, parallelism } => {
+        KdfParams::Argon2id {
+            iterations,
+            memory_mib,
+            parallelism,
+        } => {
             json!({ "kdfType": 1, "iterations": iterations, "memory": memory_mib, "parallelism": parallelism })
         }
     };
     let salt = email.trim().to_lowercase();
 
     let token: Value = post(
-        http.post(format!("{}/accounts/register/send-verification-email", urls.identity))
-            .header(ACCEPT, "application/json")
-            .json(&json!({ "email": email, "name": email })),
+        http.post(format!(
+            "{}/accounts/register/send-verification-email",
+            urls.identity
+        ))
+        .header(ACCEPT, "application/json")
+        .json(&json!({ "email": email, "name": "Sandbox" })),
         "requesting a registration token",
     )
     .await?;
-    let token = token
-        .as_str()
-        .ok_or_else(|| anyhow!("the server wants email verification; registration cannot be automated"))?;
+    let token = token.as_str().ok_or_else(|| {
+        anyhow!("the server wants email verification; registration cannot be automated")
+    })?;
 
     post(
-        http.post(format!("{}/accounts/register/finish", urls.identity)).json(&json!({
-            "email": email,
-            "emailVerificationToken": token,
-            "masterPasswordHint": null,
-            "masterPasswordAuthentication": {
-                "kdf": kdf_json,
-                "salt": salt,
-                "masterPasswordAuthenticationHash": hash,
-            },
-            "masterPasswordUnlock": {
-                "kdf": kdf_json,
-                "salt": salt,
-                "masterKeyWrappedUserKey": keys.wrapped_user_key,
-            },
-            "userAsymmetricKeys": {
-                "publicKey": keys.public_key,
-                "encryptedPrivateKey": keys.wrapped_private_key,
-            },
-        })),
+        http.post(format!("{}/accounts/register/finish", urls.identity))
+            .json(&json!({
+                "email": email,
+                "emailVerificationToken": token,
+                "masterPasswordHint": null,
+                "masterPasswordAuthentication": {
+                    "kdf": kdf_json,
+                    "salt": salt,
+                    "masterPasswordAuthenticationHash": hash,
+                },
+                "masterPasswordUnlock": {
+                    "kdf": kdf_json,
+                    "salt": salt,
+                    "masterKeyWrappedUserKey": keys.wrapped_user_key,
+                },
+                "userAsymmetricKeys": {
+                    "publicKey": keys.public_key,
+                    "encryptedPrivateKey": keys.wrapped_private_key,
+                },
+            })),
         "finishing registration",
     )
     .await?;
 
     let device_id = uuid::Uuid::new_v4().to_string();
     let login = post(
-        http.post(format!("{}/connect/token", urls.identity)).form(&[
-            ("grant_type", "password"),
-            ("username", email),
-            ("password", hash.as_str()),
-            ("scope", "api offline_access"),
-            ("client_id", "cli"),
-            ("deviceType", "25"),
-            ("deviceIdentifier", device_id.as_str()),
-            ("deviceName", "vault-mirror-provision"),
-        ]),
+        http.post(format!("{}/connect/token", urls.identity))
+            .form(&[
+                ("grant_type", "password"),
+                ("username", email),
+                ("password", hash.as_str()),
+                ("scope", "api offline_access"),
+                ("client_id", "cli"),
+                ("deviceType", "25"),
+                ("deviceIdentifier", device_id.as_str()),
+                ("deviceName", "vault-mirror-provision"),
+            ]),
         "logging in with the master password",
     )
     .await?;
@@ -117,13 +132,21 @@ pub async fn register(http: &reqwest::Client, server: &str, email: &str, passwor
 }
 
 /// Creates an organization owned by `account` and returns its id.
-pub async fn create_organization(http: &reqwest::Client, account: &TestAccount, name: &str) -> Result<String> {
+pub async fn create_organization(
+    http: &reqwest::Client,
+    account: &TestAccount,
+    name: &str,
+) -> Result<String> {
     let urls = ServerUrls::from_server(&account.server)?;
     let org_key = SymKey::generate();
     // The organization gets its own RSA key pair; only its shape matters to
     // the server, so one derived from a throwaway secret is enough here.
-    let org_pair = MasterSecret::derive("organization", name, &KdfParams::Pbkdf2 { iterations: 5000 })?
-        .new_account_keys()?;
+    let org_pair = MasterSecret::derive(
+        "organization",
+        name,
+        &KdfParams::Pbkdf2 { iterations: 5000 },
+    )?
+    .new_account_keys()?;
     let created = post(
         http.post(format!("{}/organizations", urls.api))
             .bearer_auth(&account.access_token)
@@ -145,7 +168,11 @@ pub async fn create_organization(http: &reqwest::Client, account: &TestAccount, 
 }
 
 async fn get(http: &reqwest::Client, urls: &ServerUrls, token: &str, path: &str) -> Result<Value> {
-    post(http.get(format!("{}{}", urls.api, path)).bearer_auth(token), path).await
+    post(
+        http.get(format!("{}{}", urls.api, path)).bearer_auth(token),
+        path,
+    )
+    .await
 }
 
 async fn post(request: reqwest::RequestBuilder, what: &str) -> Result<Value> {

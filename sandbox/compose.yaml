@@ -1,5 +1,9 @@
 # Two disposable Vaultwarden servers for integration tests: a mirror source and
 # a mirror destination. Data lives in tmpfs, so `down` discards everything.
+#
+# Start it with `sandbox/up.sh`, which first creates the test certificate the
+# TLS proxy serves. The servers answer on plain HTTP (18081, 18082) and behind
+# TLS (18443, 18444); the official Bitwarden CLI only talks to the latter.
 name: vault-mirror-sandbox
 
 x-vaultwarden: &vaultwarden
@@ -21,7 +25,8 @@ x-environment: &environment
   # The suite creates many accounts and logs in constantly.
   LOGIN_RATELIMIT_MAX_BURST: "100000"
   LOGIN_RATELIMIT_SECONDS: "1"
-  ADMIN_RATELIMIT_MAX_BURST: "100000"
+  UNAUTHENTICATED_RATELIMIT_MAX_BURST: "100000"
+  UNAUTHENTICATED_RATELIMIT_SECONDS: "1"
 
 services:
   source:
@@ -38,3 +43,14 @@ services:
       DOMAIN: "http://127.0.0.1:18082"
     ports:
       - "127.0.0.1:18082:80"
+  tls:
+    image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./tls:/tls:ro
+    ports:
+      - "127.0.0.1:18443:18443"
+      - "127.0.0.1:18444:18444"
+    depends_on:
+      - source
+      - dest

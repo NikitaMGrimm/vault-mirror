@@ -1,8 +1,15 @@
 pub mod api;
+pub mod app;
+pub mod backup;
+pub mod config;
 pub mod crypto;
 pub mod fixtures;
 pub mod mirror;
 pub mod node;
 pub mod plan;
 pub mod provision;
+pub mod restore;
+pub mod schedule;
+pub mod snapshot;
+pub mod store;
 pub mod vault;

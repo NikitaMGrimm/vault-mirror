@@ -129,9 +129,11 @@ impl SymKey {
     /// Decrypts a key that was wrapped with this key.
     pub fn unwrap_key(&self, wrapped: &str) -> Result<SymKey> {
         let enc = parse(wrapped, "wrapped key")?;
-        let bytes: Vec<u8> = enc.decrypt_with_key(&self.0).map_err(|_| CryptoError::Decrypt {
-            what: "wrapped key",
-        })?;
+        let bytes: Vec<u8> = enc
+            .decrypt_with_key(&self.0)
+            .map_err(|_| CryptoError::Decrypt {
+                what: "wrapped key",
+            })?;
         key_from_bytes(bytes).ok_or(CryptoError::Decrypt {
             what: "wrapped key",
         })
@@ -149,18 +151,14 @@ impl SymKey {
 
     /// Decrypts a file in the binary attachment format.
     pub fn decrypt_blob(&self, blob: &[u8]) -> Result<Vec<u8>> {
-        let enc = EncString::from_buffer(blob).map_err(|_| CryptoError::Malformed {
-            what: "attachment",
-        })?;
-        enc.decrypt_with_key(&self.0).map_err(|_| CryptoError::Decrypt {
-            what: "attachment",
-        })
+        let enc = EncString::from_buffer(blob)
+            .map_err(|_| CryptoError::Malformed { what: "attachment" })?;
+        enc.decrypt_with_key(&self.0)
+            .map_err(|_| CryptoError::Decrypt { what: "attachment" })
     }
 
     pub fn encrypt_blob(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let failed = |_| CryptoError::Encrypt {
-            what: "attachment",
-        };
+        let failed = |_| CryptoError::Encrypt { what: "attachment" };
         (&OctetStreamBytes::from(data))
             .encrypt_with_key(&self.0)
             .map_err(failed)?
@@ -204,7 +202,10 @@ impl AccountPrivateKey {
         let shared: UnsignedSharedKey = wrapped
             .parse()
             .map_err(|_| CryptoError::Malformed { what })?;
-        #[expect(deprecated, reason = "the replacement needs a key store this tool has no use for")]
+        #[expect(
+            deprecated,
+            reason = "the replacement needs a key store this tool has no use for"
+        )]
         shared
             .decapsulate_key_unsigned(&self.0)
             .map(SymKey)
@@ -265,8 +266,8 @@ pub struct NewAccountKeys {
 
 /// Wraps `key` for the holder of the RSA public key `public_key_b64`.
 pub fn share_key_with(public_key_b64: &str, key: &SymKey) -> Result<String> {
-    use bitwarden_crypto::{PublicKey, SpkiPublicKeyBytes};
     use base64::Engine;
+    use bitwarden_crypto::{PublicKey, SpkiPublicKeyBytes};
 
     let what = "shared key";
     let der = base64::engine::general_purpose::STANDARD
@@ -274,7 +275,10 @@ pub fn share_key_with(public_key_b64: &str, key: &SymKey) -> Result<String> {
         .map_err(|_| CryptoError::Malformed { what })?;
     let public = PublicKey::from_der(&SpkiPublicKeyBytes::from(der))
         .map_err(|_| CryptoError::Malformed { what })?;
-    #[expect(deprecated, reason = "the replacement needs a key store this tool has no use for")]
+    #[expect(
+        deprecated,
+        reason = "the replacement needs a key store this tool has no use for"
+    )]
     UnsignedSharedKey::encapsulate_key_unsigned(&key.0, &public)
         .map(|shared| shared.to_string())
         .map_err(|_| CryptoError::Encrypt { what })

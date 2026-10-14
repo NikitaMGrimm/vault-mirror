@@ -171,7 +171,11 @@ impl Plan {
             folders_deleted: self.folders_to_delete.len(),
             collections_created: self.collections_to_create.len(),
             collections_deleted: self.collections_to_delete.len(),
-            attachments_copied: self.creates.iter().map(|entry| attachments(*entry)).sum::<usize>()
+            attachments_copied: self
+                .creates
+                .iter()
+                .map(|entry| attachments(*entry))
+                .sum::<usize>()
                 + self
                     .updates
                     .iter()
@@ -251,9 +255,12 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
     // counts. Items in the others compare as misplaced and get moved.
     let dest_folders = first_id_by_name(dest.folders.iter().map(|f| (&f.id, &f.name)));
     let dest_collections = first_id_by_name(dest.collections.iter().map(|c| (&c.id, &c.name)));
-    let dest_folder_names: HashMap<&str, &str> = dest_folders.iter().map(|(name, id)| (*id, *name)).collect();
-    let dest_collection_names: HashMap<&str, &str> =
-        dest_collections.iter().map(|(name, id)| (*id, *name)).collect();
+    let dest_folder_names: HashMap<&str, &str> =
+        dest_folders.iter().map(|(name, id)| (*id, *name)).collect();
+    let dest_collection_names: HashMap<&str, &str> = dest_collections
+        .iter()
+        .map(|(name, id)| (*id, *name))
+        .collect();
 
     let mut plan = Plan::default();
 
@@ -275,7 +282,11 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
         };
         let collections = match mode {
             Mode::Personal => Vec::new(),
-            Mode::Organization => sorted_names(item.collection_ids.iter().filter_map(|id| source_collections.get(id.as_str()).copied())),
+            Mode::Organization => sorted_names(
+                item.collection_ids
+                    .iter()
+                    .filter_map(|id| source_collections.get(id.as_str()).copied()),
+            ),
         };
         let marker = Marker {
             source_id: item.id.clone(),
@@ -293,7 +304,10 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
 
     let mut dest_by_entry: HashMap<usize, (usize, Marker)> = HashMap::new();
     for (index, item) in dest.items.iter().enumerate() {
-        let delete = |reason| Delete { dest: index, reason };
+        let delete = |reason| Delete {
+            dest: index,
+            reason,
+        };
         if item.in_trash {
             plan.deletes.push(delete(DeleteReason::Trashed));
             continue;
@@ -330,7 +344,12 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
         };
         let dest_item_collections = match mode {
             Mode::Personal => Vec::new(),
-            Mode::Organization => sorted_names(dest_item.collection_ids.iter().filter_map(|id| dest_collection_names.get(id.as_str()).copied())),
+            Mode::Organization => sorted_names(
+                dest_item
+                    .collection_ids
+                    .iter()
+                    .filter_map(|id| dest_collection_names.get(id.as_str()).copied()),
+            ),
         };
         // The marker alone is not trusted: a destination item edited by hand
         // still carries the old marker.
@@ -344,7 +363,8 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
         let sync_attachments =
             !attachments_recorded || attachment_names(dest_item) != attachment_names(source_item);
         let write_content = marker != &entry.marker || dest_core != entry.marker.core_hash;
-        let set_archived = (dest_item.archived != source_item.archived).then_some(source_item.archived);
+        let set_archived =
+            (dest_item.archived != source_item.archived).then_some(source_item.archived);
 
         if write_content || sync_attachments || set_archived.is_some() {
             plan.updates.push(Update {
@@ -370,7 +390,10 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
             plan.folders_to_delete = dest
                 .folders
                 .iter()
-                .filter(|f| !wanted.contains(f.name.as_str()) || dest_folders.get(f.name.as_str()) != Some(&f.id.as_str()))
+                .filter(|f| {
+                    !wanted.contains(f.name.as_str())
+                        || dest_folders.get(f.name.as_str()) != Some(&f.id.as_str())
+                })
                 .cloned()
                 .collect();
         }
@@ -390,7 +413,10 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
             plan.collections_to_delete = dest
                 .collections
                 .iter()
-                .filter(|c| !wanted.contains_key(c.name.as_str()) || dest_collections.get(c.name.as_str()) != Some(&c.id.as_str()))
+                .filter(|c| {
+                    !wanted.contains_key(c.name.as_str())
+                        || dest_collections.get(c.name.as_str()) != Some(&c.id.as_str())
+                })
                 .cloned()
                 .collect();
         }
@@ -398,11 +424,17 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
     plan
 }
 
-fn names_by_id<'a>(pairs: impl Iterator<Item = (&'a String, &'a String)>) -> HashMap<&'a str, &'a str> {
-    pairs.map(|(id, name)| (id.as_str(), name.as_str())).collect()
+fn names_by_id<'a>(
+    pairs: impl Iterator<Item = (&'a String, &'a String)>,
+) -> HashMap<&'a str, &'a str> {
+    pairs
+        .map(|(id, name)| (id.as_str(), name.as_str()))
+        .collect()
 }
 
-fn first_id_by_name<'a>(pairs: impl Iterator<Item = (&'a String, &'a String)>) -> HashMap<&'a str, &'a str> {
+fn first_id_by_name<'a>(
+    pairs: impl Iterator<Item = (&'a String, &'a String)>,
+) -> HashMap<&'a str, &'a str> {
     let mut map = HashMap::new();
     for (id, name) in pairs {
         map.entry(name.as_str()).or_insert(id.as_str());
@@ -416,7 +448,11 @@ fn sorted_names<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
 }
 
 fn attachment_names(item: &Item) -> Vec<&str> {
-    let mut names: Vec<&str> = item.attachments.iter().map(|a| a.file_name.as_str()).collect();
+    let mut names: Vec<&str> = item
+        .attachments
+        .iter()
+        .map(|a| a.file_name.as_str())
+        .collect();
     names.sort_unstable();
     names
 }
@@ -429,7 +465,10 @@ pub fn comparable(item: &Item, folder: Option<&str>, collections: &[String]) -> 
     }
     if let Some(Node::Map(login)) = content.get_mut("login") {
         // Servers echo the first URI a second time as `uri` for old clients.
-        let has_uris = login.get("uris").and_then(Node::as_list).is_some_and(|uris| !uris.is_empty());
+        let has_uris = login
+            .get("uris")
+            .and_then(Node::as_list)
+            .is_some_and(|uris| !uris.is_empty());
         if has_uris {
             login.remove("uri");
         }
@@ -519,7 +558,12 @@ pub fn check_safety(plan: &Plan, safety: &Safety) -> Result<(), SafetyViolation>
     if plan.source_markers > 0 {
         return Err(SafetyViolation::SourceLooksLikeMirror(plan.source_markers));
     }
-    let count = |reason| plan.deletes.iter().filter(|delete| delete.reason == reason).count();
+    let count = |reason| {
+        plan.deletes
+            .iter()
+            .filter(|delete| delete.reason == reason)
+            .count()
+    };
     let untracked = count(DeleteReason::Untracked);
     let stale = count(DeleteReason::Stale);
     if untracked > 0 && plan.tracked_before == 0 && !safety.allow_initial_overwrite {
@@ -527,7 +571,11 @@ pub fn check_safety(plan: &Plan, safety: &Safety) -> Result<(), SafetyViolation>
     }
     let deleting = untracked + stale;
     let total = plan.tracked_before + untracked;
-    if !safety.allow_mass_delete && plan.tracked_before > 0 && deleting > safety.delete_floor && total > 0 {
+    if !safety.allow_mass_delete
+        && plan.tracked_before > 0
+        && deleting > safety.delete_floor
+        && total > 0
+    {
         let percent = u32::try_from(deleting * 100 / total).unwrap_or(u32::MAX);
         if percent > safety.max_delete_percent {
             return Err(SafetyViolation::MassDelete {
@@ -554,8 +602,17 @@ fn diff(left: &Value, right: &Value, path: String, out: &mut Vec<String>) {
         (Value::Object(l), Value::Object(r)) => {
             let keys: BTreeSet<&String> = l.keys().chain(r.keys()).collect();
             for key in keys {
-                let next = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
-                diff(l.get(key).unwrap_or(&Value::Null), r.get(key).unwrap_or(&Value::Null), next, out);
+                let next = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                diff(
+                    l.get(key).unwrap_or(&Value::Null),
+                    r.get(key).unwrap_or(&Value::Null),
+                    next,
+                    out,
+                );
             }
         }
         (Value::Array(l), Value::Array(r)) if l.len() == r.len() => {
@@ -564,7 +621,11 @@ fn diff(left: &Value, right: &Value, path: String, out: &mut Vec<String>) {
             }
         }
         (l, r) if l == r => {}
-        _ => out.push(if path.is_empty() { "<root>".to_string() } else { path }),
+        _ => out.push(if path.is_empty() {
+            "<root>".to_string()
+        } else {
+            path
+        }),
     }
 }
 

@@ -95,6 +95,8 @@ pub struct Item {
     pub creation_date: Option<String>,
     pub in_trash: bool,
     pub archived: bool,
+    /// When the item was archived, as the server reports it.
+    pub archived_date: Option<String>,
     pub content: BTreeMap<String, Node>,
     pub attachments: Vec<Attachment>,
     /// The item's own key as stored on the server, when it has one.
@@ -103,11 +105,17 @@ pub struct Item {
 
 impl Item {
     pub fn name(&self) -> &str {
-        self.content.get("name").and_then(Node::as_str).unwrap_or("")
+        self.content
+            .get("name")
+            .and_then(Node::as_str)
+            .unwrap_or("")
     }
 
     pub fn fields(&self) -> &[Node] {
-        self.content.get("fields").and_then(Node::as_list).unwrap_or(&[])
+        self.content
+            .get("fields")
+            .and_then(Node::as_list)
+            .unwrap_or(&[])
     }
 }
 
@@ -169,9 +177,10 @@ impl Account {
         // Key derivation is deliberately expensive; keep it off the async workers.
         let password = master_password.to_string();
         let salt = email.clone();
-        let master = tokio::task::spawn_blocking(move || MasterSecret::derive(&password, &salt, &kdf))
-            .await
-            .context("key derivation task failed")??;
+        let master =
+            tokio::task::spawn_blocking(move || MasterSecret::derive(&password, &salt, &kdf))
+                .await
+                .context("key derivation task failed")??;
         let user = master.unlock_user_key(&text("key")?)?;
 
         let mut organizations = HashMap::new();
@@ -191,7 +200,10 @@ impl Account {
 
         Ok(Self {
             session,
-            keys: Keys { user, organizations },
+            keys: Keys {
+                user,
+                organizations,
+            },
             user_id,
             email,
         })
@@ -223,7 +235,12 @@ impl Account {
     pub async fn load(&self, scope: &Scope) -> Result<Vault> {
         let sync = self.session.get("/sync?excludeDomains=true").await?;
         let scope_key = self.scope_key(scope)?;
-        let list = |name: &str| sync.get(name).and_then(Value::as_array).cloned().unwrap_or_default();
+        let list = |name: &str| {
+            sync.get(name)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        };
 
         let mut vault = Vault::default();
         match scope {
@@ -271,7 +288,10 @@ impl Account {
 
     pub async fn create_folder(&self, name: &str) -> Result<Folder> {
         let body = json!({ "name": self.keys.user.encrypt_str(name)? });
-        let created = self.session.send_once(Method::POST, "/folders", Some(&body)).await?;
+        let created = self
+            .session
+            .send_once(Method::POST, "/folders", Some(&body))
+            .await?;
         Ok(Folder {
             id: required_str(&created, "id", "created folder")?,
             name: name.to_string(),
@@ -282,7 +302,12 @@ impl Account {
         self.delete(&format!("/folders/{id}")).await
     }
 
-    pub async fn create_collection(&self, org: &str, name: &str, external_id: Option<&str>) -> Result<Collection> {
+    pub async fn create_collection(
+        &self,
+        org: &str,
+        name: &str,
+        external_id: Option<&str>,
+    ) -> Result<Collection> {
         let key = self.scope_key(&Scope::Organization(org.to_string()))?;
         let body = json!({
             "name": key.encrypt_str(name)?,
@@ -292,7 +317,10 @@ impl Account {
             "users": [],
         });
         let path = format!("/organizations/{org}/collections");
-        let created = self.session.send_once(Method::POST, &path, Some(&body)).await?;
+        let created = self
+            .session
+            .send_once(Method::POST, &path, Some(&body))
+            .await?;
         Ok(Collection {
             id: required_str(&created, "id", "created collection")?,
             name: name.to_string(),
@@ -301,17 +329,24 @@ impl Account {
     }
 
     pub async fn delete_collection(&self, org: &str, id: &str) -> Result<()> {
-        self.delete(&format!("/organizations/{org}/collections/{id}")).await
+        self.delete(&format!("/organizations/{org}/collections/{id}"))
+            .await
     }
 
     pub async fn create_item(&self, scope: &Scope, draft: &Draft) -> Result<Item> {
         let key = self.scope_key(scope)?;
         let cipher = self.cipher_body(scope, draft, key, None)?;
         let created = match scope {
-            Scope::Personal => self.session.send_once(Method::POST, "/ciphers", Some(&cipher)).await?,
+            Scope::Personal => {
+                self.session
+                    .send_once(Method::POST, "/ciphers", Some(&cipher))
+                    .await?
+            }
             Scope::Organization(_) => {
                 let body = json!({ "cipher": cipher, "collectionIds": draft.collection_ids });
-                self.session.send_once(Method::POST, "/ciphers/create", Some(&body)).await?
+                self.session
+                    .send_once(Method::POST, "/ciphers/create", Some(&body))
+                    .await?
             }
         };
         let mut item = decrypt_item(&created, key).context("reading the created item")?;
@@ -326,21 +361,39 @@ impl Account {
     pub async fn update_item(&self, scope: &Scope, existing: &Item, draft: &Draft) -> Result<Item> {
         let scope_key = self.scope_key(scope)?;
         let item_key = self.item_key(scope, existing)?;
-        let mut cipher = self.cipher_body(scope, draft, item_key.get(), existing.wrapped_key.as_deref())?;
+        let mut cipher = self.cipher_body(
+            scope,
+            draft,
+            item_key.get(),
+            existing.wrapped_key.as_deref(),
+        )?;
         cipher["lastKnownRevisionDate"] = json!(existing.revision_date);
         let path = format!("/ciphers/{}", existing.id);
-        let updated = self.session.send_idempotent(Method::PUT, &path, Some(&cipher)).await?;
-        if scope.organization_id().is_some() && sorted(&existing.collection_ids) != sorted(&draft.collection_ids) {
+        let updated = self
+            .session
+            .send_idempotent(Method::PUT, &path, Some(&cipher))
+            .await?;
+        if scope.organization_id().is_some()
+            && sorted(&existing.collection_ids) != sorted(&draft.collection_ids)
+        {
             let body = json!({ "collectionIds": draft.collection_ids });
             let path = format!("/ciphers/{}/collections", existing.id);
-            self.session.send_idempotent(Method::PUT, &path, Some(&body)).await?;
+            self.session
+                .send_idempotent(Method::PUT, &path, Some(&body))
+                .await?;
         }
         let mut item = decrypt_item(&updated, scope_key).context("reading the updated item")?;
         item.collection_ids = draft.collection_ids.clone();
         Ok(item)
     }
 
-    fn cipher_body(&self, scope: &Scope, draft: &Draft, key: &SymKey, wrapped_key: Option<&str>) -> Result<Value> {
+    fn cipher_body(
+        &self,
+        scope: &Scope,
+        draft: &Draft,
+        key: &SymKey,
+        wrapped_key: Option<&str>,
+    ) -> Result<Value> {
         let mut body = Map::new();
         for (name, node) in &draft.content {
             if !is_content_key(name, node) {
@@ -359,7 +412,9 @@ impl Account {
     pub async fn delete_items(&self, ids: &[String]) -> Result<()> {
         for chunk in ids.chunks(BULK_LIMIT) {
             let body = json!({ "ids": chunk });
-            self.session.send_idempotent(Method::DELETE, "/ciphers", Some(&body)).await?;
+            self.session
+                .send_idempotent(Method::DELETE, "/ciphers", Some(&body))
+                .await?;
         }
         Ok(())
     }
@@ -368,21 +423,34 @@ impl Account {
     pub async fn trash_items(&self, ids: &[String]) -> Result<()> {
         for chunk in ids.chunks(BULK_LIMIT) {
             let body = json!({ "ids": chunk });
-            self.session.send_idempotent(Method::PUT, "/ciphers/delete", Some(&body)).await?;
+            self.session
+                .send_idempotent(Method::PUT, "/ciphers/delete", Some(&body))
+                .await?;
         }
         Ok(())
     }
 
     pub async fn set_archived(&self, ids: &[String], archived: bool) -> Result<()> {
-        let path = if archived { "/ciphers/archive" } else { "/ciphers/unarchive" };
+        let path = if archived {
+            "/ciphers/archive"
+        } else {
+            "/ciphers/unarchive"
+        };
         for chunk in ids.chunks(BULK_LIMIT) {
             let body = json!({ "ids": chunk });
-            self.session.send_idempotent(Method::PUT, path, Some(&body)).await?;
+            self.session
+                .send_idempotent(Method::PUT, path, Some(&body))
+                .await?;
         }
         Ok(())
     }
 
-    pub async fn download_attachment(&self, scope: &Scope, item: &Item, attachment: &Attachment) -> Result<Vec<u8>> {
+    pub async fn download_attachment(
+        &self,
+        scope: &Scope,
+        item: &Item,
+        attachment: &Attachment,
+    ) -> Result<Vec<u8>> {
         let path = format!("/ciphers/{}/attachment/{}", item.id, attachment.id);
         let details = self.session.get(&path).await?;
         let url = required_str(&details, "url", "attachment")?;
@@ -395,7 +463,13 @@ impl Account {
         Ok(data)
     }
 
-    pub async fn upload_attachment(&self, scope: &Scope, item: &Item, file_name: &str, data: &[u8]) -> Result<()> {
+    pub async fn upload_attachment(
+        &self,
+        scope: &Scope,
+        item: &Item,
+        file_name: &str,
+        data: &[u8],
+    ) -> Result<()> {
         let item_key = self.item_key(scope, item)?;
         let attachment_key = SymKey::generate();
         let blob = attachment_key.encrypt_blob(data)?;
@@ -407,7 +481,10 @@ impl Account {
             "adminRequest": false,
         });
         let path = format!("/ciphers/{}/attachment/v2", item.id);
-        let slot = self.session.send_once(Method::POST, &path, Some(&body)).await?;
+        let slot = self
+            .session
+            .send_once(Method::POST, &path, Some(&body))
+            .await?;
         let attachment_id = required_str(&slot, "attachmentId", "attachment upload")?;
         let uploaded = match slot.get("fileUploadType").and_then(Value::as_u64) {
             Some(1) => {
@@ -416,7 +493,9 @@ impl Account {
             }
             _ => {
                 let path = format!("/ciphers/{}/attachment/{attachment_id}", item.id);
-                self.session.upload_direct(&path, &encrypted_name, blob).await
+                self.session
+                    .upload_direct(&path, &encrypted_name, blob)
+                    .await
             }
         };
         if let Err(error) = uploaded {
@@ -428,13 +507,18 @@ impl Account {
     }
 
     pub async fn delete_attachment(&self, item_id: &str, attachment_id: &str) -> Result<()> {
-        self.delete(&format!("/ciphers/{item_id}/attachment/{attachment_id}")).await
+        self.delete(&format!("/ciphers/{item_id}/attachment/{attachment_id}"))
+            .await
     }
 
     /// Deletes one object, treating "already gone" as success so a retried
     /// or repeated delete converges.
     async fn delete(&self, path: &str) -> Result<()> {
-        match self.session.send_idempotent(Method::DELETE, path, None).await {
+        match self
+            .session
+            .send_idempotent(Method::DELETE, path, None)
+            .await
+        {
             Ok(_) => Ok(()),
             Err(error) if error.status() == Some(reqwest::StatusCode::NOT_FOUND) => Ok(()),
             Err(error) => Err(error.into()),
@@ -494,7 +578,9 @@ fn optional_str(value: &Value, name: &str) -> Option<String> {
 }
 
 fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
-    let object = cipher.as_object().ok_or_else(|| anyhow!("item is not an object"))?;
+    let object = cipher
+        .as_object()
+        .ok_or_else(|| anyhow!("item is not an object"))?;
     let wrapped_key = optional_str(cipher, "key");
     let own_key = wrapped_key
         .as_deref()
@@ -515,7 +601,12 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
     }
 
     let mut attachments = Vec::new();
-    for attachment in cipher.get("attachments").and_then(Value::as_array).into_iter().flatten() {
+    for attachment in cipher
+        .get("attachments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         let size = match attachment.get("size") {
             Some(Value::String(text)) => text.parse().ok(),
             Some(Value::Number(number)) => number.as_u64(),
@@ -534,7 +625,12 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
     let collection_ids = cipher
         .get("collectionIds")
         .and_then(Value::as_array)
-        .map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
 
     Ok(Item {
@@ -545,6 +641,7 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
         creation_date: optional_str(cipher, "creationDate"),
         in_trash: optional_str(cipher, "deletedDate").is_some(),
         archived: optional_str(cipher, "archivedDate").is_some(),
+        archived_date: optional_str(cipher, "archivedDate"),
         content,
         attachments,
         wrapped_key,
@@ -601,7 +698,17 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            ["favorite", "fields", "futureItemType", "login", "name", "notes", "passwordHistory", "reprompt", "type"]
+            [
+                "favorite",
+                "fields",
+                "futureItemType",
+                "login",
+                "name",
+                "notes",
+                "passwordHistory",
+                "reprompt",
+                "type"
+            ]
         );
     }
 

@@ -80,11 +80,9 @@ impl Node {
             Self::Number(n) => Value::Number(n.clone()),
             Self::Text(s) | Self::Secret(s) => Value::String(s.clone()),
             Self::List(items) => Value::Array(items.iter().map(Self::to_plain).collect()),
-            Self::Map(map) => Value::Object(
-                map.iter()
-                    .map(|(k, v)| (k.clone(), v.to_plain()))
-                    .collect(),
-            ),
+            Self::Map(map) => {
+                Value::Object(map.iter().map(|(k, v)| (k.clone(), v.to_plain())).collect())
+            }
         }
     }
 
@@ -100,9 +98,8 @@ impl Node {
             Self::Bool(b) => Some(Value::Bool(*b)),
             Self::Number(n) => Some(Value::Number(n.clone())),
             Self::Secret(s) => (!s.is_empty()).then(|| Value::String(s.clone())),
-            Self::Text(s) => {
-                (!s.is_empty()).then(|| Value::String(normalize_timestamp(s).unwrap_or_else(|| s.clone())))
-            }
+            Self::Text(s) => (!s.is_empty())
+                .then(|| Value::String(normalize_timestamp(s).unwrap_or_else(|| s.clone()))),
             Self::List(items) => {
                 let items: Vec<Value> = items.iter().filter_map(Self::normalized).collect();
                 (!items.is_empty()).then_some(Value::Array(items))
@@ -115,6 +112,89 @@ impl Node {
                 (!map.is_empty()).then_some(Value::Object(map))
             }
         }
+    }
+
+    /// JSON pointers to every string that is stored in the clear.
+    ///
+    /// Together with [`Node::to_plain`] this is enough to rebuild the tree,
+    /// because every other string is a secret.
+    pub fn plain_string_paths(&self) -> Vec<String> {
+        fn walk(node: &Node, path: &mut String, out: &mut Vec<String>) {
+            match node {
+                Node::Text(_) => out.push(path.clone()),
+                Node::List(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        let length = path.len();
+                        path.push_str(&format!("/{index}"));
+                        walk(item, path, out);
+                        path.truncate(length);
+                    }
+                }
+                Node::Map(map) => {
+                    for (key, value) in map {
+                        let length = path.len();
+                        path.push('/');
+                        path.push_str(&key.replace('~', "~0").replace('/', "~1"));
+                        walk(value, path, out);
+                        path.truncate(length);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &mut String::new(), &mut out);
+        out
+    }
+
+    /// Rebuilds a tree from plain JSON. Strings at `plain_paths` stay in the
+    /// clear; with no path list, strings that are timestamps under a key
+    /// ending in `Date` do, which is where servers keep their only clear text.
+    pub fn from_plain(value: &Value, plain_paths: Option<&[String]>) -> Self {
+        fn walk(value: &Value, key: &str, path: &mut String, plain: Option<&[String]>) -> Node {
+            match value {
+                Value::Null => Node::Null,
+                Value::Bool(b) => Node::Bool(*b),
+                Value::Number(n) => Node::Number(n.clone()),
+                Value::String(s) => {
+                    let is_plain = match plain {
+                        Some(paths) => paths.iter().any(|p| p == path),
+                        None => key.ends_with("Date") && normalize_timestamp(s).is_some(),
+                    };
+                    if is_plain {
+                        Node::Text(s.clone())
+                    } else {
+                        Node::Secret(s.clone())
+                    }
+                }
+                Value::Array(items) => Node::List(
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            let length = path.len();
+                            path.push_str(&format!("/{index}"));
+                            let node = walk(item, key, path, plain);
+                            path.truncate(length);
+                            node
+                        })
+                        .collect(),
+                ),
+                Value::Object(map) => Node::Map(
+                    map.iter()
+                        .map(|(k, v)| {
+                            let length = path.len();
+                            path.push('/');
+                            path.push_str(&k.replace('~', "~0").replace('/', "~1"));
+                            let node = walk(v, k, path, plain);
+                            path.truncate(length);
+                            (k.clone(), node)
+                        })
+                        .collect(),
+                ),
+            }
+        }
+        walk(value, "", &mut String::new(), plain_paths)
     }
 
     pub fn as_str(&self) -> Option<&str> {
@@ -146,7 +226,9 @@ fn normalize_timestamp(value: &str) -> Option<String> {
     if bytes.len() < 19 || bytes[4] != b'-' || bytes[10] != b'T' {
         return None;
     }
-    let parsed = OffsetDateTime::parse(value, &Rfc3339).ok()?.to_offset(UtcOffset::UTC);
+    let parsed = OffsetDateTime::parse(value, &Rfc3339)
+        .ok()?
+        .to_offset(UtcOffset::UTC);
     let truncated = parsed.replace_millisecond(parsed.millisecond()).ok()?;
     Some(format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
@@ -167,7 +249,12 @@ mod tests {
     use super::*;
 
     fn map(entries: Vec<(&str, Node)>) -> Node {
-        Node::Map(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+        Node::Map(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
     }
 
     #[test]
@@ -188,7 +275,10 @@ mod tests {
             ("name", Node::secret("GitHub")),
             ("type", Node::Number(1.into())),
             ("favorite", Node::Bool(false)),
-            ("revisionDate", Node::Text("2026-01-02T03:04:05.000000Z".into())),
+            (
+                "revisionDate",
+                Node::Text("2026-01-02T03:04:05.000000Z".into()),
+            ),
             (
                 "login",
                 map(vec![
@@ -228,7 +318,10 @@ mod tests {
 
     #[test]
     fn plain_export_reveals_secrets() {
-        let node = map(vec![("name", Node::secret("n")), ("d", Node::Text("x".into()))]);
+        let node = map(vec![
+            ("name", Node::secret("n")),
+            ("d", Node::Text("x".into())),
+        ]);
         assert_eq!(node.to_plain(), json!({"name": "n", "d": "x"}));
     }
 
@@ -240,7 +333,10 @@ mod tests {
             ("emptyNotes", Node::secret("")),
             ("fields", Node::List(vec![])),
             ("card", map(vec![("number", Node::Null)])),
-            ("uris", Node::List(vec![Node::Null, map(vec![("uri", Node::secret("u"))])])),
+            (
+                "uris",
+                Node::List(vec![Node::Null, map(vec![("uri", Node::secret("u"))])]),
+            ),
             ("favorite", Node::Bool(false)),
             ("reprompt", Node::Number(0.into())),
         ]);
@@ -267,8 +363,72 @@ mod tests {
             );
         }
         assert_eq!(
-            Node::Text("2026-01-02T03:04:05Z".into()).normalized().unwrap(),
+            Node::Text("2026-01-02T03:04:05Z".into())
+                .normalized()
+                .unwrap(),
             json!("2026-01-02T03:04:05.000Z")
+        );
+    }
+
+    #[test]
+    fn a_plain_export_rebuilds_into_the_same_tree() {
+        let node = map(vec![
+            ("name", Node::secret("2026-01-02T03:04:05Z")),
+            (
+                "login",
+                map(vec![
+                    (
+                        "passwordRevisionDate",
+                        Node::Text("2026-01-02T03:04:05.000Z".into()),
+                    ),
+                    (
+                        "uris",
+                        Node::List(vec![map(vec![
+                            ("uri", Node::secret("u")),
+                            ("a/b~c", Node::Text("plain".into())),
+                        ])]),
+                    ),
+                ]),
+            ),
+            ("n", Node::Number(1.into())),
+        ]);
+        let paths = node.plain_string_paths();
+        assert_eq!(
+            paths,
+            ["/login/passwordRevisionDate", "/login/uris/0/a~1b~0c"]
+        );
+        assert_eq!(Node::from_plain(&node.to_plain(), Some(&paths)), node);
+    }
+
+    #[test]
+    fn a_foreign_export_keeps_only_dated_timestamps_in_the_clear() {
+        let plain = json!({
+            "name": "2026-01-02T03:04:05Z",
+            "login": {"passwordRevisionDate": "2026-01-02T03:04:05.000Z", "password": "pw"},
+            "passwordHistory": [{"lastUsedDate": "2025-01-01T00:00:00Z", "password": "old"}],
+            "expiryDate": "next week",
+        });
+        let node = Node::from_plain(&plain, None);
+        let login = node.as_map().unwrap()["login"].as_map().unwrap();
+        assert_eq!(
+            login["passwordRevisionDate"],
+            Node::Text("2026-01-02T03:04:05.000Z".into())
+        );
+        assert_eq!(login["password"], Node::secret("pw"));
+        assert_eq!(
+            node.as_map().unwrap()["name"],
+            Node::secret("2026-01-02T03:04:05Z")
+        );
+        assert_eq!(
+            node.as_map().unwrap()["expiryDate"],
+            Node::secret("next week")
+        );
+        let history = node.as_map().unwrap()["passwordHistory"].as_list().unwrap()[0]
+            .as_map()
+            .unwrap();
+        assert_eq!(
+            history["lastUsedDate"],
+            Node::Text("2025-01-01T00:00:00Z".into())
         );
     }
 
@@ -279,7 +439,11 @@ mod tests {
             Node::secret("2026-01-02T03:04:05Z").normalized().unwrap(),
             json!("2026-01-02T03:04:05Z")
         );
-        for plain in ["not a date", "2026-01-02", "9a1c7c5e-0c1f-4a4b-9d39-0c1c2f7f7a10"] {
+        for plain in [
+            "not a date",
+            "2026-01-02",
+            "9a1c7c5e-0c1f-4a4b-9d39-0c1c2f7f7a10",
+        ] {
             assert_eq!(Node::Text(plain.into()).normalized().unwrap(), json!(plain));
         }
     }

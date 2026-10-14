@@ -21,7 +21,12 @@ fn number(value: u64) -> Node {
 }
 
 fn map(entries: Vec<(&str, Node)>) -> Node {
-    Node::Map(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    Node::Map(
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
 }
 
 fn item(kind: u64, name: &str, extra: Vec<(&str, Node)>) -> BTreeMap<String, Node> {
@@ -39,7 +44,12 @@ fn item(kind: u64, name: &str, extra: Vec<(&str, Node)>) -> BTreeMap<String, Nod
 }
 
 fn field(name: &str, value: Node, kind: u64, linked: Node) -> Node {
-    map(vec![("name", secret(name)), ("value", value), ("type", number(kind)), ("linkedId", linked)])
+    map(vec![
+        ("name", secret(name)),
+        ("value", value),
+        ("type", number(kind)),
+        ("linkedId", linked),
+    ])
 }
 
 fn sample(folder: Option<&'static str>, content: BTreeMap<String, Node>) -> Sample {
@@ -55,7 +65,18 @@ fn sample(folder: Option<&'static str>, content: BTreeMap<String, Node>) -> Samp
 pub const FOLDERS: &[&str] = &["Work", "Work/Infra", "Persönlich ✈", "Empty"];
 
 pub fn samples() -> Vec<Sample> {
-    let uri = |value: &str, matching: Node| map(vec![("uri", secret(value)), ("match", matching)]);
+    // Official clients store a checksum next to each URI and verify it.
+    let uri = |value: &str, matching: Node| {
+        use base64::Engine;
+        use sha2::Digest;
+        let checksum = base64::engine::general_purpose::STANDARD
+            .encode(sha2::Sha256::digest(value.as_bytes()));
+        map(vec![
+            ("uri", secret(value)),
+            ("uriChecksum", secret(&checksum)),
+            ("match", matching),
+        ])
+    };
     let mut samples = vec![
         sample(
             Some("Work"),
@@ -64,14 +85,25 @@ pub fn samples() -> Vec<Sample> {
                 "GitHub",
                 vec![
                     ("favorite", Node::Bool(true)),
-                    ("notes", secret("Recovery codes:\n  1234-5678\n  abcd-efgh\n")),
+                    (
+                        "notes",
+                        secret("Recovery codes:\n  1234-5678\n  abcd-efgh\n"),
+                    ),
                     (
                         "login",
                         map(vec![
                             ("username", secret("octocat")),
                             ("password", secret("correct horse battery staple")),
-                            ("totp", secret("otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP&issuer=GitHub")),
-                            ("passwordRevisionDate", Node::Text("2026-03-04T05:06:07.000Z".into())),
+                            (
+                                "totp",
+                                secret(
+                                    "otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
+                                ),
+                            ),
+                            (
+                                "passwordRevisionDate",
+                                Node::Text("2026-03-04T05:06:07.000Z".into()),
+                            ),
                             (
                                 "uris",
                                 Node::List(vec![
@@ -94,8 +126,20 @@ pub fn samples() -> Vec<Sample> {
                     (
                         "passwordHistory",
                         Node::List(vec![
-                            map(vec![("password", secret("old-password-1")), ("lastUsedDate", Node::Text("2025-01-02T03:04:05.000Z".into()))]),
-                            map(vec![("password", secret("old-password-2")), ("lastUsedDate", Node::Text("2025-06-07T08:09:10.000Z".into()))]),
+                            map(vec![
+                                ("password", secret("old-password-1")),
+                                (
+                                    "lastUsedDate",
+                                    Node::Text("2025-01-02T03:04:05.000Z".into()),
+                                ),
+                            ]),
+                            map(vec![
+                                ("password", secret("old-password-2")),
+                                (
+                                    "lastUsedDate",
+                                    Node::Text("2025-06-07T08:09:10.000Z".into()),
+                                ),
+                            ]),
                         ]),
                     ),
                 ],
@@ -112,7 +156,10 @@ pub fn samples() -> Vec<Sample> {
                         ("username", secret("passkey-user")),
                         ("password", Node::Null),
                         ("totp", Node::Null),
-                        ("uris", Node::List(vec![uri("https://webauthn.io", Node::Null)])),
+                        (
+                            "uris",
+                            Node::List(vec![uri("https://webauthn.io", Node::Null)]),
+                        ),
                         (
                             "fido2Credentials",
                             Node::List(vec![map(vec![
@@ -120,7 +167,10 @@ pub fn samples() -> Vec<Sample> {
                                 ("keyType", secret("public-key")),
                                 ("keyAlgorithm", secret("ECDSA")),
                                 ("keyCurve", secret("P-256")),
-                                ("keyValue", secret("MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg")),
+                                (
+                                    "keyValue",
+                                    secret("MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg"),
+                                ),
                                 ("rpId", secret("webauthn.io")),
                                 ("rpName", secret("WebAuthn.io")),
                                 ("userHandle", secret("dXNlci1oYW5kbGU")),
@@ -128,7 +178,10 @@ pub fn samples() -> Vec<Sample> {
                                 ("userDisplayName", secret("Passkey User")),
                                 ("counter", secret("0")),
                                 ("discoverable", secret("true")),
-                                ("creationDate", Node::Text("2026-02-03T04:05:06.000Z".into())),
+                                (
+                                    "creationDate",
+                                    Node::Text("2026-02-03T04:05:06.000Z".into()),
+                                ),
                             ])]),
                         ),
                     ]),
@@ -140,7 +193,14 @@ pub fn samples() -> Vec<Sample> {
             item(
                 1,
                 "Bare login without folder",
-                vec![("login", map(vec![("username", Node::Null), ("password", secret("only a password")), ("totp", Node::Null)]))],
+                vec![(
+                    "login",
+                    map(vec![
+                        ("username", Node::Null),
+                        ("password", secret("only a password")),
+                        ("totp", Node::Null),
+                    ]),
+                )],
             ),
         ),
         sample(
@@ -149,7 +209,10 @@ pub fn samples() -> Vec<Sample> {
                 2,
                 "Sichere Notiz — 日本語 🔐",
                 vec![
-                    ("notes", secret(&"Zeile mit Umlauten äöüß und Emoji 🎉\n".repeat(100))),
+                    (
+                        "notes",
+                        secret(&"Zeile mit Umlauten äöüß und Emoji 🎉\n".repeat(100)),
+                    ),
                     ("secureNote", map(vec![("type", number(0))])),
                     ("reprompt", number(1)),
                 ],
@@ -211,14 +274,35 @@ pub fn samples() -> Vec<Sample> {
                 vec![(
                     "sshKey",
                     map(vec![
-                        ("privateKey", secret("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n")),
-                        ("publicKey", secret("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample deploy@example")),
-                        ("keyFingerprint", secret("SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG")),
+                        (
+                            "privateKey",
+                            secret(
+                                "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
+                            ),
+                        ),
+                        (
+                            "publicKey",
+                            secret("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample deploy@example"),
+                        ),
+                        (
+                            "keyFingerprint",
+                            secret("SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"),
+                        ),
                     ]),
                 )],
             ),
         ),
-        sample(Some("Work"), item(2, "Archived note", vec![("secureNote", map(vec![("type", number(0))])), ("notes", secret("kept but archived"))])),
+        sample(
+            Some("Work"),
+            item(
+                2,
+                "Archived note",
+                vec![
+                    ("secureNote", map(vec![("type", number(0))])),
+                    ("notes", secret("kept but archived")),
+                ],
+            ),
+        ),
         sample(
             None,
             item(
@@ -226,17 +310,37 @@ pub fn samples() -> Vec<Sample> {
                 "Looks like ciphertext",
                 // Plaintext that has the shape of an encrypted string must survive as-is.
                 vec![
-                    ("notes", secret("2.AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")),
-                    ("login", map(vec![("username", secret("")), ("password", secret("  spaces  ")), ("totp", Node::Null)])),
+                    (
+                        "notes",
+                        secret(
+                            "2.AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                        ),
+                    ),
+                    (
+                        "login",
+                        map(vec![
+                            ("username", secret("")),
+                            ("password", secret("  spaces  ")),
+                            ("totp", Node::Null),
+                        ]),
+                    ),
                 ],
             ),
         ),
     ];
     samples[0].attachments = vec![
         ("recovery codes.txt", b"1234-5678\nabcd-efgh\n".to_vec()),
-        ("binary.bin", (0..70_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect()),
+        (
+            "binary.bin",
+            (0..70_000u32)
+                .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+                .collect(),
+        ),
     ];
-    samples[3].attachments = vec![("empty.txt", Vec::new()), ("ünïcödé ✈.txt", "größe".as_bytes().to_vec())];
+    samples[3].attachments = vec![
+        ("empty.txt", Vec::new()),
+        ("ünïcödé ✈.txt", "größe".as_bytes().to_vec()),
+    ];
     samples[7].archived = true;
     samples
 }
