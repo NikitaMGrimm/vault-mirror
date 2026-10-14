@@ -24,7 +24,14 @@ use vault_mirror::{
 /// Configuration comes from environment variables; see the README. Without a
 /// subcommand, one run is performed.
 #[derive(Parser)]
-#[command(name = "vault-mirror", version, max_term_width = 100)]
+// Run options belong after `run`, or stand alone without a subcommand. Before
+// a subcommand they would be ignored, so they are rejected there.
+#[command(
+    name = "vault-mirror",
+    version,
+    max_term_width = 100,
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -556,4 +563,18 @@ async fn sandbox(source: &str, dest: &str, seed: bool) -> Result<ExitCode> {
     lines.push("BACKUP_PASSPHRASE=sandbox-backup-passphrase".to_string());
     println!("{}", lines.join("\n"));
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_options_before_a_subcommand_are_rejected() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["vault-mirror"], args].concat());
+        assert!(parse(&["--dry-run", "run"]).is_err());
+        assert!(parse(&["--allow-mass-delete", "daemon"]).is_err());
+        assert!(parse(&["run", "--dry-run"]).unwrap().command.is_some());
+        assert!(parse(&["--dry-run"]).unwrap().run.dry_run);
+    }
 }
