@@ -7,7 +7,7 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::Serialize;
 
 use crate::{
-    mirror::{Endpoint, Reporter},
+    mirror::{Endpoint, Reporter, refused},
     node::Node,
     snapshot::{Restorable, RestorableItem},
     store::Store,
@@ -79,7 +79,11 @@ pub async fn restore(
         item_type(item).is_some_and(|kind| traits.hidden_item_types.contains(&kind))
             || (snapshot.organization
                 && traits.items_need_collections
-                && item.collection_ids.is_empty())
+                // Only collections the snapshot lists are restored.
+                && !item
+                    .collection_ids
+                    .iter()
+                    .any(|id| snapshot.collections.iter().any(|c| c.id == *id)))
     };
     let (left_out, items): (Vec<&RestorableItem>, Vec<&RestorableItem>) =
         snapshot.items.iter().partition(hidden);
@@ -217,10 +221,14 @@ pub async fn restore(
     if !archived.is_empty()
         && let Err(error) = account.set_archived(&archived, true).await
     {
+        // As when mirroring, only a refusal is tolerated.
+        if !refused(&error) {
+            return Err(error.context("archiving restored items"));
+        }
         reporter.warn(&format!(
-                "The server refused to archive {} restored item(s); they were restored unarchived: {error:#}",
-                archived.len()
-            ));
+            "The server refused to archive {} restored item(s); they were restored unarchived: {error:#}",
+            archived.len()
+        ));
     }
     let visible: HashSet<String> = account
         .load(scope)

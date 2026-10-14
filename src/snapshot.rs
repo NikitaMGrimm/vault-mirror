@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     node::Node,
-    plan::MARKER_FIELD,
+    plan::is_mirror_marker,
     vault::{Collection, Folder, Scope, Vault, is_content_key},
 };
 
@@ -169,13 +169,21 @@ pub fn parse(document: &Value) -> Result<Restorable> {
         created_at: block.and_then(|b| text(b, "createdAt")),
         ..Restorable::default()
     };
+    // Servers accept empty folder and collection names, and items refer to
+    // them by id, so they are kept.
+    let name = |value: &Value| {
+        value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
     for folder in list("folders") {
-        if let (Some(id), Some(name)) = (text(&folder, "id"), text(&folder, "name")) {
+        if let (Some(id), Some(name)) = (text(&folder, "id"), name(&folder)) {
             restorable.folders.push(Folder { id, name });
         }
     }
     for collection in list("collections") {
-        if let (Some(id), Some(name)) = (text(&collection, "id"), text(&collection, "name")) {
+        if let (Some(id), Some(name)) = (text(&collection, "id"), name(&collection)) {
             restorable.collections.push(Collection {
                 id,
                 name,
@@ -242,14 +250,9 @@ pub fn parse(document: &Value) -> Result<Restorable> {
             .collect();
         if let Some(Node::List(fields)) = content.get_mut("fields") {
             // A backup of a mirror destination carries mirror markers, which
-            // must not end up in a restored vault.
-            fields.retain(|field| {
-                field
-                    .as_map()
-                    .and_then(|map| map.get("name"))
-                    .and_then(Node::as_str)
-                    != Some(MARKER_FIELD)
-            });
+            // must not end up in a restored vault. A field of the same name
+            // that is not a marker is the user's own.
+            fields.retain(|field| !is_mirror_marker(field));
         }
         restorable.items.push(RestorableItem {
             folder_id: text(item, "folderId"),
@@ -275,7 +278,7 @@ pub fn parse(document: &Value) -> Result<Restorable> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vault::Item;
+    use crate::{plan::MARKER_FIELD, vault::Item};
 
     fn item(id: &str, name: &str) -> Item {
         let content = BTreeMap::from([
@@ -303,9 +306,18 @@ mod tests {
                         ("value".to_string(), Node::secret("1234")),
                         ("type".to_string(), Node::Number(1.into())),
                     ])),
+                    // The user's own field, which only shares the name.
                     Node::Map(BTreeMap::from([
                         ("name".to_string(), Node::secret(MARKER_FIELD)),
-                        ("value".to_string(), Node::secret("source-id abc -")),
+                        ("value".to_string(), Node::secret("written by hand")),
+                        ("type".to_string(), Node::Number(1.into())),
+                    ])),
+                    Node::Map(BTreeMap::from([
+                        ("name".to_string(), Node::secret(MARKER_FIELD)),
+                        (
+                            "value".to_string(),
+                            Node::secret(format!("source-id {} -", "ab".repeat(32))),
+                        ),
                         ("type".to_string(), Node::Number(1.into())),
                     ])),
                 ]),
@@ -401,6 +413,18 @@ mod tests {
         };
         fields.pop();
         assert_eq!(restored.content, expected);
+    }
+
+    #[test]
+    fn containers_with_empty_names_are_kept() {
+        let document = json!({
+            "encrypted": false,
+            "collections": [{ "id": "c1", "organizationId": "o", "name": "" }],
+            "items": [],
+        });
+        let restorable = parse(&document).unwrap();
+        assert_eq!(restorable.collections.len(), 1);
+        assert_eq!(restorable.collections[0].name, "");
     }
 
     #[test]
