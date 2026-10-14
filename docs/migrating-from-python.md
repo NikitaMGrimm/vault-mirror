@@ -2,23 +2,31 @@
 
 [← Documentation](README.md)
 
-The environment variables are the same, so you can replace the image and keep
-your env file.
+vault-mirror accepts the Python version's environment variable names.
+You can keep the settings file when replacing the image.
 
-The first run adopts the existing mirror in place. It recognises the older
-`__source` markers and keeps every destination item and its id. It rewrites
-each marker in the new form and copies attachments once more, because the old
-tool did not record which copies were current. Later runs change nothing until
-the source changes.
+The first run recognizes older `__source` markers in existing copies.
+The tool updates matching copies in place and keeps their destination item ids.
+It rewrites each marker in the new format.
 
-Old backups stay where they are: the `*.json.enc` files are neither read nor
-pruned. Decrypt them with `openssl` as before, and delete them once you no
-longer need them. You can point `BACKUPS_DIR` at the same directory; new
-backups go to `source/snapshots` and `dest/snapshots` inside it.
+It copies attachments again because the Python version did not record attachment state.
+Later runs make no changes until the source changes or a copy differs.
+The usual [filters and safety checks](how-it-works.md#safety-checks) still apply.
 
-`PUID` and `PGID` no longer apply. The image runs as user 65532, so either give
-that user the backup directory, or start the container as the directory's
-owner, for example with `--user 1000:1000`.
+vault-mirror does not read or prune old `*.json.enc` backups.
 
-Switching back later is costly. The Python tool does not recognise the new
-markers, and recreates every destination item.
+1. Decrypt these files with `openssl`, as before.
+2. Delete these files only when you no longer need them.
+
+You can keep the same `BACKUPS_DIR`.
+New snapshots go to `source/snapshots` and `dest/snapshots` inside that directory.
+
+`PUID` and `PGID` have no effect.
+The image runs as user 65532.
+Give user 65532 write access to the backup directory, or run the container as the directory owner.
+
+For example, use `--user 1000:1000` when the owner's user id and group id are both 1000.
+
+> [!WARNING]
+> The Python version does not recognize the new markers.
+> Switching back to Python recreates every destination item.

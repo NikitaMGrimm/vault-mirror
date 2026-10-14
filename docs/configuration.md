@@ -2,21 +2,38 @@
 
 [← Documentation](README.md)
 
-All configuration comes from environment variables. You can pass any secret
-as a file instead: set `NAME_FILE` to a path and the file's content is used,
-which suits Docker and systemd credentials. Passwords and passphrases are
-used exactly as given, spaces included; a file's final newline is dropped.
+vault-mirror reads settings from environment variables.
+You can supply any secret through a file.
+Set `NAME_FILE` to its path instead of setting `NAME`.
+
+vault-mirror reads the secret from that file.
+Secret files support Docker and systemd credentials.
+It uses passwords and passphrases exactly as given, including spaces.
+It removes trailing newline characters from secret files.
 
 ## Settings file
 
-`vault-mirror init` writes the settings to `vault-mirror.env`, one
-`NAME=value` per line. Values are taken literally, without quotes or
-variables, so a password may contain any character. Lines starting with `#`
-are comments. Docker Compose reads the file with `format: raw`, `docker run`
-with `--env-file`, and the binary with `vault-mirror --env-file PATH`. When a
-setting is in both the file and the environment, the environment wins.
+`vault-mirror init` writes the settings file, `vault-mirror.env`.
+Each line has the form `NAME=value`.
+The tool reads values literally, without processing quotes or variables.
 
-To set up by hand instead, write that file and a `compose.yaml` like this:
+Passwords can contain any character that fits on one line.
+Lines that start with `#` are comments.
+An environment variable takes precedence over the same setting in the settings file.
+
+| Program | Settings file option |
+| --- | --- |
+| Docker Compose | `format: raw` |
+| `docker run` | `--env-file` |
+| vault-mirror binary | `vault-mirror --env-file PATH` |
+
+For manual setup:
+
+1. Write the settings file with the required variables from the table below.
+2. Create the `backups` directory.
+3. Create `compose.yaml` with this content.
+4. Replace `1000:1000` with the backup directory owner's user id and group id.
+5. Run `docker compose run --rm vault-mirror check` to check logins and view the plan.
 
 ```yaml
 services:
@@ -34,54 +51,58 @@ services:
     restart: unless-stopped
 ```
 
-Then run `docker compose run --rm vault-mirror check`, which logs in and
-shows the plan without writing anything.
+`check` does not change vault data or write backups.
+`check` can create the backup directory and `state.json` for login device ids.
 
 ## Variables
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SOURCE_SERVER` | required | Server URL. `https://vault.bitwarden.com` and `https://vault.bitwarden.eu` select Bitwarden's cloud. |
-| `SOURCE_CLIENT_ID`, `SOURCE_CLIENT_SECRET` | required | Personal API key. |
-| `SOURCE_PASSWORD` | required | Master password. |
-| `SOURCE_ORGANIZATION_ID` | — | Mirror this organization instead of the personal vault; see [Organizations](#organizations). |
-| `DEST_SERVER`, `DEST_CLIENT_ID`, `DEST_CLIENT_SECRET`, `DEST_PASSWORD`, `DEST_ORGANIZATION_ID` | — | The destination, in the same form as the source. Without a destination, runs only back up the source. Organizations are mirrored to organizations: set both organization ids or neither. |
-| `INCLUDE_FOLDERS`, `EXCLUDE_FOLDERS` | — | Comma-separated folder names; see [Mirroring part of a vault](#mirroring-part-of-a-vault). |
-| `INCLUDE_COLLECTIONS`, `EXCLUDE_COLLECTIONS` | — | The same for collections, in organization mode. |
-| `BACKUP_PASSPHRASE` | — | Passphrase that protects the backup key. Either this or `BACKUP_RECIPIENTS` is required while backups are on. `ENCRYPTION_PASSWORD` is accepted as an older name. |
-| `BACKUP_RECIPIENTS` | — | age public keys (`age1…`), separated by commas or spaces, to encrypt backups to instead. Restoring then needs `--identity`. |
-| `BACKUP_ENABLED` | `true` | Set `false` to mirror without backups. |
-| `BACKUP_ATTACHMENTS` | `true` | Store attachment content in backups. |
-| `ENABLE_PRUNING` | `true` | Delete old snapshots. |
-| `RETENTION_DAYS` | `30` | Age after which snapshots are deleted… |
-| `MIN_FILES` | `10` | …except the newest this many, per vault. |
-| `BACKUPS_DIR` | `backups` (`/data` in the image) | Where backups and `last-run.json` are kept. |
-| `MAX_DELETE_PERCENT` | — | Stop a run that would delete more than this percentage of the destination's items, if it deletes more than 10. Off unless set; see [Safety checks](how-it-works.md#safety-checks). |
-| `CONCURRENCY` | `4` | Parallel item writes, 1–32. |
-| `VERIFY_ATTACHMENTS` | `true` | Download copied attachments again and compare their SHA-256. |
-| `SCHEDULE` | — | Cron expression for `daemon`, such as `0 3 * * *`. `CRON_SCHEDULE` is accepted as an older name. |
-| `INTERVAL` | — | Alternative to `SCHEDULE`, such as `30m`, `6h`, or `1d`. With an interval, the first run starts immediately. |
+| `SOURCE_SERVER` | required | Source server URL. `https://vault.bitwarden.com` and `https://vault.bitwarden.eu` select Bitwarden's cloud. |
+| `SOURCE_CLIENT_ID`, `SOURCE_CLIENT_SECRET` | required | Source personal API key. |
+| `SOURCE_PASSWORD` | required | Source master password. |
+| `SOURCE_ORGANIZATION_ID` | — | Organization to copy instead of the personal source vault. See [Organizations](#organizations). |
+| `DEST_SERVER`, `DEST_CLIENT_ID`, `DEST_CLIENT_SECRET`, `DEST_PASSWORD`, `DEST_ORGANIZATION_ID` | — | Destination settings use the same form as source settings. Without a destination, runs back up only the source. Organization copies require both organization ids; personal copies require neither. |
+| `INCLUDE_FOLDERS`, `EXCLUDE_FOLDERS` | — | Comma-separated folder names. See [Mirroring part of a vault](#mirroring-part-of-a-vault). |
+| `INCLUDE_COLLECTIONS`, `EXCLUDE_COLLECTIONS` | — | Comma-separated collection names for organization mode. |
+| `BACKUP_PASSPHRASE` | — | Passphrase for the backup key. Enabled backups require this variable or `BACKUP_RECIPIENTS`. `ENCRYPTION_PASSWORD` is an accepted older name. |
+| `BACKUP_RECIPIENTS` | — | age public keys (`age1…`), separated by commas or spaces. The tool encrypts backups directly to these keys. Restoration requires `--identity`. |
+| `BACKUP_ENABLED` | `true` | `false` permits copying without backups. |
+| `BACKUP_ATTACHMENTS` | `true` | The tool stores attachment content in backups. |
+| `ENABLE_PRUNING` | `true` | The tool deletes old snapshots. |
+| `RETENTION_DAYS` | `30` | The tool deletes snapshots older than this number of days, except those protected by `MIN_FILES`. |
+| `MIN_FILES` | `10` | The tool keeps at least this many newest snapshots per vault. |
+| `BACKUPS_DIR` | `backups` (`/data` in the image) | Directory for backups and `last-run.json`. |
+| `MAX_DELETE_PERCENT` | — | Deletion percentage limit, disabled by default. The limit applies above 10 deletions when the destination has recognized copies. See [Safety checks](how-it-works.md#safety-checks). |
+| `CONCURRENCY` | `4` | Number of parallel item writes, from 1 to 32. |
+| `VERIFY_ATTACHMENTS` | `true` | The tool downloads copied attachments again and compares their SHA-256 hashes. |
+| `SCHEDULE` | — | Cron expression for `daemon`, such as `0 3 * * *`. `CRON_SCHEDULE` is an accepted older name. |
+| `INTERVAL` | — | Alternative to `SCHEDULE`, such as `30m`, `6h`, or `1d`. The first interval run starts immediately. |
 | `TZ` | UTC | Time zone for `SCHEDULE`. |
-| `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | — | URL that receives a one-line summary by `POST` after each run. Works with [ntfy](https://ntfy.sh), [healthchecks.io](https://healthchecks.io), Gotify webhooks, and similar services. The summary never contains vault data. |
-| `CA_CERT_FILE` | — | PEM file with additional trusted certificate authorities, for servers with a private CA. |
-| `BITWARDEN_CLIENT_VERSION` | a recent CLI version | Client version reported to the server. Change it only if a server rejects the default. |
+| `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | — | Notification URL for a one-line summary by `POST` after each run. Supported services include [ntfy](https://ntfy.sh), [healthchecks.io](https://healthchecks.io), Gotify webhooks, and similar services that accept these requests. Summaries contain no vault data. |
+| `CA_CERT_FILE` | — | PEM file with additional trusted certificate authorities for servers with a private CA. |
+| `BITWARDEN_CLIENT_VERSION` | a recent CLI version | Client version that the tool reports to the server. Change this only if a server rejects the default. |
 
-`SOURCE_ACCOUNT`, `DEST_ACCOUNT`, `PUID`, `PGID`, `TEMP_DIR`, and
-`DEST_DELETE_WORKERS` belong to earlier tools. They are accepted and ignored.
+vault-mirror accepts and ignores these older variables:
+`SOURCE_ACCOUNT`, `DEST_ACCOUNT`, `PUID`, `PGID`, `TEMP_DIR`, and `DEST_DELETE_WORKERS`.
 
 ## Organizations
 
-Set `SOURCE_ORGANIZATION_ID` and `DEST_ORGANIZATION_ID` to mirror one
-organization into another. The organization id is in the web vault's address
-when the organization is open. Bitwarden's servers show an owner only the
-collections they are assigned to, and no item outside a collection. So that
-nothing looks deleted, the run stops unless the account can see everything:
+Set `SOURCE_ORGANIZATION_ID` and `DEST_ORGANIZATION_ID` to copy one organization into another.
+The web vault's address contains the organization id when you open the organization.
 
-- Make the account an **owner** or **admin** of both organizations.
-- Assign it to every collection, with **Can manage** permission.
-- Put every item in a collection.
+Bitwarden's servers show owners only their assigned collections.
+These servers hide organization items that have no collection.
+The tool stops the run if the account cannot see all organization data.
+This prevents hidden items from appearing deleted.
 
-Members, groups, permissions, favorites, and folders are not mirrored.
+For both organizations:
+
+1. Give the account the **owner** or **admin** role.
+2. Assign the account to every collection with **Can manage** permission.
+3. Put every item in a collection.
+
+Organization copies exclude members, groups, permissions, favorites, and folders.
 
 ## Mirroring part of a vault
 
@@ -92,13 +113,13 @@ INCLUDE_FOLDERS=Work, Family
 EXCLUDE_FOLDERS=Work/Private
 ```
 
-- A name includes its subfolders, so `Work` covers `Work/Infra`.
-- With `INCLUDE_FOLDERS`, items in no folder are not mirrored.
-- A name that matches no folder produces a warning.
-- When the filter changes, the destination follows: copies the filter no
-  longer selects are deleted, within the [safety checks](how-it-works.md#safety-checks).
-- Backups always hold the whole vault.
+| Filter rule | Effect |
+| --- | --- |
+| Folder name | The name includes subfolders. `Work` includes `Work/Infra`. |
+| `INCLUDE_FOLDERS` | The filter excludes items without a folder. |
+| Unmatched name | An unmatched name produces a warning. |
+| Changed filter | The tool deletes copies that the filter no longer selects, subject to the [safety checks](how-it-works.md#safety-checks). |
+| Backups | Backups include the whole configured vault, except trash items, regardless of filters. |
 
-`INCLUDE_COLLECTIONS` and `EXCLUDE_COLLECTIONS` work the same way for
-organizations. An item in an excluded collection is left out even if it is
-also in an included one.
+`INCLUDE_COLLECTIONS` and `EXCLUDE_COLLECTIONS` use the same rules for organizations.
+The tool excludes an item in an excluded collection even when an included collection also contains that item.
