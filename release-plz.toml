@@ -6,6 +6,8 @@ git_tag_name = "v{{ version }}"
 git_release_name = "v{{ version }}"
 # Release only when a release pull request is merged.
 release_always = false
+# Propose a release only for changes that reach the release notes.
+release_commits = "^(feat|fix|perf|revert)"
 # The library is published only to build the command; it has no stable API.
 semver_check = false
 

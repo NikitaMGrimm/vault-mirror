@@ -44,15 +44,18 @@ jobs:
             tag="$GITHUB_REF_NAME"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      # The changelog is read from the default branch, which holds the notes
+      # of every released version; the version from the tag itself.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.tag.outputs.tag || github.sha }}
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
           persist-credentials: false
       - id: version
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          crate=$(git show "${TAG:-HEAD}:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -n1)
           if [[ -z "$TAG" ]]; then
             echo "version=$crate-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
             echo "publish=false" >> "$GITHUB_OUTPUT"
