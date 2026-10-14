@@ -30,25 +30,50 @@ impl Node {
         Self::Secret(value.into())
     }
 
+    /// Errors name the JSON pointer of the failing string within `value`.
     pub fn decrypt(value: &Value, key: &SymKey) -> Result<Self, CryptoError> {
-        Ok(match value {
-            Value::Null => Self::Null,
-            Value::Bool(b) => Self::Bool(*b),
-            Value::Number(n) => Self::Number(n.clone()),
-            Value::String(s) if looks_encrypted(s) => Self::Secret(key.decrypt_str(s)?),
-            Value::String(s) => Self::Text(s.clone()),
-            Value::Array(items) => Self::List(
-                items
-                    .iter()
-                    .map(|item| Self::decrypt(item, key))
-                    .collect::<Result<_, _>>()?,
-            ),
-            Value::Object(map) => Self::Map(
-                map.iter()
-                    .map(|(k, v)| Ok((k.clone(), Self::decrypt(v, key)?)))
-                    .collect::<Result<_, CryptoError>>()?,
-            ),
-        })
+        fn walk(value: &Value, key: &SymKey, path: &mut String) -> Result<Node, CryptoError> {
+            Ok(match value {
+                Value::Null => Node::Null,
+                Value::Bool(b) => Node::Bool(*b),
+                Value::Number(n) => Node::Number(n.clone()),
+                Value::String(s) if looks_encrypted(s) => {
+                    Node::Secret(key.decrypt_str(s).map_err(|error| match error {
+                        CryptoError::Malformed { .. } => {
+                            CryptoError::MalformedValue { path: path.clone() }
+                        }
+                        _ => CryptoError::DecryptValue { path: path.clone() },
+                    })?)
+                }
+                Value::String(s) => Node::Text(s.clone()),
+                Value::Array(items) => Node::List(
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            let length = path.len();
+                            path.push_str(&format!("/{index}"));
+                            let node = walk(item, key, path);
+                            path.truncate(length);
+                            node
+                        })
+                        .collect::<Result<_, _>>()?,
+                ),
+                Value::Object(map) => Node::Map(
+                    map.iter()
+                        .map(|(k, v)| {
+                            let length = path.len();
+                            path.push('/');
+                            path.push_str(&k.replace('~', "~0").replace('/', "~1"));
+                            let node = walk(v, key, path);
+                            path.truncate(length);
+                            Ok((k.clone(), node?))
+                        })
+                        .collect::<Result<_, CryptoError>>()?,
+                ),
+            })
+        }
+        walk(value, key, &mut String::new())
     }
 
     pub fn encrypt(&self, key: &SymKey) -> Result<Value, CryptoError> {
@@ -313,7 +338,60 @@ mod tests {
     #[test]
     fn a_value_that_looks_encrypted_but_does_not_decrypt_is_an_error() {
         let raw = json!({"name": SymKey::generate().encrypt_str("n").unwrap()});
-        assert!(Node::decrypt(&raw, &SymKey::generate()).is_err());
+        let error = Node::decrypt(&raw, &SymKey::generate()).unwrap_err();
+        assert_eq!(error.to_string(), "could not decrypt the value at /name");
+    }
+
+    #[test]
+    fn ciphertext_in_an_unsupported_format_is_an_error_not_text() {
+        let key = SymKey::generate();
+        let enc = key.encrypt_str("hunter2").unwrap();
+        // Type 1 is a legacy format that bitwarden-crypto does not read.
+        let unsupported = format!("1{}", &enc[1..]);
+        let raw = json!({
+            "name": enc,
+            "login": {"uris": [{"uri": unsupported, "match": 3}]},
+        });
+        let error = Node::decrypt(&raw, &key).unwrap_err();
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            "the encrypted value at /login/uris/0/uri is malformed or in an unsupported format"
+        );
+        assert!(!message.contains(&unsupported[2..10]));
+        assert_eq!(
+            Node::decrypt(&json!(unsupported), &key)
+                .unwrap_err()
+                .to_string(),
+            "the encrypted value is malformed or in an unsupported format"
+        );
+    }
+
+    #[test]
+    fn plain_values_that_servers_send_stay_text() {
+        let key = SymKey::generate();
+        let raw = json!({
+            "login": {
+                "passwordRevisionDate": "2026-01-02T03:04:05.1234567Z",
+                "uris": [{"uri": key.encrypt_str("u").unwrap(), "match": 0}],
+            },
+            "passwordHistory": [{"lastUsedDate": "2025-01-01T00:00:00Z"}],
+            "fido2Credentials": [{"creationDate": "2026-02-03T04:05:06.000Z"}],
+            "version": "2.5",
+            "reprompt": 0,
+            "favorite": true,
+            "notes": null,
+        });
+        let node = Node::decrypt(&raw, &key).unwrap();
+        assert_eq!(
+            node.plain_string_paths(),
+            [
+                "/fido2Credentials/0/creationDate",
+                "/login/passwordRevisionDate",
+                "/passwordHistory/0/lastUsedDate",
+                "/version",
+            ]
+        );
     }
 
     #[test]

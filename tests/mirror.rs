@@ -791,3 +791,54 @@ async fn many_new_items_are_imported_in_bulk() -> Result<()> {
     assert!(!run(&source, &dest, &options()).await?.changed);
     Ok(())
 }
+
+/// Ciphertext this tool cannot read is not plain text: copying it verbatim
+/// would put a value into the destination that no client can open, and the
+/// next run would report the copy as verified.
+#[tokio::test]
+async fn ciphertext_in_an_unsupported_format_stops_the_run() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    let enc = vault_mirror::crypto::SymKey::generate().encrypt_str("unreadable")?;
+    // Type 1 is a legacy format that bitwarden-crypto does not read.
+    let unsupported = format!("1{}", &enc[1..]);
+    let draft = Draft {
+        content: [
+            ("type".into(), Node::Number(2.into())),
+            ("name".into(), Node::secret("Unreadable note")),
+            (
+                "secureNote".into(),
+                Node::Map([("type".into(), Node::Number(0.into()))].into()),
+            ),
+            ("notes".into(), Node::Text(unsupported.clone())),
+        ]
+        .into(),
+        folder_id: None,
+        collection_ids: vec![],
+    };
+    let error = source.create_item(&PERSONAL, &draft).await.unwrap_err();
+    // Bitwarden's server validates encrypted strings and refuses the item.
+    // Vaultwarden stores it, and reading it back is what fails.
+    let refused = error
+        .downcast_ref::<vault_mirror::api::ApiError>()
+        .and_then(|error| error.status())
+        .is_some_and(|status| status.as_u16() == 400);
+    if refused {
+        return Ok(());
+    }
+    assert!(
+        format!("{error:#}").contains("unsupported format"),
+        "{error:#}"
+    );
+
+    let error = run(&source, &dest, &options()).await.unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("decrypting item"), "{message}");
+    assert!(message.contains("field notes"), "{message}");
+    assert!(message.contains("unsupported format"), "{message}");
+    assert!(!message.contains(&unsupported[2..12]), "{message}");
+    assert!(dest.load(&PERSONAL).await?.items.is_empty());
+    Ok(())
+}

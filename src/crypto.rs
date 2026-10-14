@@ -23,6 +23,21 @@ pub enum CryptoError {
     Encrypt { what: &'static str },
     #[error("malformed encrypted value for {what}")]
     Malformed { what: &'static str },
+    /// A string inside an item. `path` is a JSON pointer, never the value.
+    #[error(
+        "the encrypted value{} is malformed or in an unsupported format",
+        at(path)
+    )]
+    MalformedValue { path: String },
+    #[error("could not decrypt the value{}", at(path))]
+    DecryptValue { path: String },
+}
+
+fn at(path: &str) -> String {
+    match path {
+        "" => String::new(),
+        path => format!(" at {path}"),
+    }
 }
 
 type Result<T> = std::result::Result<T, CryptoError>;
@@ -86,21 +101,31 @@ impl KdfParams {
     }
 }
 
-/// Returns true when `value` is a well-formed Bitwarden encrypted string.
+/// Returns true when `value` has the shape of a Bitwarden encrypted string:
+/// a type number, a dot, and base64 parts separated by `|`.
 ///
 /// The vault model is decrypted without a schema, so this decides which JSON
 /// strings are ciphertext. Plain values the server stores next to ciphertext
-/// are ids, dates, numbers and booleans, none of which parse as one. A value
-/// that passes here and then fails to decrypt is an error, never plaintext.
+/// are ids, dates, numbers, booleans and short enum values, none of which
+/// have this shape. The check is deliberately looser than a parse: a value
+/// that passes here and then fails to parse or decrypt is an error, never
+/// plaintext, so a damaged or newer kind of ciphertext is not copied as text.
 pub fn looks_encrypted(value: &str) -> bool {
-    // Cheap reject before the full parse: "<digits>.<base64 parts>".
     let Some((kind, rest)) = value.split_once('.') else {
         return false;
     };
-    if kind.is_empty() || !kind.bytes().all(|b| b.is_ascii_digit()) || rest.len() < 16 {
-        return false;
-    }
-    EncString::parse_strict(value).is_ok()
+    let base64 = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    };
+    // The shortest real part is a 16-byte IV, 24 characters in base64.
+    (1..=2).contains(&kind.len())
+        && kind.bytes().all(|b| b.is_ascii_digit())
+        && rest.len() >= 24
+        && rest.split('|').all(base64)
+        && !rest.bytes().all(|b| b.is_ascii_digit() || b == b'|')
 }
 
 /// A symmetric vault key: a user key, organization key, item key or attachment key.
@@ -321,15 +346,43 @@ mod tests {
             "",
             "example.com",
             "2026-10-14T00:00:00.000000Z",
+            "2026-10-14T00:00:00Z",
             "1.5",
+            "2.5",
             "2.",
+            "true",
             "9a1c7c5e-0c1f-4a4b-9d39-0c1c2f7f7a10",
             "v2.local",
             "2.has space|x|y",
             "7.1234",
-            "2.AAAAAAAAAAAAAAAAAAAAAA==|AAAA",
+            "2.AAAAAAAAAAAAAAAAAAAA",
+            "3.14159265358979323846264338327950288",
+            "100.AAAAAAAAAAAAAAAAAAAAAA==|AAAAAAAAAAAAAAAAAAAAAA==",
+            "2.AAAAAAAAAAAAAAAAAAAAAA==||AAAA",
+            "2.AAAAAAAAAAAAAAAAAAAAAA==.AAAAAAAAAAAAAAAAAAAAAA==",
+            "2.public-key-AAAAAAAAAAAAAAAAAAAAAA",
         ] {
             assert!(!looks_encrypted(plain), "{plain}");
+        }
+    }
+
+    #[test]
+    fn ciphertext_that_cannot_be_read_still_looks_encrypted() {
+        let enc = SymKey::generate().encrypt_str("secret").unwrap();
+        let (_, body) = enc.split_once('.').unwrap();
+        for unreadable in [
+            // A type this tool does not support.
+            format!("1.{body}"),
+            format!("9.{body}"),
+            // A part missing, or truncated.
+            "2.AAAAAAAAAAAAAAAAAAAAAA==|AAAA".to_string(),
+            enc[..enc.len() - 8].to_string(),
+        ] {
+            assert!(looks_encrypted(&unreadable), "{unreadable}");
+            assert!(
+                EncString::parse_strict(&unreadable).is_err(),
+                "{unreadable}"
+            );
         }
     }
 
