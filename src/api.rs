@@ -490,6 +490,30 @@ fn error_message(body: &str) -> String {
                 .find_map(|key| value.get(key).and_then(Value::as_str))
         })
         .unwrap_or("no error message");
+    // Bitwarden's server answers invalid requests with a generic message and
+    // the reasons in a map from field to messages.
+    let reasons: Vec<String> = parsed
+        .as_ref()
+        .and_then(|value| value.get("validationErrors"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .flat_map(|(field, messages)| {
+            messages
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(move |message| match field.as_str() {
+                    "" => message.to_string(),
+                    field => format!("{field}: {message}"),
+                })
+        })
+        .collect();
+    let text = match reasons.is_empty() {
+        true => text.to_string(),
+        false => format!("{text} {}", reasons.join(" ")),
+    };
     let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().take(300).collect()
 }
@@ -603,6 +627,12 @@ mod tests {
         assert_eq!(
             error_message(r#"{"error":"invalid_client","error_description":"Bad\nkey"}"#),
             "Bad key"
+        );
+        assert_eq!(
+            error_message(
+                r#"{"message":"The model state is invalid.","validationErrors":{"Cipher.Name":["Too long."],"":["Needs a collection."]}}"#
+            ),
+            "The model state is invalid. Cipher.Name: Too long. Needs a collection."
         );
         assert_eq!(
             error_message("<html>secret dump</html>"),
