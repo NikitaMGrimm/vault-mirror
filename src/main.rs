@@ -159,7 +159,13 @@ static ENV_FILE: OnceLock<HashMap<String, String>> = OnceLock::new();
 /// The environment, over the settings read with `--env-file`.
 fn settings() -> HashMap<String, String> {
     let mut env = ENV_FILE.get().cloned().unwrap_or_default();
-    env.extend(std::env::vars());
+    // `std::env::vars` panics on a variable that is not UTF-8, even one that
+    // vault-mirror never reads. Such a variable cannot be a valid setting.
+    env.extend(
+        std::env::vars_os().filter_map(|(name, value)| {
+            Some((name.into_string().ok()?, value.into_string().ok()?))
+        }),
+    );
     env
 }
 

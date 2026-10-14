@@ -17,7 +17,7 @@ use crate::{
     config::{Config, VaultConfig},
     mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto},
     plan::{Safety, Summary},
-    store::{Keys, Store},
+    store::{self, Keys, Store},
     text::count,
     vault::{Account, Scope},
 };
@@ -146,21 +146,8 @@ pub fn device_id(backups_dir: &Path, role: &str) -> Result<String> {
     }
     let id = uuid::Uuid::new_v4().to_string();
     state.device_ids.insert(role.to_string(), id.clone());
-    write_atomically(&path, &serde_json::to_vec_pretty(&state)?)?;
+    store::write_private(&path, &serde_json::to_vec_pretty(&state)?)?;
     Ok(id)
-}
-
-fn write_atomically(path: &Path, data: &[u8]) -> Result<()> {
-    let directory = path
-        .parent()
-        .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
-    let mut temp = tempfile::Builder::new()
-        .prefix(".tmp-")
-        .tempfile_in(directory)?;
-    std::io::Write::write_all(&mut temp, data)?;
-    temp.persist(path)
-        .with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
 }
 
 /// Claims the backup directory for one run or restore; it is released when
@@ -381,7 +368,7 @@ fn write_status(backups_dir: &Path, status: &Status) -> Result<()> {
     fs::create_dir_all(backups_dir)?;
     let mut data = serde_json::to_vec_pretty(status)?;
     data.push(b'\n');
-    write_atomically(&status_path(backups_dir), &data)
+    store::write_private(&status_path(backups_dir), &data)
 }
 
 pub fn read_status(backups_dir: &Path) -> Result<Status> {
