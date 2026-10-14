@@ -5,7 +5,7 @@ reviewed for safety first and features second.
 
 ## Before you start
 
-- Questions and ideas go to
+- Questions, ideas and feature requests go to
   [Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions).
 - Bugs go to [Issues](https://github.com/NikitaMGrimm/vault-mirror/issues).
   Never paste secrets or vault content. vault-mirror's own logs contain
@@ -145,9 +145,8 @@ same pull request and give the reason.
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` with the sandbox running.
 - CI skips the build and tests when a change only touches Markdown files,
-  `docs/` or `assets/`. It runs the tests against Bitwarden's own server on
-  `main`, and for pull requests that change `sandbox/`. To run them for any
-  other branch, use `gh workflow run ci.yml --ref BRANCH`.
+  `docs/` or `assets/`. Otherwise it runs the tests against Vaultwarden and
+  against Bitwarden's own server.
 - Update the README or `docs/` when behaviour or configuration changes.
 - The maintainer turns on auto-merge after review. A pull request merges as
   soon as the required checks pass. Fix a problem found later in a new pull
