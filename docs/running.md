@@ -4,16 +4,18 @@
 
 ## Commands
 
+Use these commands to operate vault-mirror.
+
 | Command | Effect |
 | --- | --- |
-| `vault-mirror init [--dir DIR]` | vault-mirror asks for accounts and checks logins. vault-mirror writes `vault-mirror.env` and `compose.yaml`. vault-mirror shows the plan. |
-| `vault-mirror` or `vault-mirror run` | vault-mirror completes one run. Flags: `--dry-run`, `--allow-initial-overwrite`, `--allow-mass-delete`. |
-| `vault-mirror daemon` | vault-mirror runs on `SCHEDULE` or every `INTERVAL`. vault-mirror completes an active run before stopping on `SIGTERM`. |
-| `vault-mirror check` | vault-mirror checks logins, counts items, and prints the plan. vault-mirror can write local login device state. vault-mirror does not change vault data. |
-| `vault-mirror snapshots [--from dest]` | vault-mirror lists snapshots. |
-| `vault-mirror export --output DIR` | vault-mirror decrypts a snapshot and its attachments into `DIR`. |
-| `vault-mirror restore --to source\|dest` | vault-mirror writes a snapshot into the selected configured vault. |
-| `vault-mirror healthcheck [--max-age-hours 26]` | vault-mirror exits with a nonzero status unless the last run succeeded within the specified time. The image uses this command for health checks. |
+| `vault-mirror init [--dir DIR]` | `init` asks for accounts and checks logins. It writes `vault-mirror.env` and `compose.yaml`. It shows the plan. |
+| `vault-mirror` or `vault-mirror run` | The command completes one run. Flags: `--dry-run`, `--allow-initial-overwrite`, `--allow-mass-delete`. |
+| `vault-mirror daemon` | `daemon` runs on `SCHEDULE` or every `INTERVAL`. It completes an active run before stopping on `SIGTERM`. |
+| `vault-mirror check` | `check` checks logins, counts items, and prints the plan. It can write local login device state. It does not change vault data. |
+| `vault-mirror snapshots [--from dest]` | `snapshots` lists snapshots. |
+| `vault-mirror export --output DIR` | `export` decrypts a snapshot and its attachments into `DIR`. |
+| `vault-mirror restore --to source\|dest` | `restore` writes a snapshot into the selected configured vault. |
+| `vault-mirror healthcheck [--max-age-hours 26]` | `healthcheck` exits with a nonzero status unless the last run succeeded within the specified time. The image uses this command for health checks. |
 
 A dry run makes enabled backups and prints the plan.
 A dry run does not change the destination.
@@ -24,8 +26,10 @@ See [Settings file](configuration.md#settings-file).
 ## Output
 
 At a terminal, vault-mirror shows each stage on one line with a colored verb.
-vault-mirror shows a progress bar for long stages.
-Container logs and systemd output show a UTC timestamp and a level on each line:
+It shows a progress bar for long stages.
+
+Outside a terminal, each line has a UTC timestamp and a level.
+This includes container logs and systemd output:
 
 ```text
 2026-10-14T03:00:12Z INFO Created 9 items
@@ -40,7 +44,7 @@ Use the container's `daemon` command, as shown in the [quick start](../README.md
 Alternatively, configure your scheduler to start individual runs.
 
 One run or restore can use a backup directory at a time.
-vault-mirror rejects another run or restore while the directory lock remains active.
+The tool rejects another run or restore while the directory lock remains active.
 The rejected operation does not change vault data or backups.
 
 For systemd, use these service and timer settings:

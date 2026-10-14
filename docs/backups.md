@@ -3,7 +3,7 @@
 [← Documentation](README.md)
 
 With backups enabled, each run backs up both configured vaults before changing the destination.
-Without a destination, vault-mirror backs up only the source.
+Without a destination, it backs up only the source.
 
 ## Layout
 
@@ -23,25 +23,25 @@ backups/
 ```
 
 With `BACKUP_PASSPHRASE`, vault-mirror generates an age key on first use.
-vault-mirror stores this key in `key.age`, encrypted with your passphrase.
-With `BACKUP_RECIPIENTS`, vault-mirror encrypts directly to your public keys and does not create `key.age`.
+It stores the key only in `key.age`, encrypted with your passphrase.
+With `BACKUP_RECIPIENTS`, it encrypts directly to your public keys and does not create `key.age`.
 
 > [!WARNING]
 > Changing `BACKUP_PASSPHRASE` does not encrypt `key.age` with the new passphrase.
-> vault-mirror rejects a passphrase that cannot decrypt the existing key.
+> The tool rejects a passphrase that cannot decrypt the existing key.
 > Keep the old passphrase, or use a new backup directory.
 
 A snapshot contains a complete export of the vault's items outside the trash, including secrets.
-vault-mirror encrypts the whole snapshot.
-vault-mirror writes a new snapshot only when the vault changes.
+The tool encrypts the whole snapshot.
+It writes a new snapshot only when the vault differs from the newest snapshot.
 
-vault-mirror stores each attachment once per vault, regardless of snapshot count.
+It stores each attachment once per vault, regardless of snapshot count.
 Pruning deletes attachment files that no remaining snapshot needs.
-The source and destination have separate backups, so vault-mirror stores a copied attachment twice.
+The source and destination have separate backups, so each stores the copied attachment.
 
 ## Recovering without vault-mirror
 
-Recovery from passphrase-protected backups requires the standard [`age`](https://github.com/FiloSottile/age) tool and your passphrase.
+Recovery from passphrase-protected backups requires only the standard [`age`](https://github.com/FiloSottile/age) tool and your passphrase.
 
 > [!WARNING]
 > These commands write decrypted secrets to disk.
@@ -75,13 +75,13 @@ vault-mirror restore --to dest               # write the newest source snapshot 
 
 `export` requires an output directory that does not exist.
 `restore` writes into the configured source or destination.
+It recreates folders, collections, items, archive state, and stored attachments, subject to [server limitations](limitations.md).
 
 | Option | Effect |
 | --- | --- |
-| `--allow-non-empty` | vault-mirror adds snapshot items to existing items. Without this flag, vault-mirror refuses a vault with items outside the trash. |
-| `--from dest` | vault-mirror reads destination backups instead of source backups. |
-| `--snapshot NAME` | vault-mirror selects the snapshot name that `snapshots` lists. The default is the newest snapshot. |
-| `--identity PATH` | vault-mirror reads the age identity for `BACKUP_RECIPIENTS` backups. |
+| `--allow-non-empty` | `restore` adds snapshot items to existing items. Without this flag, it refuses a vault with items outside the trash. |
+| `--from dest` | `export` and `restore` read destination backups instead of source backups. |
+| `--snapshot NAME` | `export` and `restore` select the snapshot name that `snapshots` lists. The default is the newest snapshot. |
+| `--identity PATH` | `export` and `restore` read the age identity for `BACKUP_RECIPIENTS` backups. |
 
-`restore` recreates folders, collections, items, archive state, and stored attachments, subject to [server limitations](limitations.md).
 Restoring the same snapshot again with `--allow-non-empty` creates duplicate items.

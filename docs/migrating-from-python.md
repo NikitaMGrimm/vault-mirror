@@ -6,21 +6,22 @@ vault-mirror accepts the Python version's environment variable names.
 You can keep the settings file when replacing the image.
 
 The first run recognizes older `__source` markers in existing copies.
-vault-mirror updates matching copies and keeps their destination item ids.
-vault-mirror rewrites each marker in the new format.
+The tool updates matching copies in place and keeps their destination item ids.
+It rewrites each marker in the new format.
 
-vault-mirror copies attachments again because the Python version did not record attachment state.
+It copies attachments again because the Python version did not record attachment state.
 Later runs make no changes until the source changes or a copy differs.
 The usual [filters and safety checks](how-it-works.md#safety-checks) still apply.
 
 vault-mirror does not read or prune old `*.json.enc` backups.
-Decrypt these files with `openssl`, as before.
-Delete these files only when you no longer need them.
+
+1. Decrypt these files with `openssl`, as before.
+2. Delete these files only when you no longer need them.
 
 You can keep the same `BACKUPS_DIR`.
-vault-mirror writes new snapshots to `source/snapshots` and `dest/snapshots` inside that directory.
+New snapshots go to `source/snapshots` and `dest/snapshots` inside that directory.
 
-vault-mirror ignores `PUID` and `PGID`.
+`PUID` and `PGID` have no effect.
 The image runs as user 65532.
 Give user 65532 write access to the backup directory, or run the container as the directory owner.
 
