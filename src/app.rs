@@ -23,6 +23,7 @@ use crate::{
 
 pub const STATUS_FILE: &str = "last-run.json";
 const STATE_FILE: &str = "state.json";
+const LOCK_FILE: &str = "run.lock";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunFlags {
@@ -153,6 +154,32 @@ fn write_atomically(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Claims the backup directory for one run; it is released when the file is
+/// closed. Two runs at once could both prune and write the same snapshots and
+/// attachment files, and would both write `last-run.json`.
+fn lock_backups_dir(backups_dir: &Path) -> Result<fs::File> {
+    fs::create_dir_all(backups_dir)
+        .with_context(|| format!("creating {}", backups_dir.display()))?;
+    let path = backups_dir.join(LOCK_FILE);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(fs::TryLockError::WouldBlock) => Err(anyhow!(
+            "another vault-mirror run is using BACKUPS_DIR {}; try again when it has finished",
+            backups_dir.display()
+        )),
+        Err(fs::TryLockError::Error(error)) => {
+            Err(error).with_context(|| format!("locking {}", path.display()))
+        }
+    }
+}
+
 pub fn http_client(config: &Config) -> Result<reqwest::Client> {
     let mut options = ClientOptions {
         client_version: config.client_version.clone(),
@@ -207,7 +234,13 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
             ..Status::default()
         },
     };
-    let result = execute(config, flags, reporter, &mut progress, started).await;
+    let (lock, result) = match lock_backups_dir(&config.backups_dir) {
+        Ok(lock) => (
+            Some(lock),
+            execute(config, flags, reporter, &mut progress, started).await,
+        ),
+        Err(error) => (None, Err(error)),
+    };
 
     let finished = OffsetDateTime::now_utc();
     let mut status = progress.status;
@@ -226,9 +259,14 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
             status.error = Some(message.chars().take(1000).collect());
         }
     }
-    if let Err(error) = write_status(&config.backups_dir, &status) {
+    // A run turned away by the lock leaves the status file to the run that
+    // holds it.
+    if lock.is_some()
+        && let Err(error) = write_status(&config.backups_dir, &status)
+    {
         reporter.warn(&format!("Could not write the status file: {error:#}"));
     }
+    drop(lock);
     notify(config, &status, reporter).await;
     status
 }
@@ -465,6 +503,51 @@ mod tests {
         assert_eq!(device_id(dir.path(), "source").unwrap(), source);
         assert_eq!(device_id(dir.path(), "dest").unwrap(), dest);
         assert!(uuid::Uuid::parse_str(&source).is_ok());
+    }
+
+    struct Quiet;
+
+    impl Reporter for Quiet {
+        fn info(&self, _: &str) {}
+        fn warn(&self, _: &str) {}
+    }
+
+    #[tokio::test]
+    async fn a_run_is_turned_away_while_another_uses_the_backup_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let env: HashMap<String, String> = [
+            ("SOURCE_SERVER", "http://127.0.0.1:9"),
+            ("SOURCE_CLIENT_ID", "user.source"),
+            ("SOURCE_CLIENT_SECRET", "source-secret"),
+            ("SOURCE_PASSWORD", "source password"),
+            ("BACKUP_PASSPHRASE", "backup passphrase"),
+            ("BACKUPS_DIR", dir.path().to_str().unwrap()),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+        let config = Config::from_env(&env).unwrap();
+        let running = lock_backups_dir(dir.path()).unwrap();
+
+        let refused = run_once(&config, RunFlags::default(), &Quiet).await;
+        assert!(!refused.succeeded());
+        let error = refused.error.unwrap();
+        assert!(
+            error.contains("another vault-mirror run is using BACKUPS_DIR"),
+            "{error}"
+        );
+        // The status file is the running run's to write.
+        assert!(!status_path(dir.path()).exists());
+        assert!(!dir.path().join("key.age").exists());
+
+        drop(running);
+        lock_backups_dir(dir.path()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let lock = fs::metadata(dir.path().join(LOCK_FILE)).unwrap();
+            assert_eq!(lock.permissions().mode() & 0o777, 0o600);
+        }
     }
 
     #[test]

@@ -70,29 +70,11 @@ impl Keys {
             Protection::Passphrase(passphrase) => {
                 let path = backups.join(KEY_FILE);
                 let identity = if path.exists() {
-                    let armored =
-                        fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-                    let text = decrypt_with_passphrase(&armored, passphrase).with_context(|| {
-                        format!(
-                            "the backup passphrase does not open {}; it was created with a different one",
-                            path.display()
-                        )
-                    })?;
-                    parse_identity(&text)?
+                    read_key(&path, passphrase)?
                 } else {
-                    let identity = age::x25519::Identity::generate();
-                    let text = format!(
-                        "# vault-mirror backup key\n# public key: {}\n{}\n",
-                        identity.to_public(),
-                        identity.to_string().expose_secret()
-                    );
                     fs::create_dir_all(backups)
                         .with_context(|| format!("creating {}", backups.display()))?;
-                    write_private(
-                        &path,
-                        &encrypt_with_passphrase(text.as_bytes(), passphrase)?,
-                    )?;
-                    identity
+                    create_key(&path, passphrase)?
                 };
                 Ok(Self {
                     recipients: vec![identity.to_public()],
@@ -137,6 +119,37 @@ impl Keys {
             .read_to_end(&mut out)
             .context("the backup file is corrupt")?;
         Ok(out)
+    }
+}
+
+fn read_key(path: &Path, passphrase: &str) -> Result<age::x25519::Identity> {
+    let armored = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let text = decrypt_with_passphrase(&armored, passphrase).with_context(|| {
+        format!(
+            "the backup passphrase does not open {}; it was created with a different one",
+            path.display()
+        )
+    })?;
+    parse_identity(&text)
+}
+
+fn create_key(path: &Path, passphrase: &str) -> Result<age::x25519::Identity> {
+    let identity = age::x25519::Identity::generate();
+    let text = format!(
+        "# vault-mirror backup key\n# public key: {}\n{}\n",
+        identity.to_public(),
+        identity.to_string().expose_secret()
+    );
+    let encrypted = encrypt_with_passphrase(text.as_bytes(), passphrase)?;
+    match write_private_new(path, &encrypted) {
+        Ok(()) => Ok(identity),
+        // Another process created the key in the meantime. Replacing it would
+        // leave whatever that process encrypted to it unreadable, so its key
+        // is used instead.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_key(path, passphrase)
+        }
+        Err(error) => Err(error).with_context(|| format!("writing {}", path.display())),
     }
 }
 
@@ -198,6 +211,21 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     temp.as_file().sync_all()?;
     temp.persist(path)
         .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Like [`write_private`], but fails with `AlreadyExists` instead of
+/// replacing a file that is already there.
+fn write_private_new(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let directory = path.parent().ok_or_else(|| {
+        std::io::Error::other(format!("{} has no parent directory", path.display()))
+    })?;
+    let mut temp = tempfile::Builder::new()
+        .prefix(".tmp-")
+        .tempfile_in(directory)?;
+    temp.write_all(data)?;
+    temp.as_file().sync_all()?;
+    temp.persist_noclobber(path).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -545,6 +573,41 @@ mod tests {
         Keys::open(dir.path(), &passphrase("first")).unwrap();
         let error = Keys::open(dir.path(), &passphrase("second")).err().unwrap();
         assert!(format!("{error:#}").contains("different one"), "{error:#}");
+    }
+
+    #[test]
+    fn runs_creating_the_key_at_the_same_time_end_up_with_the_same_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = std::sync::Barrier::new(2);
+        let open = || {
+            start.wait();
+            Keys::open(dir.path(), &passphrase("p")).unwrap()
+        };
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(open);
+            let second = scope.spawn(open);
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        Store::open(dir.path(), "first", &first)
+            .unwrap()
+            .write_attachment("a", b"first")
+            .unwrap();
+        Store::open(dir.path(), "second", &second)
+            .unwrap()
+            .write_attachment("a", b"second")
+            .unwrap();
+
+        let kept = Keys::open(dir.path(), &passphrase("p")).unwrap();
+        for role in ["first", "second"] {
+            let store = Store::open(dir.path(), role, &kept).unwrap();
+            assert_eq!(store.read_attachment("a").unwrap(), role.as_bytes());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let key = fs::metadata(dir.path().join(KEY_FILE)).unwrap();
+            assert_eq!(key.permissions().mode() & 0o777, 0o600);
+        }
     }
 
     #[test]

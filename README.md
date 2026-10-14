@@ -276,6 +276,7 @@ also in an included one.
 backups/
 ├── key.age                         # backup key, encrypted with BACKUP_PASSPHRASE
 ├── last-run.json                   # result of the last run; no vault data
+├── run.lock                        # held while a run uses this directory
 ├── source/
 │   ├── snapshots/
 │   │   ├── vault-20261014T030000Z.json.age
@@ -348,7 +349,9 @@ destination.
 ## Scheduling
 
 Either let the container run `daemon`, as in the quick start, or have your
-scheduler start a single run. A systemd example:
+scheduler start a single run. Only one run at a time can use a backup
+directory: a run that starts while another is still going fails without
+touching the vaults or the backups. A systemd example:
 
 ```ini
 # /etc/systemd/system/vault-mirror.service

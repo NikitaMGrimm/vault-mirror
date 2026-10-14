@@ -30,6 +30,7 @@ themselves:
 | `*/snapshots/*.meta.json` | Creation time, item count, attachment ids, a salted fingerprint | None. No vault content |
 | `last-run.json` | Time, result and counts of the last run | None. No vault content |
 | `state.json` | The device id this installation logs in with | None |
+| `run.lock` | Nothing; locked while a run is in progress | None |
 
 All files are created readable by their owner only.
 
