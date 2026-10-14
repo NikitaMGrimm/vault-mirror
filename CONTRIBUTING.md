@@ -156,7 +156,8 @@ same pull request and give the reason.
 - Title the pull request as a [Conventional Commit](https://www.conventionalcommits.org),
   for example `fix: keep archive state on edit`. Pull requests are squashed,
   and the release notes are generated from these titles: `feat`, `fix` and
-  `perf` appear in them, other types do not.
+  `perf` appear in them, other types do not. A check holds every pull request
+  to this, including the maintainer's.
 
 ## Releases
 

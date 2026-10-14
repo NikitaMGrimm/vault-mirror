@@ -53,6 +53,11 @@ time = { version = "0.3.55", features = ["formatting", "parsing", "macros", "ser
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "signal", "sync", "process"] }
 uuid = { version = "1.28.0", features = ["v4"] }
 
+# The crate handles master passwords; everything unsafe stays in audited
+# dependencies.
+[lints.rust]
+unsafe_code = "forbid"
+
 # Key derivation and RSA key generation are unusably slow without
 # optimisation, and the test suite runs them constantly.
 [profile.dev.package."*"]
