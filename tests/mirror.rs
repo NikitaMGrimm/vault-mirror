@@ -463,3 +463,119 @@ async fn editing_an_archived_item_keeps_it_archived() -> Result<()> {
     assert!(!run(&source, &dest, &options()).await?.changed);
     Ok(())
 }
+
+/// Bank accounts, driver's licences and passports. Servers that do not know
+/// these types reject them; the test is skipped there.
+#[tokio::test]
+async fn newer_item_types_are_mirrored() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    if !source.hidden_item_types().await?.is_empty() {
+        eprintln!("skipping: the source server does not show these item types");
+        return Ok(());
+    }
+    let block = |entries: &[(&str, &str)]| {
+        Node::Map(
+            entries
+                .iter()
+                .map(|(key, value)| (key.to_string(), Node::secret(*value)))
+                .collect(),
+        )
+    };
+    let items = [
+        (
+            6,
+            "Bank account",
+            "bankAccount",
+            block(&[
+                ("bankName", "Sparkasse"),
+                ("nameOnAccount", "Erika Mustermann"),
+                ("accountType", "checking"),
+                ("iban", "DE02120300000000202051"),
+                ("swiftCode", "BYLADEM1001"),
+                ("pin", "1234"),
+            ]),
+        ),
+        (
+            7,
+            "Driver's licence",
+            "driversLicense",
+            block(&[
+                ("firstName", "Erika"),
+                ("lastName", "Mustermann"),
+                ("licenseNumber", "B072RRE2I55"),
+                ("issueDate", "2015-03-01"),
+                ("expirationDate", "2030-03-01"),
+            ]),
+        ),
+        (
+            8,
+            "Passport",
+            "passport",
+            block(&[
+                ("surname", "Mustermann"),
+                ("givenName", "Erika"),
+                ("passportNumber", "C01X00T47"),
+                ("dateOfBirth", "1964-08-12"),
+                ("expirationDate", "2031-10-31"),
+            ]),
+        ),
+    ];
+    let draft = |kind: u64, name: &str, key: &str, block: &Node| Draft {
+        content: [
+            ("type".to_string(), Node::Number(kind.into())),
+            ("name".to_string(), Node::secret(name)),
+            (key.to_string(), block.clone()),
+        ]
+        .into(),
+        folder_id: None,
+        collection_ids: vec![],
+    };
+    for (kind, name, key, block) in &items {
+        if let Err(error) = source
+            .create_item(&PERSONAL, &draft(*kind, name, key, block))
+            .await
+        {
+            eprintln!("skipping: the source server rejects item type {kind}: {error:#}");
+            return Ok(());
+        }
+        // The destination has to know the type as well.
+        match dest
+            .create_item(&PERSONAL, &draft(*kind, name, key, block))
+            .await
+        {
+            Ok(probe) => dest.delete_items(&[probe.id]).await?,
+            Err(error) => {
+                eprintln!("skipping: the destination server rejects item type {kind}: {error:#}");
+                return Ok(());
+            }
+        }
+    }
+
+    let first = run(&source, &dest, &options()).await?;
+    if dest.hidden_item_types().await?.is_empty() {
+        assert_eq!(first.summary.items_created, items.len());
+        let mirrored = dest.load(&PERSONAL).await?;
+        for (_, name, key, block) in &items {
+            // Servers fill in the fields that were left out as nulls.
+            assert_eq!(
+                by_name(&mirrored, name).content[*key].normalized(),
+                block.normalized(),
+                "{name}"
+            );
+        }
+    } else {
+        // A destination that would accept the items but never show them
+        // gets none, instead of a new invisible copy on every run.
+        assert_eq!(first.summary.items_created, 0);
+        assert!(
+            first.warnings.iter().any(|w| w.contains("left out")),
+            "{:?}",
+            first.warnings
+        );
+    }
+    assert!(!run(&source, &dest, &options()).await?.changed);
+    Ok(())
+}

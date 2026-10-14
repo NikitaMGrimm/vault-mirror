@@ -78,6 +78,8 @@ services:
       BW_ENABLE_NOTIFICATIONS: "false"
       # Attachment download links are built from this address.
       globalSettings__baseServiceUri__vault: "http://127.0.0.1:18085"
+      # Shows bank accounts, driver's licences and passports in syncs.
+      globalSettings__launchDarkly__flagValues__pm-32009-new-item-types: "true"
       # Attachments go to blob storage, as in Bitwarden's cloud. Azurite shares
       # this container's network, so 127.0.0.1:10000 reaches it both here and,
       # through the published port, from the tests. The key is Azurite's
