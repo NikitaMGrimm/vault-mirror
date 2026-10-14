@@ -770,6 +770,26 @@ mod tests {
     use super::*;
     use crate::vault::{Collection, Folder};
 
+    #[test]
+    fn only_a_refusal_counts_as_archiving_being_unsupported() {
+        let answered = |status: u16| {
+            anyhow::Error::new(ApiError::Status {
+                context: "archiving items".into(),
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                message: String::new(),
+                retry_after: None,
+            })
+            .context("setting archive state")
+        };
+        for status in [400, 402, 403, 404, 405, 501] {
+            assert!(refused(&answered(status)), "{status}");
+        }
+        for status in [401, 409, 429, 500, 502, 503] {
+            assert!(!refused(&answered(status)), "{status}");
+        }
+        assert!(!refused(&anyhow::anyhow!("connection reset")));
+    }
+
     fn item(id: &str, folder: Option<&str>, collections: &[&str]) -> Item {
         Item {
             id: id.into(),

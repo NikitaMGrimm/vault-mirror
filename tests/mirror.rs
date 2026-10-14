@@ -370,6 +370,82 @@ async fn swapped_source_and_destination_are_refused() -> Result<()> {
 }
 
 #[tokio::test]
+async fn one_vault_reached_through_two_addresses_is_refused() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let account = sandbox.register(&sandbox.source_url).await?;
+    let mut elsewhere = account.clone();
+    elsewhere.server = account.server.replace("127.0.0.1", "localhost");
+    assert_ne!(elsewhere.server, account.server);
+    let (source, dest) = (
+        sandbox.open(&account).await?,
+        sandbox.open(&elsewhere).await?,
+    );
+    seed(&source).await?;
+
+    let everything = MirrorOptions {
+        safety: Safety {
+            allow_initial_overwrite: true,
+            allow_mass_delete: true,
+            ..Safety::default()
+        },
+        ..options()
+    };
+    let error = run(&source, &dest, &everything).await.unwrap_err();
+    assert!(format!("{error:#}").contains("same items"), "{error:#}");
+    let vault = source.load(&PERSONAL).await?;
+    assert_eq!(vault.items.len(), fixtures::samples().len());
+    assert!(vault.items.iter().all(|item| marker_of(item).is_none()));
+    Ok(())
+}
+
+/// A marked item in the source is noticed even where a filter leaves it out.
+#[tokio::test]
+async fn a_filter_does_not_hide_markers_in_the_source() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    seed(&source).await?;
+    let hidden = source.create_folder("Hidden").await?;
+    let mut content = fixtures::samples().remove(2).content;
+    content.insert(
+        "fields".into(),
+        Node::List(vec![Node::Map(
+            [
+                ("name".to_string(), Node::secret(MARKER_FIELD)),
+                ("value".to_string(), Node::secret("copied from elsewhere")),
+                ("type".to_string(), Node::Number(1.into())),
+            ]
+            .into(),
+        )]),
+    );
+    source
+        .create_item(
+            &PERSONAL,
+            &Draft {
+                content,
+                folder_id: Some(hidden.id),
+                collection_ids: vec![],
+            },
+        )
+        .await?;
+
+    let filtered = MirrorOptions {
+        filter: Filter {
+            include: vec![],
+            exclude: vec!["Hidden".to_string()],
+        },
+        ..options()
+    };
+    let error = run(&source, &dest, &filtered).await.unwrap_err();
+    assert!(format!("{error:#}").contains("swapped"), "{error:#}");
+    assert!(dest.load(&PERSONAL).await?.items.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_emptied_source_does_not_empty_the_mirror() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
