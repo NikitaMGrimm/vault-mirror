@@ -313,7 +313,8 @@ impl Session {
             if let Some(body) = body {
                 request = request.json(body);
             }
-            let error = match send(request, &context).await {
+            let secrets = [self.credentials.client_secret.as_str(), token.as_str()];
+            let error = match send(request, &context, &secrets).await {
                 Ok(value) => return Ok(value),
                 Err(error) => error,
             };
@@ -367,7 +368,7 @@ impl Session {
         };
         let response = self.http.get(url).send().await.map_err(transport)?;
         if !response.status().is_success() {
-            return Err(status_error(context, response).await);
+            return Err(status_error(context, response, &self.secrets()).await);
         }
         Ok(response.bytes().await.map_err(transport)?.to_vec())
     }
@@ -384,9 +385,10 @@ impl Session {
         let request = self
             .http
             .post(format!("{}{}", self.urls.api, path))
-            .bearer_auth(token)
+            .bearer_auth(&token)
             .multipart(form);
-        expect_success(request, context).await
+        let secrets = [self.credentials.client_secret.as_str(), token.as_str()];
+        expect_success(request, context, &secrets).await
     }
 
     /// Uploads an encrypted attachment straight to Azure blob storage, which
@@ -410,7 +412,12 @@ impl Session {
         if let Some(version) = version {
             request = request.header("x-ms-version", version);
         }
-        expect_success(request.body(blob), context).await
+        expect_success(request.body(blob), context, &self.secrets()).await
+    }
+
+    /// What a server must not get to echo into an error message.
+    fn secrets(&self) -> [&str; 1] {
+        [self.credentials.client_secret.as_str()]
     }
 }
 
@@ -421,7 +428,11 @@ fn transport(context: &str, source: reqwest::Error) -> ApiError {
     }
 }
 
-async fn expect_success(request: reqwest::RequestBuilder, context: &str) -> Result<()> {
+async fn expect_success(
+    request: reqwest::RequestBuilder,
+    context: &str,
+    secrets: &[&str],
+) -> Result<()> {
     let response = request
         .send()
         .await
@@ -429,16 +440,18 @@ async fn expect_success(request: reqwest::RequestBuilder, context: &str) -> Resu
     if response.status().is_success() {
         return Ok(());
     }
-    Err(status_error(context, response).await)
+    Err(status_error(context, response, secrets).await)
 }
 
-async fn status_error(context: &str, response: reqwest::Response) -> ApiError {
+/// `secrets` are values sent with the request, removed from the server's
+/// message in case it repeats them.
+async fn status_error(context: &str, response: reqwest::Response, secrets: &[&str]) -> ApiError {
     let status = response.status();
     let retry_after = retry_after(response.headers(), std::time::SystemTime::now());
     ApiError::Status {
         context: context.to_string(),
         status,
-        message: error_message(&response.text().await.unwrap_or_default()),
+        message: error_message(&response.text().await.unwrap_or_default(), secrets),
         retry_after,
     }
 }
@@ -485,13 +498,13 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(500 * 2u64.pow(attempt.saturating_sub(1)).min(16))
 }
 
-async fn send(request: reqwest::RequestBuilder, context: &str) -> Result<Value> {
+async fn send(request: reqwest::RequestBuilder, context: &str, secrets: &[&str]) -> Result<Value> {
     let response = request.send().await.map_err(|source| ApiError::Transport {
         context: context.to_string(),
         cause: source,
     })?;
     if !response.status().is_success() {
-        return Err(status_error(context, response).await);
+        return Err(status_error(context, response, secrets).await);
     }
     let text = response
         .text()
@@ -511,7 +524,7 @@ async fn send(request: reqwest::RequestBuilder, context: &str) -> Result<Value> 
 
 /// Extracts the human-readable part of an error body without echoing
 /// arbitrary server output, which could include request data.
-fn error_message(body: &str) -> String {
+fn error_message(body: &str, secrets: &[&str]) -> String {
     let parsed: Option<Value> = serde_json::from_str(body).ok();
     let text = parsed
         .as_ref()
@@ -541,12 +554,42 @@ fn error_message(body: &str) -> String {
                 })
         })
         .collect();
-    let text = match reasons.is_empty() {
+    let mut text = match reasons.is_empty() {
         true => text.to_string(),
         false => format!("{text} {}", reasons.join(" ")),
     };
+    for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
+        text = text.replace(secret, "[redacted]");
+    }
+    let text = redact_urls(&text);
     let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().take(300).collect()
+}
+
+/// Replaces every http and https URL. Servers quote the URL of a failed
+/// request, and attachment URLs carry access tokens.
+fn redact_urls(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    while let Some(start) = ["http://", "https://"]
+        .iter()
+        .filter_map(|scheme| lower[done..].find(scheme))
+        .min()
+        .map(|offset| done + offset)
+    {
+        let rest = &text[start..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`'))
+            .unwrap_or(rest.len());
+        // Punctuation that ends the sentence is not part of the URL.
+        let url = rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+        out.push_str(&text[done..start]);
+        out.push_str("[URL]");
+        done = start + url.len();
+    }
+    out.push_str(&text[done..]);
+    out
 }
 
 type LoginKdf = Option<(u64, u64, Option<u64>, Option<u64>)>;
@@ -572,7 +615,7 @@ async fn request_token(
         let request = http
             .post(format!("{}/connect/token", urls.identity))
             .form(&form);
-        let error = match send(request, context).await {
+        let error = match send(request, context, &[&credentials.client_secret]).await {
             Ok(value) => break value,
             // A login request changes nothing, so every transient failure is retryable.
             Err(error) if error.transient() => error,
@@ -618,7 +661,7 @@ pub async fn prelogin(http: &reqwest::Client, urls: &ServerUrls, email: &str) ->
     let request = http
         .post(format!("{}/accounts/prelogin", urls.identity))
         .json(&json!({ "email": email }));
-    let value = send(request, "reading key derivation settings").await?;
+    let value = send(request, "reading key derivation settings", &[]).await?;
     Ok(login_kdf(&value))
 }
 
@@ -655,22 +698,48 @@ mod tests {
     #[test]
     fn error_messages_are_reduced_to_the_server_message() {
         assert_eq!(
-            error_message(r#"{"message":"Invalid  item","x":"secret"}"#),
+            error_message(r#"{"message":"Invalid  item","x":"secret"}"#, &[]),
             "Invalid item"
         );
         assert_eq!(
-            error_message(r#"{"error":"invalid_client","error_description":"Bad\nkey"}"#),
+            error_message(
+                r#"{"error":"invalid_client","error_description":"Bad\nkey"}"#,
+                &[]
+            ),
             "Bad key"
         );
         assert_eq!(
             error_message(
-                r#"{"message":"The model state is invalid.","validationErrors":{"Cipher.Name":["Too long."],"":["Needs a collection."]}}"#
+                r#"{"message":"The model state is invalid.","validationErrors":{"Cipher.Name":["Too long."],"":["Needs a collection."]}}"#,
+                &[]
             ),
             "The model state is invalid. Cipher.Name: Too long. Needs a collection."
         );
         assert_eq!(
-            error_message("<html>secret dump</html>"),
+            error_message("<html>secret dump</html>", &[]),
             "no error message"
+        );
+    }
+
+    #[test]
+    fn error_messages_leave_out_urls() {
+        let body = r#"{"message":"Blob https://store.example/att/1?sv=2024&sig=TOKEN%3D not found.","validationErrors":{"Url":["Use HTTP://a.example/x?token=T (or 'https://b.example')."]}}"#;
+        assert_eq!(
+            error_message(body, &[]),
+            "Blob [URL] not found. Url: Use [URL] (or '[URL]')."
+        );
+        assert_eq!(
+            error_message(r#"{"message":"see https://"}"#, &[]),
+            "see [URL]"
+        );
+    }
+
+    #[test]
+    fn error_messages_leave_out_what_was_sent() {
+        let body = r#"{"error":"invalid_client","error_description":"Unknown secret Sx9-k2 for user.1 (Sx9-k2)"}"#;
+        assert_eq!(
+            error_message(body, &["Sx9-k2", ""]),
+            "Unknown secret [redacted] for user.1 ([redacted])"
         );
     }
 
