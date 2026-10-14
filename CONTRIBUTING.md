@@ -5,12 +5,12 @@ reviewed for safety first and features second.
 
 ## Before you start
 
-- **Questions and ideas** go to
+- Questions and ideas go to
   [Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions).
-- **Bugs** go to [Issues](https://github.com/NikitaMGrimm/vault-mirror/issues).
+- Bugs go to [Issues](https://github.com/NikitaMGrimm/vault-mirror/issues).
   Never paste secrets or vault content. vault-mirror's own logs contain
   neither, but check anything else you paste.
-- **Security problems** are reported privately; see [SECURITY.md](SECURITY.md).
+- Security problems are reported privately; see [SECURITY.md](SECURITY.md).
 
 Small pull requests are welcome without asking first: typo and documentation
 fixes, and bug fixes with a test. Anything substantial needs the maintainer's
