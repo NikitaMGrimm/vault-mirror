@@ -256,9 +256,11 @@ impl Config {
             ));
         }
 
-        let max_delete_percent: u32 =
-            env.parse("MAX_DELETE_PERCENT", Safety::default().max_delete_percent)?;
-        if max_delete_percent > 100 {
+        let max_delete_percent: Option<u32> = env
+            .get("MAX_DELETE_PERCENT")
+            .map(|_| env.parse("MAX_DELETE_PERCENT", 0))
+            .transpose()?;
+        if max_delete_percent.is_some_and(|percent| percent > 100) {
             return Err(ConfigError(
                 "MAX_DELETE_PERCENT must be between 0 and 100".into(),
             ));
@@ -582,7 +584,7 @@ mod tests {
         .unwrap();
         let backup = config.backup.unwrap();
         assert!(backup.retention.is_none() && !backup.attachments);
-        assert_eq!(config.safety.max_delete_percent, 20);
+        assert_eq!(config.safety.max_delete_percent, Some(20));
         assert_eq!(config.concurrency, 8);
         assert!(!config.verify_attachments);
 

@@ -909,13 +909,54 @@ fn a_stray_item_in_an_established_mirror_is_removed_without_confirmation() {
 }
 
 #[test]
-fn deleting_most_of_the_mirror_is_refused() {
+fn deleting_every_earlier_copy_is_refused() {
     let dest = mirrored(&numbered(40), Mode::Personal);
+    let confirmed = Safety {
+        allow_mass_delete: true,
+        ..Safety::default()
+    };
 
-    // The source suddenly looks almost empty, as after a failed or partial read.
-    let shrunk = plan(&numbered(5), &dest, Mode::Personal);
+    // The source reads as empty.
+    let emptied = plan(&numbered(0), &dest, Mode::Personal);
     assert_eq!(
-        check_safety(&shrunk, &Safety::default()),
+        check_safety(&emptied, &Safety::default()),
+        Err(SafetyViolation::ReplacesEverything(40))
+    );
+    assert_eq!(check_safety(&emptied, &confirmed), Ok(()));
+
+    // The source is another vault: everything would be replaced.
+    let other = vault(
+        (0..40)
+            .map(|i| login(&format!("other{i}"), &format!("Item {i}"), "pw"))
+            .collect(),
+    );
+    assert_eq!(
+        check_safety(&plan(&other, &dest, Mode::Personal), &Safety::default()),
+        Err(SafetyViolation::ReplacesEverything(40))
+    );
+
+    // Deleting most items, but not all, is an ordinary change.
+    assert_eq!(
+        check_safety(
+            &plan(&numbered(1), &dest, Mode::Personal),
+            &Safety::default()
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn a_delete_limit_applies_only_when_set() {
+    let dest = mirrored(&numbered(40), Mode::Personal);
+    let limited = Safety {
+        max_delete_percent: Some(50),
+        ..Safety::default()
+    };
+
+    let shrunk = plan(&numbered(5), &dest, Mode::Personal);
+    assert_eq!(check_safety(&shrunk, &Safety::default()), Ok(()));
+    assert_eq!(
+        check_safety(&shrunk, &limited),
         Err(SafetyViolation::MassDelete {
             deleting: 35,
             total: 40,
@@ -925,43 +966,26 @@ fn deleting_most_of_the_mirror_is_refused() {
     );
     let confirmed = Safety {
         allow_mass_delete: true,
-        ..Safety::default()
+        ..limited.clone()
     };
     assert_eq!(check_safety(&shrunk, &confirmed), Ok(()));
 
     // Just over half is refused, although it rounds down to the limit.
     let large = mirrored(&numbered(200), Mode::Personal);
     assert!(matches!(
-        check_safety(
-            &plan(&numbered(99), &large, Mode::Personal),
-            &Safety::default()
-        ),
+        check_safety(&plan(&numbered(99), &large, Mode::Personal), &limited),
         Err(SafetyViolation::MassDelete { deleting: 101, .. })
     ));
 
-    // Half is still allowed, and so is anything at or below the floor.
+    // Half is allowed, and so is anything at or below the floor.
     assert_eq!(
-        check_safety(
-            &plan(&numbered(20), &dest, Mode::Personal),
-            &Safety::default()
-        ),
+        check_safety(&plan(&numbered(20), &dest, Mode::Personal), &limited),
         Ok(())
     );
-    let small = mirrored(&numbered(10), Mode::Personal);
+    let small = mirrored(&numbered(12), Mode::Personal);
     assert_eq!(
-        check_safety(
-            &plan(&numbered(0), &small, Mode::Personal),
-            &Safety::default()
-        ),
+        check_safety(&plan(&numbered(2), &small, Mode::Personal), &limited),
         Ok(())
-    );
-    let eleven = mirrored(&numbered(11), Mode::Personal);
-    assert!(
-        check_safety(
-            &plan(&numbered(0), &eleven, Mode::Personal),
-            &Safety::default()
-        )
-        .is_err()
     );
 }
 
