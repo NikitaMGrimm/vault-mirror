@@ -4,6 +4,12 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.5.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.4.0...v0.5.0) - 2026-10-15
+
+### Added
+
+- [**breaking**] a marker that tells which side changed, and switching source and destination ([#34](https://github.com/NikitaMGrimm/vault-mirror/pull/34))
+
 ## [0.4.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.3.0...v0.4.0) - 2026-10-15
 
 ### Changed
