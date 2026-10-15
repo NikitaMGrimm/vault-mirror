@@ -457,27 +457,40 @@ impl<'a> Store<'a> {
         let snapshots = self.list()?;
         let cutoff = now - Duration::days(i64::from(retention.days));
         let recent = now - Duration::days(1);
-        let keep_from = snapshots
-            .len()
-            .saturating_sub(retention.keep_at_least.max(1));
         // One directory holds several vaults once the settings name another
-        // account or organization, so each vault is thinned on its own. A
-        // snapshot of an unknown vault is kept for the whole retention.
-        let vault_of = |snapshot: &SnapshotInfo| {
-            let vault = snapshot.meta.as_ref()?.vault.clone()?;
-            Some((vault, snapshot.created.date()))
-        };
+        // account or organization, so each vault keeps its own newest
+        // snapshots and is thinned on its own. Snapshots from before 0.4 name
+        // no vault and aren't thinned. They keep their newest ones only until
+        // a snapshot names its vault, and then age out.
+        let vault_of = |snapshot: &SnapshotInfo| snapshot.meta.as_ref()?.vault.clone();
+        let any_named = snapshots
+            .iter()
+            .any(|snapshot| vault_of(snapshot).is_some());
+        let mut newest = BTreeSet::new();
+        let mut seen: BTreeMap<Option<String>, usize> = BTreeMap::new();
+        for (index, snapshot) in snapshots.iter().enumerate().rev() {
+            let vault = vault_of(snapshot);
+            let protected = vault.is_some() || !any_named;
+            let seen = seen.entry(vault).or_default();
+            if protected && *seen < retention.keep_at_least.max(1) {
+                newest.insert(index);
+            }
+            *seen += 1;
+        }
         let newest_of_day: BTreeMap<(String, time::Date), usize> = snapshots
             .iter()
             .enumerate()
-            .filter_map(|(index, snapshot)| Some((vault_of(snapshot)?, index)))
+            .filter_map(|(index, snapshot)| {
+                Some(((vault_of(snapshot)?, snapshot.created.date()), index))
+            })
             .collect();
         let mut kept = Vec::new();
         for (index, snapshot) in snapshots.into_iter().enumerate() {
-            let thinned =
-                vault_of(&snapshot).is_some_and(|day| newest_of_day.get(&day) != Some(&index));
+            let thinned = vault_of(&snapshot).is_some_and(|vault| {
+                newest_of_day.get(&(vault, snapshot.created.date())) != Some(&index)
+            });
             let in_retention = snapshot.created >= cutoff && !thinned;
-            if index >= keep_from || snapshot.created >= recent || in_retention {
+            if newest.contains(&index) || snapshot.created >= recent || in_retention {
                 kept.push(snapshot);
                 continue;
             }
@@ -853,6 +866,66 @@ mod tests {
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0], personal);
         assert!(foreign.exists());
+    }
+
+    #[test]
+    fn each_vault_keeps_its_newest_snapshots_past_the_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), &passphrase("p")).unwrap();
+        let store = Store::open(dir.path(), "source", &keys).unwrap();
+        let now = datetime!(2026-10-15 12:00:00 UTC);
+        let personal = store
+            .write_snapshot(
+                "user",
+                document("mine"),
+                vec![],
+                now - Duration::days(31),
+                stamp,
+            )
+            .unwrap()
+            .unwrap();
+        for hour in 1..=10 {
+            let at = now - Duration::hours(hour);
+            store
+                .write_snapshot("org", document(&hour.to_string()), vec![], at, stamp)
+                .unwrap();
+        }
+        let retention = Retention {
+            days: 30,
+            keep_at_least: 1,
+        };
+        store.prune(&retention, now).unwrap();
+        assert!(personal.exists());
+    }
+
+    #[test]
+    fn snapshots_without_a_vault_age_out_once_one_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), &passphrase("p")).unwrap();
+        let store = Store::open(dir.path(), "source", &keys).unwrap();
+        let now = datetime!(2026-10-15 12:00:00 UTC);
+        let old = now - Duration::days(40);
+        let legacy = store
+            .write_snapshot("user", document("old"), vec![], old, stamp)
+            .unwrap()
+            .unwrap();
+        let meta = meta_path(&legacy);
+        let mut written: Meta = serde_json::from_slice(&fs::read(&meta).unwrap()).unwrap();
+        written.vault = None;
+        fs::write(&meta, serde_json::to_vec(&written).unwrap()).unwrap();
+        let retention = Retention {
+            days: 30,
+            keep_at_least: 1,
+        };
+
+        // Alone, it is the newest snapshot and stays.
+        store.prune(&retention, now).unwrap();
+        assert!(legacy.exists());
+        store
+            .write_snapshot("user", document("new"), vec![], now, stamp)
+            .unwrap();
+        store.prune(&retention, now).unwrap();
+        assert!(!legacy.exists());
     }
 
     #[test]
