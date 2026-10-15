@@ -12,6 +12,8 @@ up a mirror from scratch and explains each step.
   to get data back out, with or without vault-mirror.
 - [Commands and scheduling](running.md): every command, output, and systemd.
 - [Limitations](limitations.md): what isn't copied, and server restrictions.
+- [Questions](questions.md): short answers to what people ask first, such as
+  whether the source is changed and whether backups pile up.
 
 Can't find something? Ask in
 [Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions).

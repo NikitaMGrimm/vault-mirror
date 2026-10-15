@@ -114,6 +114,7 @@ xattr -d com.apple.quarantine vault-mirror
 - [Backups and restoring](docs/backups.md)
 - [Commands and scheduling](docs/running.md)
 - [Limitations](docs/limitations.md)
+- [Questions](docs/questions.md): does it change the source, do backups pile up, and more.
 - [Security](SECURITY.md): what vault-mirror can access and what it stores.
 
 ## Getting help
