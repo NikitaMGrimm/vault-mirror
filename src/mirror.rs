@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     api::ApiError,
-    plan::{self, Mode, Plan, Safety, SafetyViolation, Summary, comparable, differing_paths},
+    plan::{self, Mode, Plan, Safety, Summary, comparable, differing_paths},
     text::count,
     vault::{Account, Item, Scope, Vault},
 };
@@ -370,12 +370,6 @@ impl Run<'_> {
         }
 
         self.stage = "planning";
-        // Checked on the whole source, before a filter can hide a marked item.
-        let markers = plan::source_marker_count(&source_vault);
-        if markers > 0 {
-            return Err(SafetyViolation::SourceLooksLikeMirror(markers).into());
-        }
-
         let mut source_vault = source_vault;
         self.filter(&mut source_vault, mode);
         // Without these, items the destination hides could be created again
@@ -418,11 +412,26 @@ impl Run<'_> {
         self.summary = Some(summary);
         let (verb, plan_text) = describe_plan(&summary, self.options.dry_run);
         self.reporter.status(verb, &plan_text);
-        if plan.tracked_before == 0 && plan.untracked > 0 {
+        if plan.reversed > 0 && plan.untracked > 0 {
+            self.warn(format!(
+                "The destination has {} that no source item was copied from. Runs leave them as \
+                 they are, so if you deleted them in the source, delete them here too.",
+                count(plan.untracked, "item")
+            ));
+        } else if plan.tracked_before == 0 && plan.untracked > 0 {
             self.warn(format!(
                 "The destination has {} that vault-mirror didn't make. Runs leave them as they \
                  are, so if they are older copies of the source, delete them to avoid duplicates.",
                 count(plan.untracked, "item")
+            ));
+        }
+        if plan.detached > 0 {
+            self.warn(format!(
+                "The destination has {} with the vault-mirror field of another copy, changed \
+                 since, such as a cloned copy. Runs leave {them} alone but delete {them} with \
+                 the source item. To keep {them} for good, remove the vault-mirror field.",
+                count(plan.detached, "item"),
+                them = if plan.detached == 1 { "it" } else { "them" },
             ));
         }
         let changed = plan.updates.iter().filter(|u| u.changed_in_dest).count();

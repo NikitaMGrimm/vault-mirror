@@ -48,6 +48,9 @@ struct RunArgs {
     /// Let this run delete every earlier copy, or more than MAX_DELETE_PERCENT.
     #[arg(long)]
     allow_mass_delete: bool,
+    /// Let this run take over copies made the other way round, after you switched the source and destination.
+    #[arg(long)]
+    reverse: bool,
 }
 
 #[derive(Subcommand)]
@@ -211,6 +214,7 @@ fn flags(args: RunArgs) -> RunFlags {
     RunFlags {
         dry_run: args.dry_run,
         allow_mass_delete: args.allow_mass_delete,
+        reverse: args.reverse,
     }
 }
 

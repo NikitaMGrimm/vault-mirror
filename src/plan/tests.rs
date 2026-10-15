@@ -227,7 +227,10 @@ fn the_marker_is_the_last_field_and_names_the_source_item() {
     assert_eq!(fields[1].as_map().unwrap()["type"], Node::Number(1.into()));
     let marker = marker_of(&dest.items[0]).unwrap();
     assert_eq!(marker.source_id, "s1");
-    assert_eq!(marker.attachments_hash, "-");
+    assert_eq!(
+        (marker.source_files.as_str(), marker.dest_files.as_str()),
+        ("-", "-")
+    );
 }
 
 #[test]
@@ -356,23 +359,6 @@ fn a_field_that_only_looks_like_a_marker_is_not_trusted() {
     assert_eq!(marker_of(&dest.items[0]), None);
     let plan = plan(&source, &dest, Mode::Personal);
     assert_eq!((plan.untracked, plan.deletes.len()), (1, 0));
-}
-
-#[test]
-fn any_source_field_named_like_the_marker_counts_as_a_marker() {
-    let mut source = vault(vec![login("s1", "One", "pw1")]);
-    let Some(Node::List(fields)) = source.items[0].content.get_mut("fields") else {
-        panic!()
-    };
-    fields.push(map(vec![
-        ("name", text(MARKER_FIELD)),
-        ("value", text("anything")),
-    ]));
-    assert_eq!(source_marker_count(&source), 1);
-    assert_eq!(
-        plan(&source, &vault(vec![]), Mode::Personal).source_markers,
-        1
-    );
 }
 
 #[test]
@@ -783,23 +769,77 @@ fn numbered(count: usize) -> Vault {
 }
 
 #[test]
-fn a_source_that_carries_markers_is_refused() {
-    let original = numbered(3);
+fn switching_source_and_destination_takes_over_the_copies() {
+    let mut original = numbered(3);
     let mirror = mirrored(&original, Mode::Personal);
-    // Source and destination swapped: the mirror is now the source.
+    // Changed in the old source after its last run, then the roles switch.
+    original.items[0]
+        .content
+        .insert("notes".into(), text("late edit"));
     let plan = plan(&mirror, &original, Mode::Personal);
+    assert_eq!(plan.reversed, 3);
+    assert_eq!((plan.creates.len(), plan.deletes.len()), (0, 0));
     assert_eq!(
         check_safety(&plan, &Safety::default()),
-        Err(SafetyViolation::SourceLooksLikeMirror(3))
+        Err(SafetyViolation::Reversed(3))
     );
-    let lenient = Safety {
-        allow_mass_delete: true,
+    let reverse = Safety {
+        allow_reverse: true,
         ..Safety::default()
     };
-    assert!(
-        check_safety(&plan, &lenient).is_err(),
-        "no flag overrides a swapped configuration"
-    );
+    assert_eq!(check_safety(&plan, &reverse), Ok(()));
+    let changed: Vec<bool> = plan.updates.iter().map(|u| u.changed_in_dest).collect();
+    assert_eq!(changed, [true, false, false]);
+
+    let original = apply(&mirror, &original, Mode::Personal);
+    assert_converged(&mirror, &original, Mode::Personal);
+    let again = super::plan(&mirror, &original, Mode::Personal);
+    assert_eq!(check_safety(&again, &Safety::default()), Ok(()));
+
+    // And back: each item still has one marker, and nothing is duplicated.
+    let back = super::plan(&original, &mirror, Mode::Personal);
+    assert_eq!(back.reversed, 0);
+    assert_eq!(check_safety(&back, &Safety::default()), Ok(()));
+    assert!(!back.has_changes());
+    for item in original.items.iter().chain(&mirror.items) {
+        let markers = item.fields().iter().filter(|f| is_marker_field(f)).count();
+        assert_eq!(markers, 1, "{}", item.id);
+    }
+}
+
+#[test]
+fn an_edited_clone_of_a_copy_is_left_alone() {
+    let source = numbered(1);
+    let mut dest = mirrored(&source, Mode::Personal);
+    let mut clone = dest.items[0].clone();
+    clone.id = "clone".into();
+    clone.content.insert("notes".into(), text("my variant"));
+    // Listed first, so only its edit tells it apart from the copy.
+    dest.items.insert(0, clone);
+
+    let plan = plan(&source, &dest, Mode::Personal);
+    assert_eq!(plan.detached, 1);
+    assert!(plan.deletes.is_empty() && plan.updates.is_empty());
+    assert_eq!(plan.unchanged, 1);
+}
+
+#[test]
+fn an_attachment_added_to_a_copy_counts_as_a_change_in_the_destination() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let mut dest = mirrored(&source, Mode::Personal);
+    dest.items[0]
+        .attachments
+        .push(attachment("extra", "mine.txt", 5));
+
+    let update = &plan(&source, &dest, Mode::Personal).updates[0];
+    assert!(update.sync_attachments && update.changed_in_dest);
+    // A source change alone is not one.
+    let mut dest = mirrored(&source, Mode::Personal);
+    source.items[0].attachments = vec![attachment("a2", "scan.pdf", 120)];
+    dest.items[0].revision_date = None;
+    let update = &plan(&source, &dest, Mode::Personal).updates[0];
+    assert!(update.sync_attachments && !update.changed_in_dest);
 }
 
 #[test]

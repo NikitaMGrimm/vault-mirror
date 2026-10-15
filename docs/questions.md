@@ -23,6 +23,11 @@ no right answer, and a mistake on either side would spread to the other. Make
 your changes in the source, and use the destination to read from when the
 source is unavailable.
 
+You can switch which vault is the source, for example to move back to a server
+after using the other one for a while. vault-mirror then updates the items
+that already exist instead of copying everything again. See [Switching the
+source and destination](how-it-works.md#switching-the-source-and-destination).
+
 ## What happens when I delete an item in the source?
 
 The next run deletes its copy. The copy is still in the destination backup from

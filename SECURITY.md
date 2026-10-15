@@ -63,9 +63,10 @@ with URLs and the credentials that were sent removed.
 
 ## The marker on each copy
 
-Every copy carries a marker: a custom field called `__source`, of Bitwarden's
-**Hidden** type, so apps show it masked until you reveal it. It holds the source
-item's id and hashes of the item's content and attachments.
+Every copy carries a marker: a custom field called `vault-mirror`, of
+Bitwarden's **Hidden** type, so apps show it masked until you reveal it. It
+holds the source item's id and hashes of the item's content and of both items'
+attachments.
 
 The marker is encrypted with the destination's keys like any other field, so
 only people who can open the destination can read it. What it adds to what they

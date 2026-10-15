@@ -102,7 +102,7 @@ A first run prints:
 ```
 
 Your items are now in the destination. Each copy has an extra hidden field,
-`__source`, which links it to its source item. Leave that field in place.
+`vault-mirror`, which links it to its source item. Leave that field in place.
 
 [How it works](how-it-works.md) explains each step of a run.
 
@@ -143,7 +143,7 @@ The error names the reason and, if there is one, the flag that allows the run.
 | Error | Likely cause | If you're sure |
 | --- | --- | --- |
 | The run would delete every item it mirrored before | The source looks empty or like another vault. | `run --allow-mass-delete` |
-| The source has items with a `__source` marker | The source and destination are swapped. | Fix the settings. |
+| Items in the source are copies of destination items | The source and destination are swapped. | Fix the settings, or `run --reverse` if you switched them on purpose. |
 
 A flag applies to one run. For example:
 

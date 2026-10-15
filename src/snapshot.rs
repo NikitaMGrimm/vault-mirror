@@ -314,7 +314,7 @@ mod tests {
                         ("name".to_string(), Node::secret(MARKER_FIELD)),
                         (
                             "value".to_string(),
-                            Node::secret(format!("source-id {} -", "ab".repeat(32))),
+                            Node::secret(format!("source-id {} - -", "ab".repeat(32))),
                         ),
                         ("type".to_string(), Node::Number(1.into())),
                     ])),

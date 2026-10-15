@@ -47,11 +47,12 @@ state.
 ## How copies are recognized
 
 Each item vault-mirror creates in the destination is a **copy**. Each copy has a
-**marker**: a hidden custom field called `__source`. It holds:
+**marker**: a hidden custom field called `vault-mirror`. It holds:
 
 - the id of the source item,
-- a hash of the item's content,
-- a hash of its attachments.
+- a hash of the item's content when vault-mirror last wrote it,
+- a hash of the source item's attachments when they were copied,
+- a hash of the copy's attachments as vault-mirror left them.
 
 The marker holds no secrets. It lets the next run update a copy in place instead
 of deleting and recreating it.
@@ -62,13 +63,32 @@ destination, and anything you add there while the source is unreachable stays.
 
 vault-mirror also compares the content itself, so:
 
-- if you edit a copy, the next run puts the source version back and warns you;
-  with backups on, your edit is in that run's destination backup. An
-  attachment you add to a copy, or archiving it, is undone the same way but
-  without the warning: the marker can't tell whether that change came from
-  the source or the destination;
+- if you edit a copy or its attachments, the next run puts the source version
+  back and warns you; with backups on, your edit is in that run's destination
+  backup. Archiving a copy is undone too, without a warning, because servers
+  that can't archive would otherwise warn on every run;
 - if you delete a copy's marker, the item is no longer a copy, and the next run
-  makes a new one next to it.
+  makes a new one next to it;
+- if you clone a copy and change the clone, runs leave the clone alone and warn
+  that it still has the marker. Remove the `vault-mirror` field from it to keep
+  it for good; otherwise it is deleted with its source item.
+
+### Switching the source and destination
+
+To make the destination your main vault, swap the `SOURCE_` and `DEST_`
+settings. The new source's items are copies, and their markers name the items
+they came from, so vault-mirror can update those items in place instead of
+making new ones. The first run after the swap stops, because swapped settings
+are usually a mistake. If you meant it, run once with `--reverse`:
+
+```sh
+docker compose run --rm vault-mirror run --reverse
+```
+
+Changes made in the new destination since its last run as the source are
+replaced, with a warning, and are in that run's backup. Items you deleted in the
+new source stay in the new destination, with a warning, because nothing marks
+them as copies. After that, either direction runs without `--reverse`.
 
 ## Safety checks
 
@@ -77,7 +97,7 @@ run stops and the destination stays as it was.
 
 | The run stops when | Likely cause | To go ahead anyway |
 | --- | --- | --- |
-| Source items have a `__source` field | Source and destination are swapped. | Fix the settings. |
+| Items in the source are copies of destination items | Source and destination are swapped. | Fix the settings, or `run --reverse` if you [switched them on purpose](#switching-the-source-and-destination). |
 | Source and destination are the same vault | A settings mistake. | Fix the settings. |
 | The run would delete every copy | The source is empty, the wrong account, or filtered to nothing. | `run --allow-mass-delete` |
 | The run would delete more than `MAX_DELETE_PERCENT` of the copies | You set a limit. | `run --allow-mass-delete` |
