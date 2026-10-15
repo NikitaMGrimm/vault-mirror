@@ -2,8 +2,8 @@
 or size:L.
 
 Only lines that change what vault-mirror does count: documentation, tests
-(including `#[cfg(test)]` modules at the end of a source file), the
-changelog and the lockfile don't. Whitespace-only changes don't count either.
+(including `#[cfg(test)]` modules inside a source file), the changelog and
+the lockfile don't. Whitespace-only changes and moves don't count either.
 
 Usage: pr_size.py BASE HEAD
 """
@@ -20,6 +20,7 @@ IGNORED = re.compile(
     r"(\.md$|^docs/|^assets/|^tests/|/tests\.rs$|^Cargo\.lock$|^LICENSE$)"
 )
 HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+TEST_MODULE = re.compile(r"^(pub(\(\w+\))? )?mod \w+ ?(\{|;)")
 
 
 def git(*args):
@@ -28,41 +29,72 @@ def git(*args):
     ).stdout
 
 
-def test_module_start(commit, path):
-    """The first line of the file's `#[cfg(test)]` module, or None."""
+def test_lines(commit, path):
+    """The line numbers of the file's `#[cfg(test)]` modules."""
+    if not path.endswith(".rs"):
+        return set()
     try:
-        text = git("show", f"{commit}:{path}")
+        lines = git("show", f"{commit}:{path}").splitlines()
     except subprocess.CalledProcessError:
-        return None
-    for number, line in enumerate(text.splitlines(), start=1):
-        if line.startswith("#[cfg(test)]"):
-            return number
-    return None
+        return set()
+    numbers = set()
+    index = 0
+    while index < len(lines):
+        if lines[index].startswith("#[cfg(test)]"):
+            start = index
+            index += 1
+            while index < len(lines) and lines[index].startswith("#["):
+                index += 1
+            if index < len(lines) and TEST_MODULE.match(lines[index]):
+                # rustfmt closes a top-level module with `}` in column one.
+                if lines[index].rstrip().endswith("{"):
+                    while index < len(lines) and lines[index] != "}":
+                        index += 1
+                numbers.update(range(start + 1, index + 2))
+        index += 1
+    return numbers
+
+
+def changed_files(base, head):
+    """(old path, new path) pairs; renames and copies keep both."""
+    fields = git("diff", "--name-status", "-z", "-M", base, head).split("\0")
+    pairs = []
+    index = 0
+    while index < len(fields) - 1:
+        status = fields[index]
+        if status[:1] in ("R", "C"):
+            pairs.append((fields[index + 1], fields[index + 2]))
+            index += 3
+        else:
+            pairs.append((fields[index + 1], fields[index + 1]))
+            index += 2
+    return pairs
 
 
 def counted_lines(base, head):
     total = 0
-    paths = git("diff", "--name-only", "-z", "--no-renames", base, head)
-    for path in filter(None, paths.split("\0")):
-        if IGNORED.search(path):
+    for old_path, new_path in changed_files(base, head):
+        if IGNORED.search(new_path):
             continue
-        old_tests = new_tests = None
-        if path.endswith(".rs"):
-            old_tests = test_module_start(base, path)
-            new_tests = test_module_start(head, path)
+        old_tests = test_lines(base, old_path)
+        new_tests = test_lines(head, new_path)
         diff = git(
-            "diff", "-U0", "--no-renames", "--ignore-all-space",
-            "--ignore-blank-lines", base, head, "--", path,
+            "diff", "-U0", "-M", "--ignore-all-space", "--ignore-blank-lines",
+            base, head, "--", *{old_path, new_path},
         )
+        in_hunk = False
         old = new = 0
         for line in diff.splitlines():
             if match := HUNK.match(line):
+                in_hunk = True
                 old, new = int(match[1]), int(match[2])
-            elif line.startswith("-") and not line.startswith("---"):
-                total += old_tests is None or old < old_tests
+            elif not in_hunk:
+                continue
+            elif line.startswith("-"):
+                total += bool(line[1:].strip()) and old not in old_tests
                 old += 1
-            elif line.startswith("+") and not line.startswith("+++"):
-                total += new_tests is None or new < new_tests
+            elif line.startswith("+"):
+                total += bool(line[1:].strip()) and new not in new_tests
                 new += 1
     return total
 
