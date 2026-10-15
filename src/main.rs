@@ -45,9 +45,6 @@ struct RunArgs {
     /// Back up and report what would change, without changing the destination.
     #[arg(long)]
     dry_run: bool,
-    /// Let the first run delete items that are already in the destination.
-    #[arg(long)]
-    allow_initial_overwrite: bool,
     /// Let this run delete every earlier copy, or more than MAX_DELETE_PERCENT.
     #[arg(long)]
     allow_mass_delete: bool,
@@ -213,7 +210,6 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
 fn flags(args: RunArgs) -> RunFlags {
     RunFlags {
         dry_run: args.dry_run,
-        allow_initial_overwrite: args.allow_initial_overwrite,
         allow_mass_delete: args.allow_mass_delete,
     }
 }

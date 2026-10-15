@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Result, anyhow, bail};
 use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
-use vault_mirror::{app, config::Config, plan::marker_of, text::count};
+use vault_mirror::{app, config::Config};
 
 use crate::{Console, check_config, describe_vault};
 
@@ -85,8 +85,8 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
         .interact()?;
     if mirror {
         println!(
-            "Use a dedicated account. A run deletes everything in it that does not come from \
-             the source."
+            "vault-mirror keeps a copy of every source item in this account. It leaves \
+             everything else in the account as it is."
         );
         let dest = ask_vault(&theme, &mut env, "DEST", "the destination").await?;
         written.extend(dest);
@@ -260,16 +260,6 @@ async fn log_in(env: &HashMap<String, String>, prefix: &str, role: &str) -> Resu
         "Logged in",
         &format!("to {role}: {}", describe_vault(&loaded)),
     );
-    // The same condition as the first-run safety check.
-    let live = loaded.items.iter().filter(|item| !item.in_trash);
-    let (mirrored, other): (Vec<_>, Vec<_>) = live.partition(|item| marker_of(item).is_some());
-    if prefix == "DEST" && mirrored.is_empty() && !other.is_empty() {
-        Console::warning(&format!(
-            "The destination holds {} that vault-mirror did not create. The first run stops \
-             before deleting them, unless you pass --allow-initial-overwrite.",
-            count(other.len(), "item")
-        ));
-    }
     Ok(())
 }
 

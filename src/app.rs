@@ -29,7 +29,6 @@ const LOCK_FILE: &str = "run.lock";
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunFlags {
     pub dry_run: bool,
-    pub allow_initial_overwrite: bool,
     pub allow_mass_delete: bool,
 }
 
@@ -351,13 +350,13 @@ async fn execute(
     let options = MirrorOptions {
         dry_run: flags.dry_run,
         safety: Safety {
-            allow_initial_overwrite: flags.allow_initial_overwrite,
             allow_mass_delete: flags.allow_mass_delete,
             ..config.safety.clone()
         },
         concurrency: config.concurrency,
         verify_attachments: config.verify_attachments,
         filter: config.filter.clone(),
+        dest_backed_up: dest_vault.is_some(),
     };
     let source = Endpoint {
         account: &source,

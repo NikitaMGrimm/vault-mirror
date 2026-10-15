@@ -72,6 +72,9 @@ pub struct MirrorOptions {
     pub verify_attachments: bool,
     /// The folders, or in an organization the collections, to mirror.
     pub filter: Filter,
+    /// A backup of the destination was saved before this mirror, so it holds
+    /// whatever the mirror replaces.
+    pub dest_backed_up: bool,
 }
 
 /// Names of folders, or of collections in an organization, that select what
@@ -150,6 +153,7 @@ impl Default for MirrorOptions {
             concurrency: 4,
             verify_attachments: true,
             filter: Filter::default(),
+            dest_backed_up: false,
         }
     }
 }
@@ -414,20 +418,53 @@ impl Run<'_> {
         self.summary = Some(summary);
         let (verb, plan_text) = describe_plan(&summary, self.options.dry_run);
         self.reporter.status(verb, &plan_text);
+        if plan.tracked_before == 0 && plan.untracked > 0 {
+            self.warn(format!(
+                "The destination has {} that vault-mirror didn't make. Runs leave them as they \
+                 are, so if they are older copies of the source, delete them to avoid duplicates.",
+                count(plan.untracked, "item")
+            ));
+        }
+        let changed = plan.updates.iter().filter(|u| u.changed_in_dest).count();
+        if changed > 0 {
+            let them = if changed == 1 { "it" } else { "them" };
+            let kept = match self.options.dest_backed_up {
+                true => " Your changes are in the destination backup from the start of this run.",
+                false => "",
+            };
+            self.warn(format!(
+                "{} changed in the destination since vault-mirror wrote {them}. A run replaces \
+                 {them} with the source version, so make lasting changes in the source.{kept}",
+                count(changed, "copy")
+            ));
+        }
         plan::check_safety(&plan, &self.options.safety)?;
         if self.options.dry_run || !plan.has_changes() {
             return Ok(false);
         }
 
-        self.apply(&plan, &source_vault, &dest_vault).await?;
+        self.apply(&plan, &source_vault, &dest_vault, mode).await?;
 
         self.stage = "verifying the destination";
         self.verify(&source_vault, mode).await?;
         self.reporter.status("Verified", "the destination");
-        Ok(true)
+        // Nothing changed if the plan only deleted a folder or collection that
+        // has gained an item since.
+        let done = self.summary.unwrap_or_default();
+        let nothing = Summary {
+            items_unchanged: done.items_unchanged,
+            ..Summary::default()
+        };
+        Ok(done != nothing)
     }
 
-    async fn apply(&mut self, plan: &Plan, source_vault: &Vault, dest_vault: &Vault) -> Result<()> {
+    async fn apply(
+        &mut self,
+        plan: &Plan,
+        source_vault: &Vault,
+        dest_vault: &Vault,
+        mode: Mode,
+    ) -> Result<()> {
         let source = self.source;
         let dest = self.dest;
         let concurrency = self.options.concurrency.max(1);
@@ -438,12 +475,13 @@ impl Run<'_> {
             .iter()
             .map(|f| f.id.as_str())
             .collect();
-        let mut folder_ids: HashMap<String, String> = dest_vault
-            .folders
-            .iter()
-            .filter(|f| !doomed_folders.contains(&f.id.as_str()))
-            .map(|f| (f.name.clone(), f.id.clone()))
-            .collect();
+        let mut folder_ids = first_id_by_name(
+            dest_vault
+                .folders
+                .iter()
+                .filter(|f| !doomed_folders.contains(&f.id.as_str()))
+                .map(|f| (&f.name, &f.id)),
+        );
         for name in &plan.folders_to_create {
             let folder = dest.account.create_folder(name).await?;
             folder_ids.insert(folder.name, folder.id);
@@ -453,12 +491,13 @@ impl Run<'_> {
             .iter()
             .map(|c| c.id.as_str())
             .collect();
-        let mut collection_ids: HashMap<String, String> = dest_vault
-            .collections
-            .iter()
-            .filter(|c| !doomed_collections.contains(&c.id.as_str()))
-            .map(|c| (c.name.clone(), c.id.clone()))
-            .collect();
+        let mut collection_ids = first_id_by_name(
+            dest_vault
+                .collections
+                .iter()
+                .filter(|c| !doomed_collections.contains(&c.id.as_str()))
+                .map(|c| (&c.name, &c.id)),
+        );
         if let Scope::Organization(org) = &dest.scope {
             for new in &plan.collections_to_create {
                 let collection = dest
@@ -730,13 +769,33 @@ impl Run<'_> {
             dest.account.delete_items(&ids).await?;
             self.reporter.status("Deleted", &count(ids.len(), "item"));
         }
+        if plan.folders_to_delete.is_empty() && plan.collections_to_delete.is_empty() {
+            return Ok(());
+        }
+        // The plan may come from the backup at the start of the run. Someone
+        // may have put an item in a folder or collection since, so it is
+        // deleted only if a plan from the destination as it is now agrees.
+        self.stage = "deleting obsolete folders and collections";
+        let now = dest.account.load(&dest.scope).await?;
+        let fresh = plan::plan_with(source_vault, &now, mode, self.copy_attachments);
+        let mut kept = Summary::default();
         for folder in &plan.folders_to_delete {
-            dest.account.delete_folder(&folder.id).await?;
+            match fresh.folders_to_delete.contains(folder) {
+                true => dest.account.delete_folder(&folder.id).await?,
+                false => kept.folders_deleted += 1,
+            }
         }
         if let Scope::Organization(org) = &dest.scope {
             for collection in &plan.collections_to_delete {
-                dest.account.delete_collection(org, &collection.id).await?;
+                match fresh.collections_to_delete.contains(collection) {
+                    true => dest.account.delete_collection(org, &collection.id).await?,
+                    false => kept.collections_deleted += 1,
+                }
             }
+        }
+        if let Some(summary) = &mut self.summary {
+            summary.folders_deleted -= kept.folders_deleted;
+            summary.collections_deleted -= kept.collections_deleted;
         }
         Ok(())
     }
@@ -836,6 +895,18 @@ pub(crate) fn refused(error: &anyhow::Error) -> bool {
 
 /// The plan's changes in a few words, leaving out what does not happen, as
 /// a verb and the rest of the sentence.
+/// The first container of each name, as the plan picks it, so that copies go
+/// where the plan expects them.
+fn first_id_by_name<'a>(
+    pairs: impl Iterator<Item = (&'a String, &'a String)>,
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for (name, id) in pairs {
+        map.entry(name.clone()).or_insert_with(|| id.clone());
+    }
+    map
+}
+
 fn describe_plan(summary: &Summary, dry_run: bool) -> (&'static str, String) {
     let changes: Vec<String> = [
         (summary.items_created, "create", "item"),
@@ -956,7 +1027,6 @@ mod tests {
                     name: name.to_string(),
                 })
                 .collect(),
-            collections: vec![],
             items: vec![
                 item("work", Some("Work"), &[]),
                 item("infra", Some("Work/Infra"), &[]),
@@ -964,6 +1034,7 @@ mod tests {
                 item("private", Some("Private"), &[]),
                 item("unfiled", None, &[]),
             ],
+            ..Vault::default()
         };
         let run = |filter: Filter| {
             let mut vault = vault.clone();
@@ -991,7 +1062,6 @@ mod tests {
     #[test]
     fn collection_filters_trim_collections_and_let_exclusion_win() {
         let vault = Vault {
-            folders: vec![],
             collections: ["Shared", "Private", "Other"]
                 .iter()
                 .map(|name| Collection {
@@ -1006,6 +1076,7 @@ mod tests {
                 item("other", None, &["Other"]),
                 item("loose", None, &[]),
             ],
+            ..Vault::default()
         };
         let mut included = vault.clone();
         filter(&["Shared"], &["Private"]).apply(&mut included, Mode::Organization);

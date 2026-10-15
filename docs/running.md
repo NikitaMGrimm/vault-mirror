@@ -7,7 +7,7 @@
 | Command | What it does |
 | --- | --- |
 | `vault-mirror init [--dir DIR]` | Asks for the accounts, checks the logins, writes `vault-mirror.env` and `compose.yaml`, and shows what the first run would do. |
-| `vault-mirror run` | Does one run. Add `--dry-run` to back up and show the plan without changing the destination. `--allow-initial-overwrite` and `--allow-mass-delete` get past a [safety check](how-it-works.md#safety-checks) for this run. |
+| `vault-mirror run` | Does one run. Add `--dry-run` to back up and show the plan without changing the destination. `--allow-mass-delete` gets past a [safety check](how-it-works.md#safety-checks) for this run. |
 | `vault-mirror daemon` | Keeps running on `SCHEDULE` or every `INTERVAL`. On `SIGTERM` it finishes a run in progress, then stops. |
 | `vault-mirror check` | Logs in, counts what's in each vault, and shows what a run would do. It never changes either vault. |
 | `vault-mirror snapshots` | Lists the backup snapshots. |

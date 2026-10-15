@@ -401,38 +401,29 @@ async fn a_failed_run_is_recorded_with_its_stage_and_changes_nothing() -> Result
     let source_account = sandbox.register(&sandbox.source_url).await?;
     let dest_account = sandbox.register(&sandbox.dest_url).await?;
     let source = sandbox.open(&source_account).await?;
-    let dest = sandbox.open(&dest_account).await?;
     seed(&source).await?;
-    let own = fixtures::samples().remove(4).content;
-    dest.create_item(
-        &PERSONAL,
-        &Draft {
-            content: own,
-            folder_id: None,
-            collection_ids: vec![],
-        },
-    )
-    .await?;
     let dir = tempfile::tempdir()?;
     let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    assert!(
+        app::run_once(&config, RunFlags::default(), &Capture::default())
+            .await
+            .succeeded()
+    );
 
-    let refused = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
+    // Swapped: the mirror is now the source, and the original the destination.
+    let swapped = config_for(&dest_account, Some(&source_account), dir.path(), &[]);
+    let refused = app::run_once(&swapped, RunFlags::default(), &Capture::default()).await;
     assert!(!refused.succeeded());
     assert_eq!(refused.failure_stage.as_deref(), Some("planning"));
-    assert!(
-        refused
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("--allow-initial-overwrite")
-    );
+    assert!(refused.error.as_deref().unwrap().contains("swapped"));
+    let original = source.load(&PERSONAL).await?;
+    assert_eq!(original.items.len(), fixtures::samples().len());
+    assert!(original.items.iter().all(|item| marker_of(item).is_none()));
+    // The destination was still backed up before the refusal.
     assert_eq!(
-        refused.mirror.as_ref().unwrap().items_created,
+        refused.dest_backup.as_ref().unwrap().items,
         fixtures::samples().len()
     );
-    assert_eq!(dest.load(&PERSONAL).await?.items.len(), 1);
-    // The destination was still backed up before the refusal.
-    assert_eq!(refused.dest_backup.as_ref().unwrap().items, 1);
 
     let mut wrong = dest_account.clone();
     wrong.credentials.client_secret = "not-the-secret".into();
@@ -441,16 +432,6 @@ async fn a_failed_run_is_recorded_with_its_stage_and_changes_nothing() -> Result
     assert_eq!(failed.failure_stage.as_deref(), Some("destination login"));
     assert!(!failed.error.as_deref().unwrap().contains("not-the-secret"));
 
-    let flags = RunFlags {
-        allow_initial_overwrite: true,
-        ..RunFlags::default()
-    };
-    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
-    assert!(
-        app::run_once(&config, flags, &Capture::default())
-            .await
-            .succeeded()
-    );
     Ok(())
 }
 
@@ -461,9 +442,9 @@ async fn destination_attachments_are_backed_up_before_the_mirror_deletes_them() 
     };
     let source_account = sandbox.register(&sandbox.source_url).await?;
     let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
     let dest = sandbox.open(&dest_account).await?;
-    // A file only the destination has, so no source backup holds it.
-    let item = dest
+    source
         .create_item(
             &PERSONAL,
             &Draft {
@@ -473,18 +454,21 @@ async fn destination_attachments_are_backed_up_before_the_mirror_deletes_them() 
             },
         )
         .await?;
-    dest.upload_attachment(&PERSONAL, &item, "only-copy.txt", b"the only copy")
-        .await?;
     let dir = tempfile::tempdir()?;
     let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
-    let flags = RunFlags {
-        allow_initial_overwrite: true,
-        ..RunFlags::default()
-    };
+    assert!(
+        app::run_once(&config, RunFlags::default(), &Capture::default())
+            .await
+            .succeeded()
+    );
+    // A file only the destination's copy has, so no source backup holds it.
+    let copy = dest.load(&PERSONAL).await?.items.remove(0);
+    dest.upload_attachment(&PERSONAL, &copy, "only-copy.txt", b"the only copy")
+        .await?;
 
-    let status = app::run_once(&config, flags, &Capture::default()).await;
+    let status = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
     assert!(status.succeeded(), "{status:?}");
-    assert!(dest.load(&PERSONAL).await?.items.is_empty());
+    assert!(dest.load(&PERSONAL).await?.items[0].attachments.is_empty());
     assert_eq!(
         status.dest_backup.as_ref().unwrap().attachments_downloaded,
         1

@@ -29,7 +29,7 @@ flowchart LR
    - create folders or collections,
    - create and update items,
    - copy new or changed attachments,
-   - delete items that no longer belong.
+   - delete copies whose source item is gone.
 5. **Verify.** It reads the destination back and compares it with the source.
    Each copied attachment was already downloaded again and checked by its
    SHA-256 hash.
@@ -56,11 +56,19 @@ Each item vault-mirror creates in the destination is a **copy**. Each copy has a
 The marker holds no secrets. It lets the next run update a copy in place instead
 of deleting and recreating it.
 
+Items without a marker aren't copies. vault-mirror never changes or deletes them,
+or the folders and collections they're in. So you can keep your own items in the
+destination, and anything you add there while the source is unreachable stays.
+
 vault-mirror also compares the content itself, so:
 
-- if you edit a copy, the next run puts the source version back;
-- if you delete a copy's marker, the next run deletes the copy and makes a new
-  one.
+- if you edit a copy, the next run puts the source version back and warns you;
+  with backups on, your edit is in that run's destination backup. An
+  attachment you add to a copy, or archiving it, is undone the same way but
+  without the warning: the marker can't tell whether that change came from
+  the source or the destination;
+- if you delete a copy's marker, the item is no longer a copy, and the next run
+  makes a new one next to it.
 
 ## Safety checks
 
@@ -71,9 +79,8 @@ run stops and the destination stays as it was.
 | --- | --- | --- |
 | Source items have a `__source` field | Source and destination are swapped. | Fix the settings. |
 | Source and destination are the same vault | A settings mistake. | Fix the settings. |
-| The destination has items, but no copies | `DEST_*` points at an account you already use. | `run --allow-initial-overwrite` |
 | The run would delete every copy | The source is empty, the wrong account, or filtered to nothing. | `run --allow-mass-delete` |
-| The run would delete more than `MAX_DELETE_PERCENT` | You set a limit. | `run --allow-mass-delete` |
+| The run would delete more than `MAX_DELETE_PERCENT` of the copies | You set a limit. | `run --allow-mass-delete` |
 
 `MAX_DELETE_PERCENT` is off unless you set it. It applies only above 10
 deletions, and only once the destination has copies. Extra copies of the same
@@ -86,8 +93,8 @@ docker compose run --rm vault-mirror run --allow-mass-delete
 ```
 
 > [!WARNING]
-> Deleted destination items don't go to the trash. After an override, only your
-> backups can bring them back.
+> Deleted copies don't go to the trash. After an override, only your backups can
+> bring them back.
 
 ### Why there's no default deletion limit
 
