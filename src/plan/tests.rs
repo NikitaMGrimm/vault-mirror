@@ -788,7 +788,7 @@ fn item_types_this_tool_has_never_heard_of_are_mirrored() {
 }
 
 #[test]
-fn a_draft_names_the_container_that_is_missing() {
+fn a_draft_without_its_folder_fails_without_naming_it() {
     let mut source = vault(vec![login("s1", "One", "pw1")]);
     source.folders = vec![folder("f1", "Work")];
     source.items[0].folder_id = Some("f1".into());
@@ -796,7 +796,8 @@ fn a_draft_names_the_container_that_is_missing() {
     let error = plan
         .draft(&plan.entries[0], &source, &HashMap::new(), &HashMap::new())
         .unwrap_err();
-    assert_eq!(error, PlanError::MissingFolder("Work".into()));
+    assert_eq!(error, PlanError::MissingFolder);
+    assert!(!error.to_string().contains("Work"));
 }
 
 fn numbered(count: usize) -> Vault {

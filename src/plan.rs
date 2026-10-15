@@ -297,7 +297,7 @@ impl Plan {
                 folder_ids
                     .get(name)
                     .cloned()
-                    .ok_or_else(|| PlanError::MissingFolder(name.clone()))?,
+                    .ok_or(PlanError::MissingFolder)?,
             ),
             None => None,
         };
@@ -308,7 +308,7 @@ impl Plan {
                 collection_ids
                     .get(name)
                     .cloned()
-                    .ok_or_else(|| PlanError::MissingCollection(name.clone()))
+                    .ok_or(PlanError::MissingCollection)
             })
             .collect::<Result<_, _>>()?;
         Ok(Draft {
@@ -319,12 +319,14 @@ impl Plan {
     }
 }
 
+/// Folder and collection names are vault content, so these errors, which
+/// reach the status file and notifications, don't name them.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PlanError {
-    #[error("the destination has no folder named {0:?}")]
-    MissingFolder(String),
-    #[error("the destination has no collection named {0:?}")]
-    MissingCollection(String),
+    #[error("the destination is missing a folder that a copy belongs in")]
+    MissingFolder,
+    #[error("the destination is missing a collection that a copy belongs in")]
+    MissingCollection,
 }
 
 /// Whether a run mirrors an individual vault or an organization vault.
