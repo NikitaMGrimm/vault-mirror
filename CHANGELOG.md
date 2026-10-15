@@ -4,6 +4,18 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.4.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.3.0...v0.4.0) - 2026-10-15
+
+### Added
+
+- keep one snapshot a day after the first day, so backups stay small ([#28](https://github.com/NikitaMGrimm/vault-mirror/pull/28))
+- [**breaking**] leave destination items that vault-mirror didn't make alone ([#27](https://github.com/NikitaMGrimm/vault-mirror/pull/27))
+- warn when a server address sends the API key unencrypted over the internet ([#25](https://github.com/NikitaMGrimm/vault-mirror/pull/25))
+
+### Fixed
+
+- keep folder and collection names out of error messages ([#31](https://github.com/NikitaMGrimm/vault-mirror/pull/31))
+
 ## [0.3.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.2.0...v0.3.0) - 2026-10-14
 
 ### Changed
