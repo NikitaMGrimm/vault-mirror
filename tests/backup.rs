@@ -487,7 +487,8 @@ async fn a_pull_brings_back_what_changed_in_the_destination() -> Result<()> {
 }
 
 /// A pull that stopped after adding an item to the source, but before copying
-/// its attachments, finishes it when run again. The destination keeps its file.
+/// its attachments, finishes it when run again. The destination keeps its file,
+/// and the source keeps an edit made in between.
 #[tokio::test]
 async fn a_pull_run_again_finishes_an_item_it_added_halfway() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
@@ -518,12 +519,17 @@ async fn a_pull_run_again_finishes_an_item_it_added_halfway() -> Result<()> {
         .await?;
     dest.upload_attachment(&PERSONAL, &added, "outage.txt", b"made during the outage")
         .await?;
-    // What the stopped pull left: the item, marked as still waiting for its files.
+    // What the stopped pull left: the item, marked as still waiting for its
+    // files, and edited in the source since.
+    let mut edited = added.clone();
+    edited
+        .content
+        .insert("notes".into(), Node::secret("edited in the source"));
     source
         .create_item(
             &PERSONAL,
             &Draft {
-                content: mark_copy(&added, &added, None, &[], Mode::Personal, None),
+                content: mark_copy(&edited, &added, None, &[], Mode::Personal, None),
                 folder_id: None,
                 collection_ids: vec![],
             },
@@ -545,6 +551,10 @@ async fn a_pull_run_again_finishes_an_item_it_added_halfway() -> Result<()> {
             .filter(|item| item.name() == "Added during the outage")
             .collect();
         assert_eq!(named.len(), 1);
+        assert_eq!(
+            named[0].content["notes"].as_str(),
+            Some("edited in the source")
+        );
         let [attachment] = named[0].attachments.as_slice() else {
             panic!("expected one attachment");
         };

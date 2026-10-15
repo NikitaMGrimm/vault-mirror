@@ -280,8 +280,34 @@ pub async fn pull(
         .map(|c| (c.name.clone(), c.id.clone()))
         .collect();
 
+    // Source items that name a destination item come from an earlier pull.
+    let linked: HashMap<String, &Item> = (source_vault.items.iter())
+        .filter(|item| !item.in_trash)
+        .filter_map(|item| Some((plan::marker_of(item)?.source_id, item)))
+        .collect();
+    let mut selected = dest_vault.clone();
+    options.filter.apply(&mut selected, mode);
+    let selected: HashSet<&str> = selected.items.iter().map(|i| i.id.as_str()).collect();
+    // Items vault-mirror didn't make, each with its source item if an earlier
+    // pull made one but stopped before its attachments were done.
+    let added: Vec<(&Item, Option<&Item>)> = (dest_vault.items.iter())
+        .filter(|item| {
+            !item.in_trash && plan::marker_of(item).is_none() && selected.contains(item.id.as_str())
+        })
+        .filter_map(|item| match linked.get(&item.id) {
+            None => Some((item, None)),
+            Some(&made) => (plan::marker_of(made)?.files_pending()).then_some((item, Some(made))),
+        })
+        .collect();
+    // A resumed item is finished below, whatever changed in it.
+    let resumed: HashSet<&str> = (added.iter())
+        .filter(|(_, made)| made.is_some())
+        .map(|(item, _)| item.id.as_str())
+        .collect();
     let changed: Vec<&plan::Update> = (plan.updates.iter())
-        .filter(|update| update.changed_in_dest())
+        .filter(|update| {
+            update.changed_in_dest() && !resumed.contains(dest_vault.items[update.dest].id.as_str())
+        })
         .collect();
     let both = changed
         .iter()
@@ -305,25 +331,6 @@ pub async fn pull(
         pulled.warnings.push(warning);
     }
 
-    // Source items that name a destination item come from an earlier pull.
-    let linked: HashMap<String, &Item> = (source_vault.items.iter())
-        .filter(|item| !item.in_trash)
-        .filter_map(|item| Some((plan::marker_of(item)?.source_id, item)))
-        .collect();
-    let mut selected = dest_vault.clone();
-    options.filter.apply(&mut selected, mode);
-    let selected: HashSet<&str> = selected.items.iter().map(|i| i.id.as_str()).collect();
-    // Items vault-mirror didn't make, each with its source item if an earlier
-    // pull made one but stopped before its attachments were done.
-    let added: Vec<(&Item, Option<&Item>)> = (dest_vault.items.iter())
-        .filter(|item| {
-            !item.in_trash && plan::marker_of(item).is_none() && selected.contains(item.id.as_str())
-        })
-        .filter_map(|item| match linked.get(&item.id) {
-            None => Some((item, None)),
-            Some(&made) => (plan::marker_of(made)?.files_pending()).then_some((item, Some(made))),
-        })
-        .collect();
     pulled.summary.items_updated = changed.len();
     pulled.summary.items_created = added.len();
     if options.dry_run {
@@ -380,26 +387,41 @@ pub async fn pull(
             .with_context(|| format!("updating source item {}", stored.id))?;
     }
 
-    let mut to_archive = Vec::new();
+    let mut not_archived = 0;
+    let mut archive_refusal = None;
     for (item, made) in added {
         let folder = folder_name(item.folder_id.as_deref());
-        let folder_id = match mode {
-            Mode::Personal => source_folder(source, &mut source_folders, folder.as_deref()).await?,
-            Mode::Organization => None,
-        };
         let names = collection_names(item);
-        let mut collection_ids = Vec::new();
-        if let Scope::Organization(org) = &source.scope {
-            for name in &names {
-                if !source_collections.contains_key(name) {
-                    let created = source.account.create_collection(org, name, None).await?;
-                    source_collections.insert(created.name, created.id);
+        // A resumed item keeps what changed in the source since, unless the
+        // destination item changed too.
+        let kept = made.filter(|made| {
+            plan::marker_of(made)
+                .is_some_and(|marker| marker.content_matches(item, folder.as_deref(), &names, mode))
+        });
+        let (content, folder_id, collection_ids) = match kept {
+            Some(made) => (made, made.folder_id.clone(), made.collection_ids.clone()),
+            None => {
+                let folder_id = match mode {
+                    Mode::Personal => {
+                        source_folder(source, &mut source_folders, folder.as_deref()).await?
+                    }
+                    Mode::Organization => None,
+                };
+                let mut collection_ids = Vec::new();
+                if let Scope::Organization(org) = &source.scope {
+                    for name in &names {
+                        if !source_collections.contains_key(name) {
+                            let created = source.account.create_collection(org, name, None).await?;
+                            source_collections.insert(created.name, created.id);
+                        }
+                        collection_ids.push(source_collections[name].clone());
+                    }
                 }
-                collection_ids.push(source_collections[name].clone());
+                (item, folder_id, collection_ids)
             }
-        }
+        };
         let draft = |files: Option<&Item>| Draft {
-            content: plan::mark_copy(item, item, folder.as_deref(), &names, mode, files),
+            content: plan::mark_copy(content, item, folder.as_deref(), &names, mode, files),
             folder_id: folder_id.clone(),
             collection_ids: collection_ids.clone(),
         };
@@ -413,7 +435,7 @@ pub async fn pull(
             }
         };
         let old: Vec<String> = made.attachments.iter().map(|a| a.id.clone()).collect();
-        let (stored, copied) = copy_attachments(
+        let (mut stored, copied) = copy_attachments(
             (dest, item),
             (source, &made),
             &old,
@@ -422,24 +444,39 @@ pub async fn pull(
         )
         .await?;
         pulled.summary.attachments_copied += copied;
-        let finished = source
+        // Archived before the final marker, so that a pull that stops in
+        // between finishes the item, archive state included, when run again.
+        if item.archived && !stored.archived {
+            match archive_refusal {
+                Some(_) => not_archived += 1,
+                None => match source
+                    .account
+                    .set_archived(&[stored.id.clone()], true)
+                    .await
+                {
+                    Ok(()) => {
+                        let collection_ids = stored.collection_ids;
+                        stored = source.account.get_item(&source.scope, &stored.id).await?;
+                        stored.collection_ids = collection_ids;
+                    }
+                    Err(error) if refused(&error) => {
+                        not_archived += 1;
+                        archive_refusal = Some(error);
+                    }
+                    Err(error) => return Err(error),
+                },
+            }
+        }
+        source
             .account
             .update_item(&source.scope, &stored, &draft(Some(&stored)))
             .await
             .with_context(|| format!("updating source item {}", stored.id))?;
-        if item.archived && !finished.archived {
-            to_archive.push(finished.id);
-        }
     }
-    if !to_archive.is_empty()
-        && let Err(error) = source.account.set_archived(&to_archive, true).await
-    {
-        if !refused(&error) {
-            return Err(error);
-        }
+    if let Some(error) = archive_refusal {
         let warning = format!(
             "The source refused to archive {}: {error:#}",
-            count(to_archive.len(), "item")
+            count(not_archived, "item")
         );
         reporter.warn(&warning);
         pulled.warnings.push(warning);
