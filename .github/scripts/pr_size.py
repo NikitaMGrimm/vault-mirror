@@ -21,6 +21,7 @@ IGNORED = re.compile(
 )
 HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 TEST_MODULE = re.compile(r"^(pub(\(\w+\))? )?mod \w+ ?(\{|;)")
+MODULE_END = re.compile(r"^\}\s*(//.*)?$")
 
 
 def git(*args):
@@ -47,8 +48,10 @@ def test_lines(commit, path):
                 index += 1
             if index < len(lines) and TEST_MODULE.match(lines[index]):
                 # rustfmt closes a top-level module with `}` in column one.
+                # A raw string could hold such a line too; then the rest of
+                # the module counts, which only makes the label too large.
                 if lines[index].rstrip().endswith("{"):
-                    while index < len(lines) and lines[index] != "}":
+                    while index < len(lines) and not MODULE_END.match(lines[index]):
                         index += 1
                 numbers.update(range(start + 1, index + 2))
         index += 1
