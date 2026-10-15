@@ -460,19 +460,14 @@ impl<'a> Store<'a> {
         // One directory holds several vaults once the settings name another
         // account or organization, so each vault keeps its own newest
         // snapshots and is thinned on its own. Snapshots from before 0.4 name
-        // no vault and aren't thinned. They keep their newest ones only until
-        // a snapshot names its vault, and then age out.
+        // no vault. They count as one vault that isn't thinned, so the newest
+        // of them stay even after a newer version backs up another vault.
         let vault_of = |snapshot: &SnapshotInfo| snapshot.meta.as_ref()?.vault.clone();
-        let any_named = snapshots
-            .iter()
-            .any(|snapshot| vault_of(snapshot).is_some());
         let mut newest = BTreeSet::new();
         let mut seen: BTreeMap<Option<String>, usize> = BTreeMap::new();
         for (index, snapshot) in snapshots.iter().enumerate().rev() {
-            let vault = vault_of(snapshot);
-            let protected = vault.is_some() || !any_named;
-            let seen = seen.entry(vault).or_default();
-            if protected && *seen < retention.keep_at_least.max(1) {
+            let seen = seen.entry(vault_of(snapshot)).or_default();
+            if *seen < retention.keep_at_least.max(1) {
                 newest.insert(index);
             }
             *seen += 1;
@@ -899,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_without_a_vault_age_out_once_one_names_it() {
+    fn the_newest_snapshots_without_a_vault_stay() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Keys::open(dir.path(), &passphrase("p")).unwrap();
         let store = Store::open(dir.path(), "source", &keys).unwrap();
@@ -918,14 +913,12 @@ mod tests {
             keep_at_least: 1,
         };
 
-        // Alone, it is the newest snapshot and stays.
-        store.prune(&retention, now).unwrap();
-        assert!(legacy.exists());
+        // It may be the only backup of a vault the settings no longer name.
         store
-            .write_snapshot("user", document("new"), vec![], now, stamp)
+            .write_snapshot("org", document("new"), vec![], now, stamp)
             .unwrap();
         store.prune(&retention, now).unwrap();
-        assert!(!legacy.exists());
+        assert!(legacy.exists());
     }
 
     #[test]
