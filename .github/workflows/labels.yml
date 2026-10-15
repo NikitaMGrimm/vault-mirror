@@ -1,0 +1,46 @@
+name: Labels
+
+# Keeps the repository's labels to this list. A label made by hand is
+# deleted on the next sync, so add it here instead.
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/labels.yml]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Sync the labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          labels=(
+            "bug|d73a4a|Something doesn't work as documented."
+            "dependencies|0366d6|Updates a dependency."
+            "duplicate|cfd3d7|Already reported."
+            "wontfix|ffffff|Won't be changed."
+            "good first issue|7057ff|A good start for a new contributor."
+            "help wanted|008672|The maintainer would welcome a pull request."
+            "size:S|0e8a16|Changes fewer than 50 lines, not counting tests and documentation."
+            "size:M|fbca04|Changes 50 to 299 lines, not counting tests and documentation."
+            "size:L|d93f0b|Changes 300 lines or more, not counting tests and documentation."
+          )
+          declare -A keep
+          for entry in "${labels[@]}"; do
+            IFS='|' read -r name color description <<< "$entry"
+            gh label create "$name" --color "$color" --description "$description" --force
+            keep[$name]=1
+          done
+          gh label list --limit 200 --json name -q '.[].name' | while read -r name; do
+            if [[ -z "${keep[$name]:-}" ]]; then
+              gh label delete "$name" --yes
+            fi
+          done

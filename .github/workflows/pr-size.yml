@@ -1,0 +1,42 @@
+name: Pull request size
+
+# Labels each pull request size:S, size:M or size:L by the lines that change
+# what vault-mirror does; see .github/scripts/pr_size.py. It runs on
+# pull_request_target so that it can label pull requests from forks, so it
+# runs only the base branch's script and reads the pull request as git data,
+# never running anything from it.
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  size:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: pr-size-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Label the size
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags origin "+refs/pull/$PR/head:refs/remotes/pr/head"
+          size=$(python3 -I .github/scripts/pr_size.py "$(git merge-base "$BASE" refs/remotes/pr/head)" refs/remotes/pr/head)
+          for label in size:S size:M size:L; do
+            if [[ "$label" != "$size" ]]; then
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/$label" --silent 2>/dev/null || true
+            fi
+          done
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/labels" -f "labels[]=$size" --silent
