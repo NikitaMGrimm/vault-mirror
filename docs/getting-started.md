@@ -13,12 +13,9 @@ sync with it, is the **destination**.
   `vault-mirror init`, then `vault-mirror --env-file vault-mirror.env daemon`.
 - **Your source account**, on Bitwarden's cloud, a self-hosted Bitwarden server,
   or Vaultwarden.
-- **A new, empty account for the destination**, on the same server or another
-  one.
-
-> [!WARNING]
-> vault-mirror deletes everything in the destination that doesn't come from the
-> source. Don't use an account that holds anything you want to keep.
+- **A second account for the destination**, on the same server or another one.
+  vault-mirror only changes the copies it makes there. Everything else in the
+  account stays as it is.
 
 If the destination is a free Bitwarden cloud account, attachments aren't copied,
 because Bitwarden only accepts them from Premium accounts. Everything else is.
@@ -145,7 +142,6 @@ The error names the reason and, if there is one, the flag that allows the run.
 
 | Error | Likely cause | If you're sure |
 | --- | --- | --- |
-| The destination holds items that vault-mirror didn't create | You picked an account you already use. | `run --allow-initial-overwrite` |
 | The run would delete every item it mirrored before | The source looks empty or like another vault. | `run --allow-mass-delete` |
 | The source has items with a `__source` marker | The source and destination are swapped. | Fix the settings. |
 

@@ -72,6 +72,9 @@ pub struct MirrorOptions {
     pub verify_attachments: bool,
     /// The folders, or in an organization the collections, to mirror.
     pub filter: Filter,
+    /// A backup of the destination was saved before this mirror, so it holds
+    /// whatever the mirror replaces.
+    pub dest_backed_up: bool,
 }
 
 /// Names of folders, or of collections in an organization, that select what
@@ -150,6 +153,7 @@ impl Default for MirrorOptions {
             concurrency: 4,
             verify_attachments: true,
             filter: Filter::default(),
+            dest_backed_up: false,
         }
     }
 }
@@ -414,6 +418,26 @@ impl Run<'_> {
         self.summary = Some(summary);
         let (verb, plan_text) = describe_plan(&summary, self.options.dry_run);
         self.reporter.status(verb, &plan_text);
+        if plan.tracked_before == 0 && plan.untracked > 0 {
+            self.warn(format!(
+                "The destination has {} that vault-mirror didn't make. Runs leave them as they \
+                 are, so if they are older copies of the source, delete them to avoid duplicates.",
+                count(plan.untracked, "item")
+            ));
+        }
+        let changed = plan.updates.iter().filter(|u| u.changed_in_dest).count();
+        if changed > 0 {
+            let them = if changed == 1 { "it" } else { "them" };
+            let kept = match self.options.dest_backed_up {
+                true => " Your changes are in the destination backup from the start of this run.",
+                false => "",
+            };
+            self.warn(format!(
+                "{} changed in the destination since vault-mirror wrote {them}. A run replaces \
+                 {them} with the source version, so make lasting changes in the source.{kept}",
+                count(changed, "copy")
+            ));
+        }
         plan::check_safety(&plan, &self.options.safety)?;
         if self.options.dry_run || !plan.has_changes() {
             return Ok(false);

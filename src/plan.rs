@@ -5,7 +5,7 @@
 //! source content. That marker is the only state the mirror keeps, so a run
 //! needs nothing but the two vaults to work out the difference.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -122,6 +122,9 @@ pub struct Update {
     /// Index into the destination vault's items.
     pub dest: usize,
     pub write_content: bool,
+    /// The copy was changed in the destination since vault-mirror last
+    /// wrote it, and the source version replaces that change.
+    pub changed_in_dest: bool,
     pub sync_attachments: bool,
     pub set_archived: Option<bool>,
 }
@@ -130,8 +133,6 @@ pub struct Update {
 pub enum DeleteReason {
     /// Its source item no longer exists.
     Stale,
-    /// It was never mirrored: someone added it to the destination.
-    Untracked,
     /// A second copy of a source item that is already mirrored.
     Duplicate,
 }
@@ -162,6 +163,9 @@ pub struct Plan {
     pub collections_to_delete: Vec<Collection>,
     /// Destination items that carry a marker, before this plan is applied.
     pub tracked_before: usize,
+    /// Destination items without a marker. vault-mirror did not make them,
+    /// so it leaves them, and the folders and collections they are in, alone.
+    pub untracked: usize,
     /// Source items that carry a marker themselves.
     pub source_markers: usize,
     /// False when the destination cannot take attachments. Its existing
@@ -399,6 +403,8 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
     }
 
     let mut dest_by_entry: HashMap<usize, (usize, Marker)> = HashMap::new();
+    let mut untracked_folders: HashSet<&str> = HashSet::new();
+    let mut untracked_collections: HashSet<&str> = HashSet::new();
     for (index, item) in dest.items.iter().enumerate() {
         let delete = |reason| Delete {
             dest: index,
@@ -411,7 +417,9 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
             continue;
         }
         let Some(marker) = marker_of(item) else {
-            plan.deletes.push(delete(DeleteReason::Untracked));
+            plan.untracked += 1;
+            untracked_folders.extend(item.folder_id.as_deref());
+            untracked_collections.extend(item.collection_ids.iter().map(String::as_str));
             continue;
         };
         plan.tracked_before += 1;
@@ -481,6 +489,8 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         }
         let entry = &plan.entries[entry_index];
         let write_content = marker != &entry.marker || dest_core != entry.marker.core_hash;
+        // Only a change that the source version then overwrites counts.
+        let changed_in_dest = dest_core != marker.core_hash && dest_core != entry.marker.core_hash;
         let set_archived =
             (dest_item.archived != source_item.archived).then_some(source_item.archived);
 
@@ -489,6 +499,7 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
                 entry: entry_index,
                 dest: *dest_index,
                 write_content,
+                changed_in_dest,
                 sync_attachments,
                 set_archived,
             });
@@ -509,8 +520,9 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
                 .folders
                 .iter()
                 .filter(|f| {
-                    !wanted.contains(f.name.as_str())
-                        || dest_folders.get(f.name.as_str()) != Some(&f.id.as_str())
+                    !untracked_folders.contains(f.id.as_str())
+                        && (!wanted.contains(f.name.as_str())
+                            || dest_folders.get(f.name.as_str()) != Some(&f.id.as_str()))
                 })
                 .cloned()
                 .collect();
@@ -532,8 +544,9 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
                 .collections
                 .iter()
                 .filter(|c| {
-                    !wanted.contains_key(c.name.as_str())
-                        || dest_collections.get(c.name.as_str()) != Some(&c.id.as_str())
+                    !untracked_collections.contains(c.id.as_str())
+                        && (!wanted.contains_key(c.name.as_str())
+                            || dest_collections.get(c.name.as_str()) != Some(&c.id.as_str()))
                 })
                 .cloned()
                 .collect();
@@ -634,15 +647,13 @@ fn hash(value: &Value) -> String {
 /// Limits that stop a misconfigured run before it destroys a vault.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Safety {
-    /// Refuse to delete more than this share of the destination's items, if
+    /// Refuse to delete more than this share of the copies, if
     /// set. Off by default: any fixed share is arbitrary, and the backup
     /// taken before the run holds what it deletes.
     pub max_delete_percent: Option<u32>,
     /// Below this many deletions the percentage is not checked, so small
     /// vaults can change freely.
     pub delete_floor: usize,
-    /// Permit the first run to delete what is already in the destination.
-    pub allow_initial_overwrite: bool,
     /// Permit this run to delete every earlier copy, or more than
     /// `max_delete_percent`.
     pub allow_mass_delete: bool,
@@ -653,7 +664,6 @@ impl Default for Safety {
         Self {
             max_delete_percent: None,
             delete_floor: 10,
-            allow_initial_overwrite: false,
             allow_mass_delete: false,
         }
     }
@@ -668,18 +678,12 @@ pub enum SafetyViolation {
     )]
     SourceLooksLikeMirror(usize),
     #[error(
-        "the destination holds {} that this tool did not create and none that it did, so a \
-         first run would delete them. Pass --allow-initial-overwrite to confirm",
-        count(*.0, "item")
-    )]
-    InitialOverwrite(usize),
-    #[error(
         "the run would delete every item it mirrored before ({0}) and keep none, so the source \
          looks empty or like a different vault. Pass --allow-mass-delete if this is expected"
     )]
     ReplacesEverything(usize),
     #[error(
-        "the run would delete {deleting} of {total} destination items ({percent}%), above the \
+        "the run would delete {deleting} of {total} copies ({percent}%), above the \
          {limit}% limit. Pass --allow-mass-delete if this is expected"
     )]
     MassDelete {
@@ -694,17 +698,11 @@ pub fn check_safety(plan: &Plan, safety: &Safety) -> Result<(), SafetyViolation>
     if plan.source_markers > 0 {
         return Err(SafetyViolation::SourceLooksLikeMirror(plan.source_markers));
     }
-    let count = |reason| {
-        plan.deletes
-            .iter()
-            .filter(|delete| delete.reason == reason)
-            .count()
-    };
-    let untracked = count(DeleteReason::Untracked);
-    let stale = count(DeleteReason::Stale);
-    if untracked > 0 && plan.tracked_before == 0 && !safety.allow_initial_overwrite {
-        return Err(SafetyViolation::InitialOverwrite(untracked));
-    }
+    let stale = plan
+        .deletes
+        .iter()
+        .filter(|delete| delete.reason == DeleteReason::Stale)
+        .count();
     if safety.allow_mass_delete {
         return Ok(());
     }
@@ -714,10 +712,9 @@ pub fn check_safety(plan: &Plan, safety: &Safety) -> Result<(), SafetyViolation>
     if plan.tracked_before > 0 && stale == plan.tracked_before {
         return Err(SafetyViolation::ReplacesEverything(stale));
     }
-    let deleting = untracked + stale;
-    let total = plan.tracked_before + untracked;
+    let (deleting, total) = (stale, plan.tracked_before);
     if let Some(limit) = safety.max_delete_percent
-        && plan.tracked_before > 0
+        && total > 0
         && deleting > safety.delete_floor
         // Compared exactly: 101 of 200 is above a 50% limit.
         && deleting as u128 * 100 > limit as u128 * total as u128

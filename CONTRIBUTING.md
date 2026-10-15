@@ -109,9 +109,11 @@ same pull request and give the reason.
 
 ### Safety checks
 
+- Change and delete only copies. An item without a marker belongs to the
+  user, and so does the folder or collection it is in. Never write to the
+  source, except in `restore --to source`.
 - Refuse only a state that is almost never intended: swapped vaults, one
-  vault twice, a first run onto items that vault-mirror did not make, or a
-  run that deletes every earlier copy.
+  vault twice, or a run that deletes every earlier copy.
 - Do not add a default percentage or count limit. A number like that is
   arbitrary, and a smaller mistake is not safer. A limit that the user sets,
   such as `MAX_DELETE_PERCENT`, is fine.

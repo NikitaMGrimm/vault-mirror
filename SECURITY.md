@@ -20,9 +20,9 @@ keep secrets out of them, put each one in a file and point to it with
 `NAME_FILE`, for example with Docker secrets or systemd credentials. See
 [Secrets in files](docs/configuration.md#secrets-in-files).
 
-> [!WARNING]
-> Use a new, dedicated account as the destination. vault-mirror permanently
-> deletes destination items that don't come from the source.
+vault-mirror never writes to the source, except when you run
+`restore --to source`. In the destination, it only changes and deletes the
+copies it made.
 
 ## What it stores
 

@@ -56,7 +56,7 @@ file.
 | --- | --- | --- |
 | `INCLUDE_FOLDERS`, `EXCLUDE_FOLDERS` | | Comma-separated folder names. See [Mirroring part of a vault](#mirroring-part-of-a-vault). |
 | `INCLUDE_COLLECTIONS`, `EXCLUDE_COLLECTIONS` | | The same, for collections in an organization. |
-| `MAX_DELETE_PERCENT` | off | Stop a run that would delete more than this share of the destination. See [Safety checks](how-it-works.md#safety-checks). |
+| `MAX_DELETE_PERCENT` | off | Stop a run that would delete more than this percentage of the copies. See [Safety checks](how-it-works.md#safety-checks). |
 
 ### Backups
 

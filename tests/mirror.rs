@@ -214,7 +214,7 @@ async fn source_changes_are_carried_over_in_place() -> Result<()> {
 }
 
 #[tokio::test]
-async fn changes_made_in_the_destination_are_undone() -> Result<()> {
+async fn changes_to_copies_in_the_destination_are_undone_and_reported() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
@@ -257,16 +257,24 @@ async fn changes_made_in_the_destination_are_undone() -> Result<()> {
 
     let outcome = run(&source, &dest, &options()).await?;
     assert!(outcome.changed);
-    // Identity and the trashed key are recreated and the stray item is
-    // removed. The trashed copy stays in the trash.
+    // Identity and the trashed key are recreated, and the item added in the
+    // destination stays. The trashed copy stays in the trash.
     assert_eq!(outcome.summary.items_created, 2);
-    assert_eq!(outcome.summary.items_deleted, 1);
+    assert_eq!(outcome.summary.items_deleted, 0);
     assert_eq!(outcome.summary.items_updated, 3);
     assert_eq!(outcome.summary.folders_deleted, 1);
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("1 copy changed in the destination")),
+        "{:?}",
+        outcome.warnings
+    );
 
     let after = dest.load(&PERSONAL).await?;
     let live = after.items.iter().filter(|item| !item.in_trash).count();
-    assert_eq!(live, fixtures::samples().len());
+    assert_eq!(live, fixtures::samples().len() + 1);
     assert_eq!(
         by_name(&after, "Visa").content["card"].as_map().unwrap()["number"].as_str(),
         Some("4111111111111111")
@@ -299,45 +307,40 @@ async fn a_dry_run_reports_the_plan_and_changes_nothing() -> Result<()> {
 }
 
 #[tokio::test]
-async fn a_destination_with_its_own_content_is_not_overwritten_unasked() -> Result<()> {
+async fn items_vault_mirror_did_not_make_are_left_alone() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
     seed(&source).await?;
-    let own = fixtures::samples().remove(4).content;
     dest.create_item(
         &PERSONAL,
         &Draft {
-            content: own,
+            content: fixtures::samples().remove(4).content,
             folder_id: None,
             collection_ids: vec![],
         },
     )
     .await?;
+    let own = dest.load(&PERSONAL).await?.items.remove(0);
 
-    let error = run(&source, &dest, &options()).await.unwrap_err();
+    let first = run(&source, &dest, &options()).await?;
+    assert_eq!(first.summary.items_created, fixtures::samples().len());
+    assert_eq!(first.summary.items_deleted, 0);
     assert!(
-        format!("{error:#}").contains("--allow-initial-overwrite"),
-        "{error:#}"
+        first.warnings.iter().any(|w| w.contains("didn't make")),
+        "{:?}",
+        first.warnings
     );
-    let untouched = dest.load(&PERSONAL).await?;
-    assert_eq!(untouched.items.len(), 1);
-    assert_eq!(untouched.items[0].name(), "Visa");
+    let after = dest.load(&PERSONAL).await?;
+    assert_eq!(after.items.len(), fixtures::samples().len() + 1);
+    let kept = after.items.iter().find(|item| item.id == own.id).unwrap();
+    assert_eq!(kept.content, own.content);
+    assert_eq!(kept.revision_date, own.revision_date);
 
-    let confirmed = MirrorOptions {
-        safety: Safety {
-            allow_initial_overwrite: true,
-            ..Safety::default()
-        },
-        ..options()
-    };
-    let outcome = run(&source, &dest, &confirmed).await?;
-    assert_eq!(outcome.summary.items_deleted, 1);
-    assert_eq!(
-        dest.load(&PERSONAL).await?.items.len(),
-        fixtures::samples().len()
-    );
+    let second = run(&source, &dest, &options()).await?;
+    assert!(!second.changed);
+    assert!(second.warnings.is_empty(), "{:?}", second.warnings);
     Ok(())
 }
 
@@ -352,7 +355,6 @@ async fn swapped_source_and_destination_are_refused() -> Result<()> {
 
     let everything = MirrorOptions {
         safety: Safety {
-            allow_initial_overwrite: true,
             allow_mass_delete: true,
             ..Safety::default()
         },
@@ -386,7 +388,6 @@ async fn one_vault_reached_through_two_addresses_is_refused() -> Result<()> {
 
     let everything = MirrorOptions {
         safety: Safety {
-            allow_initial_overwrite: true,
             allow_mass_delete: true,
             ..Safety::default()
         },

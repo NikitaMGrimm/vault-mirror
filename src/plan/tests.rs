@@ -199,8 +199,12 @@ fn assert_converged(source: &Vault, dest: &Vault, mode: Mode) {
     assert!(!again.has_changes(), "plan still has changes: {again:#?}");
     let live = source.items.iter().filter(|item| !item.in_trash).count();
     assert_eq!(again.unchanged, live);
-    let mirrored = dest.items.iter().filter(|item| !item.in_trash).count();
-    assert_eq!(mirrored, live);
+    let copies = dest
+        .items
+        .iter()
+        .filter(|item| !item.in_trash && marker_of(item).is_some())
+        .count();
+    assert_eq!(copies, live);
 }
 
 fn mirrored(source: &Vault, mode: Mode) -> Vault {
@@ -261,6 +265,7 @@ fn a_source_edit_rewrites_only_that_item() {
             entry: 1,
             dest: 1,
             write_content: true,
+            changed_in_dest: false,
             sync_attachments: false,
             set_archived: None
         }]
@@ -285,6 +290,7 @@ fn a_hand_edited_destination_item_is_repaired_although_its_marker_is_current() {
     let plan = plan(&source, &dest, Mode::Personal);
     assert_eq!(plan.updates.len(), 1);
     assert!(plan.updates[0].write_content);
+    assert!(plan.updates[0].changed_in_dest);
     assert_converged(
         &source,
         &apply(&source, &dest, Mode::Personal),
@@ -293,7 +299,7 @@ fn a_hand_edited_destination_item_is_repaired_although_its_marker_is_current() {
 }
 
 #[test]
-fn destination_items_without_a_live_source_are_deleted_with_a_reason() {
+fn copies_without_a_live_source_are_deleted_with_a_reason() {
     let source = vault(vec![login("s1", "One", "pw1"), login("s2", "Two", "pw2")]);
     let mut dest = mirrored(&source, Mode::Personal);
     let source = vault(vec![login("s1", "One", "pw1")]);
@@ -316,11 +322,11 @@ fn destination_items_without_a_live_source_are_deleted_with_a_reason() {
         reasons,
         [
             ("dest-item-2", DeleteReason::Stale),
-            ("manual", DeleteReason::Untracked),
             ("copy", DeleteReason::Duplicate),
         ]
     );
     assert_eq!(plan.unchanged, 1);
+    assert_eq!(plan.untracked, 1, "the item added by hand stays");
     assert_converged(
         &source,
         &apply(&source, &dest, Mode::Personal),
@@ -352,13 +358,8 @@ fn a_malformed_marker_is_not_trusted() {
     assert_eq!(marker_of(&dest.items[0]), None);
     let plan = plan(&source, &dest, Mode::Personal);
     assert_eq!(plan.creates, [0]);
-    assert_eq!(
-        plan.deletes,
-        [Delete {
-            dest: 0,
-            reason: DeleteReason::Untracked
-        }]
-    );
+    assert!(plan.deletes.is_empty());
+    assert_eq!(plan.untracked, 1);
 }
 
 #[test]
@@ -374,10 +375,8 @@ fn a_field_that_only_looks_like_a_marker_is_not_trusted() {
     ]));
 
     assert_eq!(marker_of(&dest.items[0]), None);
-    assert_eq!(
-        check_safety(&plan(&source, &dest, Mode::Personal), &Safety::default()),
-        Err(SafetyViolation::InitialOverwrite(1))
-    );
+    let plan = plan(&source, &dest, Mode::Personal);
+    assert_eq!((plan.untracked, plan.deletes.len()), (1, 0));
 }
 
 #[test]
@@ -589,6 +588,7 @@ fn archive_state_is_mirrored_without_rewriting_content() {
             entry: 0,
             dest: 0,
             write_content: false,
+            changed_in_dest: false,
             sync_attachments: false,
             set_archived: Some(true)
         }]
@@ -818,7 +818,6 @@ fn a_source_that_carries_markers_is_refused() {
         Err(SafetyViolation::SourceLooksLikeMirror(3))
     );
     let lenient = Safety {
-        allow_initial_overwrite: true,
         allow_mass_delete: true,
         ..Safety::default()
     };
@@ -829,48 +828,47 @@ fn a_source_that_carries_markers_is_refused() {
 }
 
 #[test]
-fn a_first_run_into_a_vault_with_content_needs_confirmation() {
+fn what_vault_mirror_did_not_make_is_left_alone() {
     let source = numbered(3);
-    let dest = vault(vec![login("existing", "Already here", "pw")]);
-    let plan = plan(&source, &dest, Mode::Personal);
-    assert_eq!(
-        check_safety(&plan, &Safety::default()),
-        Err(SafetyViolation::InitialOverwrite(1))
-    );
-    let confirmed = Safety {
-        allow_initial_overwrite: true,
-        ..Safety::default()
-    };
-    assert_eq!(check_safety(&plan, &confirmed), Ok(()));
+    let mut dest = vault(vec![login("existing", "Already here", "pw")]);
+    dest.folders = vec![folder("own", "Mine"), folder("empty", "Leftover")];
+    dest.items[0].folder_id = Some("own".into());
 
-    // An empty destination, or one that only has trash, needs no confirmation.
-    assert_eq!(
-        check_safety(
-            &super::plan(&source, &Vault::default(), Mode::Personal),
-            &Safety::default()
-        ),
-        Ok(())
-    );
-    let mut trash_only = dest.clone();
-    trash_only.items[0].in_trash = true;
-    assert_eq!(
-        check_safety(
-            &super::plan(&source, &trash_only, Mode::Personal),
-            &Safety::default()
-        ),
-        Ok(())
-    );
+    // A first run into a destination that is in use.
+    let plan = plan(&source, &dest, Mode::Personal);
+    assert_eq!((plan.creates.len(), plan.deletes.len()), (3, 0));
+    assert_eq!(plan.untracked, 1);
+    assert_eq!(plan.folders_to_delete, [folder("empty", "Leftover")]);
+    assert_eq!(check_safety(&plan, &Safety::default()), Ok(()));
+    let after = apply(&source, &dest, Mode::Personal);
+    assert_converged(&source, &after, Mode::Personal);
+    let kept = after
+        .items
+        .iter()
+        .find(|item| item.id == "existing")
+        .unwrap();
+    assert_eq!(kept, &dest.items[0]);
+
+    // Later runs leave it alone too.
+    let again = super::plan(&source, &after, Mode::Personal);
+    assert!(!again.has_changes());
+    assert_eq!(again.untracked, 1);
 }
 
 #[test]
-fn a_stray_item_in_an_established_mirror_is_removed_without_confirmation() {
-    let source = numbered(3);
-    let mut dest = mirrored(&source, Mode::Personal);
-    dest.items.push(login("manual", "Added by hand", "x"));
-    assert_eq!(
-        check_safety(&plan(&source, &dest, Mode::Personal), &Safety::default()),
-        Ok(())
-    );
+fn a_collection_holding_an_item_vault_mirror_did_not_make_is_kept() {
+    let mut source = numbered(1);
+    source.collections = vec![collection("c1", "Shared")];
+    source.items[0].collection_ids = vec!["c1".into()];
+    let mut dest = mirrored(&source, Mode::Organization);
+    dest.collections.push(collection("own", "Team"));
+    let mut own = login("own-item", "Team login", "pw");
+    own.collection_ids = vec!["own".into()];
+    dest.items.push(own);
+
+    let plan = plan(&source, &dest, Mode::Organization);
+    assert!(plan.collections_to_delete.is_empty());
+    assert!(!plan.has_changes());
 }
 
 #[test]

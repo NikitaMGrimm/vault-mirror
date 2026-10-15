@@ -49,12 +49,9 @@ another account. Without a destination, it only makes backups.
 
 ## Quick start
 
-You need Docker, your main account, and a new, empty account for the
-destination.
-
-> [!WARNING]
-> vault-mirror deletes everything in the destination that doesn't come from the
-> source. Don't use an account that holds anything you want to keep.
+You need Docker, your main account, and a second account for the destination.
+vault-mirror only changes the copies it makes there. Everything else in the
+destination stays as it is, and the source is never changed.
 
 1. In the web vault of each account, open **Settings → Security → Keys** and
    select **View API key**. Keep both pages open.
