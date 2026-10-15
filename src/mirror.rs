@@ -1,7 +1,7 @@
 //! Makes a destination vault match a source vault.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -681,6 +681,10 @@ fn mode(source: &Scope, dest: &Scope) -> Result<Mode> {
     }
 }
 
+fn attachment_ids(item: &Item) -> BTreeSet<&str> {
+    item.attachments.iter().map(|a| a.id.as_str()).collect()
+}
+
 struct Run<'a> {
     source: &'a Endpoint<'a>,
     dest: &'a Endpoint<'a>,
@@ -1108,14 +1112,34 @@ impl Run<'_> {
         // Deleting items comes last, so a run that fails before has removed
         // no item, only attachments it was replacing.
         self.stage = "deleting obsolete items";
-        let ids: Vec<String> = plan
-            .deletes
-            .iter()
-            .map(|delete| dest_vault.items[delete.dest].id.clone())
-            .collect();
-        if !ids.is_empty() {
-            dest.account.delete_items(&ids).await?;
-            self.reporter.status("Deleted", &count(ids.len(), "item"));
+        if !plan.deletes.is_empty() {
+            // The plan may come from the backup at the start of the run, and
+            // deleting bypasses the trash. An item edited since holds what no
+            // backup does.
+            let now = dest.account.load(&dest.scope).await?;
+            let now: HashMap<&str, &Item> = (now.items.iter())
+                .map(|item| (item.id.as_str(), item))
+                .collect();
+            let mut ids = Vec::new();
+            for delete in &plan.deletes {
+                let planned = &dest_vault.items[delete.dest];
+                let Some(item) = now.get(planned.id.as_str()) else {
+                    continue;
+                };
+                if item.content != planned.content
+                    || attachment_ids(item) != attachment_ids(planned)
+                {
+                    bail!(
+                        "destination item {} changed during the run. Run again to mirror it",
+                        planned.id
+                    );
+                }
+                ids.push(planned.id.clone());
+            }
+            if !ids.is_empty() {
+                dest.account.delete_items(&ids).await?;
+                self.reporter.status("Deleted", &count(ids.len(), "item"));
+            }
         }
         if plan.folders_to_delete.is_empty() && plan.collections_to_delete.is_empty() {
             return Ok(());

@@ -916,6 +916,59 @@ async fn an_item_added_after_the_backup_is_left_alone() -> Result<()> {
     Ok(())
 }
 
+/// A copy the plan deletes, but that was edited after the backup was read,
+/// is not deleted: no backup holds the edit.
+#[tokio::test]
+async fn a_copy_edited_after_the_backup_is_not_deleted() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    fixtures::seed(&source).await?;
+    run(&source, &dest, &options()).await?;
+    let originals = source.load(&PERSONAL).await?;
+    source
+        .delete_items(&[by_name(&originals, "Identity").id.clone()])
+        .await?;
+
+    let backed_up = dest.load(&PERSONAL).await?;
+    let copy = by_name(&backed_up, "Identity");
+    let mut edited = Draft {
+        content: copy.content.clone(),
+        folder_id: copy.folder_id.clone(),
+        collection_ids: vec![],
+    };
+    edited
+        .content
+        .insert("notes".into(), Node::secret("edited meanwhile"));
+    dest.update_item(&PERSONAL, copy, &edited).await?;
+    let endpoint = |account| Endpoint {
+        account,
+        scope: PERSONAL,
+    };
+    let error = mirror_onto(
+        &endpoint(&source),
+        &endpoint(&dest),
+        Some(backed_up),
+        &options(),
+        &Capture::default(),
+    )
+    .await
+    .expect_err("the edited copy must stop the deletion");
+    assert_eq!(error.stage, "deleting obsolete items");
+    let after = dest.load(&PERSONAL).await?;
+    assert_eq!(
+        by_name(&after, "Identity").content["notes"].as_str(),
+        Some("edited meanwhile")
+    );
+
+    // The next run plans from the edited copy, so it may delete it.
+    run(&source, &dest, &options()).await?;
+    let after = dest.load(&PERSONAL).await?;
+    assert!(after.items.iter().all(|item| item.name() != "Identity"));
+    Ok(())
+}
+
 /// Copies go into the folder the plan picked, even when the destination has
 /// two of that name that both have to stay.
 #[tokio::test]
