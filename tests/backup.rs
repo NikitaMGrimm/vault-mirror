@@ -690,6 +690,83 @@ async fn destination_attachments_are_backed_up_before_the_mirror_deletes_them() 
     Ok(())
 }
 
+/// A file replaced in an archived copy is pulled into the source item, which
+/// stays archived, also on servers where an upload takes an item out of the
+/// archive.
+#[tokio::test]
+async fn a_pull_into_an_archived_item_keeps_it_archived() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    let name = "Bare login without folder";
+    let made = source
+        .create_item(
+            &PERSONAL,
+            &Draft {
+                content: fixtures::named(name).content,
+                folder_id: None,
+                collection_ids: vec![],
+            },
+        )
+        .await?;
+    source
+        .upload_attachment(&PERSONAL, &made, "file.txt", b"first")
+        .await?;
+    source
+        .set_archived(std::slice::from_ref(&made.id), true)
+        .await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    let capture = Capture::default();
+    let run = |flags| app::run_once(&config, flags, &capture);
+    let first = run(RunFlags::default()).await;
+    assert!(first.succeeded(), "{first:?}");
+    if first.warnings.iter().any(|w| w.contains("archive")) {
+        eprintln!("skipping: the destination server does not archive items");
+        return Ok(());
+    }
+
+    let vault = dest.load(&PERSONAL).await?;
+    let copy = by_name(&vault, name);
+    dest.delete_attachment(&copy.id, &copy.attachments[0].id)
+        .await?;
+    dest.upload_attachment(&PERSONAL, copy, "file.txt", b"second")
+        .await?;
+    let vault = dest.load(&PERSONAL).await?;
+    let copy = by_name(&vault, name);
+    if !copy.archived {
+        dest.set_archived(std::slice::from_ref(&copy.id), true)
+            .await?;
+    }
+
+    let pulled = run(RunFlags {
+        pull: true,
+        ..RunFlags::default()
+    })
+    .await;
+    assert!(pulled.succeeded(), "{pulled:?}");
+    assert_eq!(pulled.pulled.as_ref().unwrap().summary.items_updated, 1);
+    for (account, vault) in [
+        (&source, source.load(&PERSONAL).await?),
+        (&dest, dest.load(&PERSONAL).await?),
+    ] {
+        let item = by_name(&vault, name);
+        assert!(item.archived);
+        let [attachment] = item.attachments.as_slice() else {
+            panic!("expected one attachment");
+        };
+        let data = account
+            .download_attachment(&PERSONAL, item, attachment)
+            .await?;
+        assert_eq!(data, b"second");
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_setup_without_a_destination_only_backs_up() -> Result<()> {
     let Some(sandbox) = sandbox().await else {

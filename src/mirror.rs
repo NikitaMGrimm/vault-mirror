@@ -353,6 +353,7 @@ pub async fn pull(
         return Ok(pulled);
     }
 
+    let mut archiver = Archiver::default();
     for update in changed {
         let original = &source_vault.items[plan.entries[update.entry].source];
         let copy = &dest_vault.items[update.dest];
@@ -387,7 +388,7 @@ pub async fn pull(
             continue;
         }
         let old: Vec<String> = original.attachments.iter().map(|a| a.id.clone()).collect();
-        let (stored, copied) = copy_attachments(
+        let (mut stored, copied) = copy_attachments(
             (dest, copy),
             (source, &written),
             &old,
@@ -396,6 +397,10 @@ pub async fn pull(
         )
         .await?;
         pulled.summary.attachments_copied += copied;
+        // Bitwarden's server takes an item out of the archive on an upload.
+        if original.archived && !stored.archived {
+            stored = archiver.archive(source, stored, mode).await?;
+        }
         source
             .account
             .update_item(&source.scope, &stored, &draft(Some(&stored)))
@@ -403,8 +408,6 @@ pub async fn pull(
             .with_context(|| format!("updating source item {}", stored.id))?;
     }
 
-    let mut not_archived = 0;
-    let mut archive_refusal = None;
     for (item, made) in added {
         let folder = folder_name(item.folder_id.as_deref());
         let names = collection_names(item);
@@ -463,35 +466,7 @@ pub async fn pull(
         // Archived before the final marker, so that a pull that stops in
         // between finishes the item, archive state included, when run again.
         if item.archived && !stored.archived {
-            match archive_refusal {
-                Some(_) => not_archived += 1,
-                None => match source
-                    .account
-                    .set_archived(&[stored.id.clone()], true)
-                    .await
-                {
-                    Ok(()) => {
-                        let mut archived =
-                            source.account.get_item(&source.scope, &stored.id).await?;
-                        archived.collection_ids = stored.collection_ids.clone();
-                        if comparable(&archived, None, &[], mode)
-                            != comparable(&stored, None, &[], mode)
-                            || archived.folder_id != stored.folder_id
-                        {
-                            bail!(
-                                "item {} changed during the run. Run again to copy it",
-                                stored.id
-                            );
-                        }
-                        stored = archived;
-                    }
-                    Err(error) if refused(&error) => {
-                        not_archived += 1;
-                        archive_refusal = Some(error);
-                    }
-                    Err(error) => return Err(error),
-                },
-            }
+            stored = archiver.archive(source, stored, mode).await?;
         }
         source
             .account
@@ -499,15 +474,59 @@ pub async fn pull(
             .await
             .with_context(|| format!("updating source item {}", stored.id))?;
     }
-    if let Some(error) = archive_refusal {
+    if let Some(error) = archiver.refusal {
         let warning = format!(
             "The source refused to archive {}: {error:#}",
-            count(not_archived, "item")
+            count(archiver.not_archived, "item")
         );
         reporter.warn(&warning);
         pulled.warnings.push(warning);
     }
     Ok(pulled)
+}
+
+/// Archives source items again after a pull wrote them, and counts those the
+/// server refuses to archive.
+#[derive(Default)]
+struct Archiver {
+    refusal: Option<anyhow::Error>,
+    not_archived: usize,
+}
+
+impl Archiver {
+    /// Returns `stored` as the server holds it once archived, or unchanged
+    /// if the server refuses, now or earlier in the pull.
+    async fn archive(&mut self, source: &Endpoint<'_>, stored: Item, mode: Mode) -> Result<Item> {
+        if self.refusal.is_some() {
+            self.not_archived += 1;
+            return Ok(stored);
+        }
+        match source
+            .account
+            .set_archived(std::slice::from_ref(&stored.id), true)
+            .await
+        {
+            Ok(()) => {
+                let mut archived = source.account.get_item(&source.scope, &stored.id).await?;
+                archived.collection_ids = stored.collection_ids.clone();
+                if comparable(&archived, None, &[], mode) != comparable(&stored, None, &[], mode)
+                    || archived.folder_id != stored.folder_id
+                {
+                    bail!(
+                        "item {} changed during the run. Run again to copy it",
+                        stored.id
+                    );
+                }
+                Ok(archived)
+            }
+            Err(error) if refused(&error) => {
+                self.not_archived += 1;
+                self.refusal = Some(error);
+                Ok(stored)
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// The id of the source folder named `name`, made if it is missing.
