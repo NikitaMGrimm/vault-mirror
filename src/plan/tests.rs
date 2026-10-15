@@ -809,10 +809,7 @@ fn switching_source_and_destination_takes_over_the_copies() {
 
 #[test]
 fn switching_source_and_destination_copies_only_changed_attachments() {
-    let mut original = vault(vec![
-        login("s1", "One", "pw1"),
-        login("s2", "Two", "pw2"),
-    ]);
+    let mut original = vault(vec![login("s1", "One", "pw1"), login("s2", "Two", "pw2")]);
     original.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
     original.items[1].attachments = vec![attachment("a2", "key.txt", 5)];
     let mut mirror = mirrored(&original, Mode::Personal);
