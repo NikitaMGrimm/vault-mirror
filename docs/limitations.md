@@ -10,6 +10,14 @@ Either side can be any of these:
 - Bitwarden's self-hosted server (tested with 2026.9)
 - Vaultwarden (tested with 1.37)
 
+## Accounts
+
+vault-mirror logs in with an account's API key and unlocks the vault with its
+master password, like Bitwarden's own command-line client. An account without
+a master password can't be used: one in an organization that unlocks with
+single sign-on and trusted devices or Key Connector. Use an account that has a
+master password on that side.
+
 ## What isn't copied
 
 - Sends and account settings.
