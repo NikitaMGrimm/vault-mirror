@@ -78,31 +78,24 @@ impl Marker {
     }
 }
 
-fn is_marker_field(field: &Node) -> bool {
-    field
-        .as_map()
-        .and_then(|map| map.get("name"))
-        .and_then(Node::as_str)
-        == Some(MARKER_FIELD)
+fn field_marker(field: &Node) -> Option<Marker> {
+    let map = field.as_map()?;
+    if map.get("name")?.as_str()? != MARKER_FIELD {
+        return None;
+    }
+    Marker::parse(map.get("value")?.as_str()?)
 }
 
-/// True for a `vault-mirror` field this tool wrote, as opposed to a field
-/// someone else gave that name.
+/// True for a `vault-mirror` field this tool wrote. A field someone else
+/// gave that name is their content, and is copied like any other.
 pub fn is_mirror_marker(field: &Node) -> bool {
-    is_marker_field(field)
-        && field
-            .as_map()
-            .and_then(|map| map.get("value"))
-            .and_then(Node::as_str)
-            .and_then(Marker::parse)
-            .is_some()
+    field_marker(field).is_some()
 }
 
 /// The marker on an item. A malformed marker counts as none, so the item is
 /// treated as not a copy rather than trusted.
 pub fn marker_of(item: &Item) -> Option<Marker> {
-    let field = item.fields().iter().rfind(|field| is_marker_field(field))?;
-    Marker::parse(field.as_map()?.get("value")?.as_str()?)
+    item.fields().iter().rev().find_map(field_marker)
 }
 
 /// A live source item with everything the comparison needs.
@@ -296,7 +289,7 @@ impl Entry {
         let mut fields: Vec<Node> = item
             .fields()
             .iter()
-            .filter(|field| !is_marker_field(field))
+            .filter(|field| !is_mirror_marker(field))
             .cloned()
             .collect();
         fields.push(marker.to_field());
@@ -378,10 +371,11 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
     };
 
     let mut entry_by_source_id: HashMap<&str, usize> = HashMap::new();
-    // A source item that is itself a copy names a destination item: the
-    // two vaults have switched roles since that copy was made. Its marker
-    // holds both items' state at the time.
-    let mut reverse_links: HashMap<String, (usize, Marker)> = HashMap::new();
+    // A source item can itself be a copy, made when the two vaults had the
+    // other roles. Its marker names a destination item. Indexed like
+    // `plan.entries`.
+    let mut links: Vec<(&Item, Option<Marker>)> = Vec::new();
+    let mut entry_by_link: HashMap<String, usize> = HashMap::new();
     for (index, item) in source.items.iter().enumerate() {
         if item.in_trash {
             continue;
@@ -409,11 +403,13 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
             // Final once the attachments are copied.
             dest_files: NO_FILES.to_string(),
         };
-        if let Some(link) = marker_of(item) {
-            reverse_links
+        let link = marker_of(item);
+        if let Some(link) = &link {
+            entry_by_link
                 .entry(link.source_id.clone())
-                .or_insert((plan.entries.len(), link));
+                .or_insert(plan.entries.len());
         }
+        links.push((item, link));
         entry_by_source_id.insert(&item.id, plan.entries.len());
         plan.entries.push(Entry {
             source: index,
@@ -441,15 +437,17 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         };
         content_hash(item, folder, &collections, mode)
     };
-    // Unchanged since vault-mirror wrote it, as far as the marker tells.
-    let pristine = |item: &Item, marker: &Marker| {
-        dest_content(item) == marker.content
-            && (marker.dest_files == UNKNOWN || marker.dest_files == dest_files(item))
+    let known = |entry: usize, dest_index: usize, own: Option<&Marker>| {
+        let dest_item = &dest.items[dest_index];
+        let (source_item, link) = &links[entry];
+        let link = link.as_ref().filter(|link| link.source_id == dest_item.id);
+        Known::new(own, link, source_item, dest_item)
     };
 
     // Each destination item that claims to be a copy, by the entry it copies,
-    // with the marker that describes it and whether the link was reversed.
-    let mut claims: BTreeMap<usize, Vec<(usize, Marker, bool)>> = BTreeMap::new();
+    // with its own marker. An item that only the source item's marker names
+    // has none: it is the original that the source item was copied from.
+    let mut claims: BTreeMap<usize, Vec<(usize, Option<Marker>)>> = BTreeMap::new();
     // Folders and collections that hold anything besides copies are kept.
     let mut untracked_folders: HashSet<&str> = dest
         .folders_used_elsewhere
@@ -473,65 +471,60 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
             }
             continue;
         }
-        let Some(marker) = marker else {
-            match reverse_links.get(&item.id) {
-                Some((entry, link)) => {
-                    let entry = *entry;
-                    let source_item = &source.items[plan.entries[entry].source];
-                    // Neither item's attachments changed since the copy, so
-                    // they still match and need no copying.
-                    let files_in_sync = link.source_files == source_files(item)
-                        && link.dest_files == dest_files(source_item);
-                    let files = |hash: String| match files_in_sync {
-                        true => hash,
-                        false => UNKNOWN.to_string(),
-                    };
-                    let marker = Marker {
-                        source_id: source_item.id.clone(),
-                        content: link.content.clone(),
-                        source_files: files(source_files(source_item)),
-                        dest_files: files(dest_files(item)),
-                    };
-                    claims.entry(entry).or_default().push((index, marker, true));
-                }
-                None => {
-                    plan.untracked += 1;
-                    keep_containers(index);
-                }
-            }
-            continue;
-        };
-        plan.tracked_before += 1;
-        match entry_by_source_id.get(marker.source_id.as_str()) {
-            Some(&entry) => claims
-                .entry(entry)
-                .or_default()
-                .push((index, marker, false)),
-            None => plan.deletes.push(Delete {
+        if marker.is_some() {
+            plan.tracked_before += 1;
+        }
+        let entry = marker
+            .as_ref()
+            .and_then(|marker| entry_by_source_id.get(marker.source_id.as_str()));
+        match (entry, entry_by_link.get(&item.id)) {
+            (Some(&entry), _) => claims.entry(entry).or_default().push((index, marker)),
+            // An original, or a copy whose source item is gone, that a source
+            // item copied from it names.
+            (None, Some(&entry)) => claims.entry(entry).or_default().push((index, None)),
+            (None, None) if marker.is_some() => plan.deletes.push(Delete {
                 dest: index,
                 reason: DeleteReason::Stale,
             }),
+            (None, None) => {
+                plan.untracked += 1;
+                keep_containers(index);
+            }
         }
     }
 
     // One copy per source item: the first that is as vault-mirror left it,
-    // else the first. Another unchanged one is a leftover and goes; a
-    // changed one, such as a clone someone edited, is left alone.
-    let mut dest_by_entry: HashMap<usize, (usize, Marker, bool)> = HashMap::new();
+    // else the first. Another copy that is surely unchanged is a leftover and
+    // goes; a changed one, such as a clone someone edited, is left alone, and
+    // so is an original.
+    let mut dest_by_entry: HashMap<usize, (usize, Option<Marker>)> = HashMap::new();
     for (entry, mut candidates) in claims {
         let chosen = candidates
             .iter()
-            .position(|(index, marker, _)| pristine(&dest.items[*index], marker))
+            .position(|(index, own)| {
+                let known = known(entry, *index, own.as_ref());
+                dest_content(&dest.items[*index]) == known.content && !known.files_changed_in_dest
+            })
             .unwrap_or(0);
         let copy = candidates.remove(chosen);
-        for (index, marker, _) in candidates {
-            if pristine(&dest.items[index], &marker) {
+        for (index, own) in candidates {
+            let item = &dest.items[index];
+            let unchanged = own.is_some_and(|own| {
+                dest_content(item) == own.content
+                    && (own.dest_files == dest_files(item)
+                        || (own.dest_files == UNKNOWN && item.attachments.is_empty()))
+            });
+            if unchanged {
                 plan.deletes.push(Delete {
                     dest: index,
                     reason: DeleteReason::Duplicate,
                 });
             } else {
-                plan.detached += 1;
+                if marker_of(item).is_some() {
+                    plan.detached += 1;
+                } else {
+                    plan.untracked += 1;
+                }
                 keep_containers(index);
             }
         }
@@ -539,12 +532,12 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
     }
     plan.reversed = dest_by_entry
         .values()
-        .filter(|(_, _, reversed)| *reversed)
+        .filter(|(index, _)| marker_of(&dest.items[*index]).is_none())
         .count();
 
     for entry_index in 0..plan.entries.len() {
         let source_item = &source.items[plan.entries[entry_index].source];
-        let Some((dest_index, marker, reversed)) = dest_by_entry.get(&entry_index) else {
+        let Some((dest_index, own)) = dest_by_entry.get(&entry_index) else {
             if !copy_attachments {
                 plan.attachments_withheld += source_item.attachments.len();
             }
@@ -552,14 +545,13 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
             continue;
         };
         let dest_item = &dest.items[*dest_index];
+        let known = known(entry_index, *dest_index, own.as_ref());
         // The marker alone is not trusted: a destination item edited by hand
         // still carries the old marker.
         let dest_content = dest_content(dest_item);
-        let files_changed_in_dest =
-            marker.dest_files != UNKNOWN && marker.dest_files != dest_files(dest_item);
-        let mut sync_attachments = marker.source_files
+        let mut sync_attachments = known.source_files
             != plan.entries[entry_index].marker.source_files
-            || files_changed_in_dest
+            || known.files_changed_in_dest
             || attachment_names(dest_item) != attachment_names(source_item);
         if !copy_attachments {
             // The marker goes on vouching for whatever the destination holds,
@@ -579,19 +571,18 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
             }
             sync_attachments = false;
             let entry = &mut plan.entries[entry_index];
-            entry.marker.source_files = marker.source_files.clone();
-            entry.marker.dest_files = marker.dest_files.clone();
+            entry.marker.source_files = known.source_files.clone();
+            entry.marker.dest_files = known.dest_files.clone();
         } else if !sync_attachments {
             plan.entries[entry_index].marker.dest_files = dest_files(dest_item);
         }
         let entry = &plan.entries[entry_index];
-        // A reversed pair gets its first marker on this side.
         let write_content =
-            *reversed || marker != &entry.marker || dest_content != entry.marker.content;
+            own.as_ref() != Some(&entry.marker) || dest_content != entry.marker.content;
         // Only a change that the source version then overwrites counts.
-        let changed_in_dest = (dest_content != marker.content
+        let changed_in_dest = (dest_content != known.content
             && dest_content != entry.marker.content)
-            || (copy_attachments && files_changed_in_dest);
+            || (copy_attachments && known.files_changed_in_dest);
         let set_archived =
             (dest_item.archived != source_item.archived).then_some(source_item.archived);
 
@@ -695,6 +686,58 @@ fn attachment_names(item: &Item) -> Vec<&str> {
     names
 }
 
+/// What the markers tell about a destination item paired with a source item:
+/// its own marker, or for an original only the source item's, which records
+/// the same pair the other way round.
+struct Known {
+    /// The destination item's content when vault-mirror last wrote it.
+    content: String,
+    /// The source attachments the destination holds.
+    source_files: String,
+    /// The destination attachments as vault-mirror left them.
+    dest_files: String,
+    files_changed_in_dest: bool,
+}
+
+impl Known {
+    fn new(own: Option<&Marker>, link: Option<&Marker>, source: &Item, dest: &Item) -> Self {
+        let content = own.or(link).map(|marker| marker.content.clone());
+        let content = content.expect("a pair is linked by at least one marker");
+        // Both items' attachments are as the source item's marker recorded
+        // them, so they still match, however old the destination's own
+        // marker is.
+        if let Some(link) = link
+            && link.source_files == source_files(dest)
+            && link.dest_files == dest_files(source)
+        {
+            return Self {
+                content,
+                source_files: source_files(source),
+                dest_files: dest_files(dest),
+                files_changed_in_dest: false,
+            };
+        }
+        match (own, link) {
+            (Some(own), _) => Self {
+                content,
+                source_files: own.source_files.clone(),
+                dest_files: own.dest_files.clone(),
+                files_changed_in_dest: own.dest_files != UNKNOWN
+                    && own.dest_files != dest_files(dest),
+            },
+            (None, link) => Self {
+                content,
+                source_files: UNKNOWN.to_string(),
+                dest_files: UNKNOWN.to_string(),
+                // The original was the source side of that marker.
+                files_changed_in_dest: link.is_some_and(|link| {
+                    link.source_files != UNKNOWN && link.source_files != source_files(dest)
+                }),
+            },
+        }
+    }
+}
+
 /// The item's content in a form that is equal for the same item on two servers.
 pub fn comparable(item: &Item, folder: Option<&str>, collections: &[String], mode: Mode) -> Value {
     let mut content = item.content.clone();
@@ -704,7 +747,7 @@ pub fn comparable(item: &Item, folder: Option<&str>, collections: &[String], mod
         content.remove("favorite");
     }
     if let Some(Node::List(fields)) = content.get_mut("fields") {
-        fields.retain(|field| !is_marker_field(field));
+        fields.retain(|field| !is_mirror_marker(field));
     }
     if let Some(Node::Map(login)) = content.get_mut("login") {
         // Servers echo the first URI a second time as `uri` for old clients.

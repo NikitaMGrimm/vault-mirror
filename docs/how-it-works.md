@@ -88,7 +88,8 @@ docker compose run --rm vault-mirror run --reverse
 Changes made in the new destination since its last run as the source are
 replaced, with a warning, and are in that run's backup. Items you deleted in the
 new source stay in the new destination, with a warning, because nothing marks
-them as copies. After that, either direction runs without `--reverse`.
+them as copies. Attachments that still match on both sides aren't copied
+again. After that, either direction runs without `--reverse`.
 
 ## Safety checks
 

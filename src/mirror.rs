@@ -498,9 +498,10 @@ impl Run<'_> {
         self.stage = "writing items";
         // Each write yields the entry it was for and the destination item as
         // the server now holds it.
-        // An item whose attachments are still to be copied gets a pending
-        // marker first, and its final one once they are copied and checked.
-        // A run that stops in between leaves an item the next run repairs.
+        // An item whose attachments are still to be copied or removed gets a
+        // pending marker first, and its final one once they are done and
+        // checked. A run that stops in between leaves an item the next run
+        // repairs.
         let pending = |entry_index: usize| {
             plan.copy_attachments
                 && !source_vault.items[plan.entries[entry_index].source]
@@ -542,7 +543,7 @@ impl Run<'_> {
                 async move {
                     let existing = &dest_vault.items[update.dest];
                     let entry = &plan.entries[update.entry];
-                    let draft = if update.sync_attachments && pending(update.entry) {
+                    let draft = if update.sync_attachments {
                         entry.pending_draft(source_vault, folder_ids, collection_ids)?
                     } else if update.write_content {
                         entry.draft(source_vault, folder_ids, collection_ids)?
@@ -602,7 +603,7 @@ impl Run<'_> {
                 .sum(),
             "attachments",
         );
-        let copied: Vec<(usize, usize, Option<Item>)> =
+        let copied: Vec<(usize, usize, Item)> =
             stream::iter(transfers.into_iter().map(|(entry_index, dest_item, old)| {
                 let (folder_ids, collection_ids, uploads) =
                     (&folder_ids, &collection_ids, &uploads);
@@ -641,10 +642,6 @@ impl Run<'_> {
                         ));
                         uploads.add(1);
                     }
-                    if copied.is_empty() {
-                        // Only removals: the marker written before is final.
-                        return anyhow::Ok((entry_index, 0, None));
-                    }
                     let mut stored = dest
                         .account
                         .get_item(&dest.scope, &dest_item.id)
@@ -679,7 +676,7 @@ impl Run<'_> {
                         .update_item(&dest.scope, &stored, &draft)
                         .await
                         .with_context(|| format!("updating destination item {}", dest_item.id))?;
-                    Ok((entry_index, copied.len(), Some(finished)))
+                    anyhow::Ok((entry_index, copied.len(), finished))
                 }
             }))
             // Attachments are held in memory while they are re-encrypted.
@@ -690,9 +687,7 @@ impl Run<'_> {
         let mut total = 0;
         for (entry_index, copied, item) in copied {
             total += copied;
-            if let Some(item) = item {
-                finished.insert(entry_index, item);
-            }
+            finished.insert(entry_index, item);
         }
         if total > 0 {
             self.reporter.status("Copied", &count(total, "attachment"));

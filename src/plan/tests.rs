@@ -90,10 +90,17 @@ fn apply(source: &Vault, dest: &Vault, mode: Mode) -> Vault {
 fn apply_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) -> Vault {
     let plan = plan_with(source, dest, mode, copy_attachments);
     let mut next = dest.clone();
-    let mut counter = dest.items.len() + dest.folders.len() + dest.collections.len();
-    let mut fresh = |prefix: &str| {
+    let taken: HashSet<String> = (dest.items.iter().map(|i| i.id.clone()))
+        .chain(dest.folders.iter().map(|f| f.id.clone()))
+        .chain(dest.collections.iter().map(|c| c.id.clone()))
+        .collect();
+    let mut counter = 0;
+    let mut fresh = |prefix: &str| loop {
         counter += 1;
-        format!("{prefix}-{counter}")
+        let id = format!("{prefix}-{counter}");
+        if !taken.contains(&id) {
+            break id;
+        }
     };
 
     let mut folder_ids = plan.folder_ids.clone();
@@ -117,9 +124,6 @@ fn apply_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) 
     };
     // As the engine does once an item's attachments are copied.
     let finish = |item: &mut Item, entry: &Entry| {
-        if item.attachments.is_empty() {
-            return;
-        }
         let draft = entry
             .finished_draft(source, item, &folder_ids, &collection_ids)
             .unwrap();
@@ -223,7 +227,7 @@ fn the_marker_is_the_last_field_and_names_the_source_item() {
     let fields = dest.items[0].fields();
     assert_eq!(fields.len(), 2);
     assert_eq!(fields[0].as_map().unwrap()["name"], text("pin"));
-    assert!(is_marker_field(&fields[1]));
+    assert!(is_mirror_marker(&fields[1]));
     assert_eq!(fields[1].as_map().unwrap()["type"], Node::Number(1.into()));
     let marker = marker_of(&dest.items[0]).unwrap();
     assert_eq!(marker.source_id, "s1");
@@ -802,7 +806,7 @@ fn switching_source_and_destination_takes_over_the_copies() {
     assert_eq!(check_safety(&back, &Safety::default()), Ok(()));
     assert!(!back.has_changes());
     for item in original.items.iter().chain(&mirror.items) {
-        let markers = item.fields().iter().filter(|f| is_marker_field(f)).count();
+        let markers = item.fields().iter().filter(|f| is_mirror_marker(f)).count();
         assert_eq!(markers, 1, "{}", item.id);
     }
 }
@@ -819,6 +823,113 @@ fn switching_source_and_destination_copies_only_changed_attachments() {
     let plan = plan(&mirror, &original, Mode::Personal);
     let synced: Vec<bool> = plan.updates.iter().map(|u| u.sync_attachments).collect();
     assert_eq!(synced, [false, true]);
+}
+
+#[test]
+fn switching_back_after_attachments_changed_copies_them_once() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    a.items[0].attachments = vec![attachment("f1", "scan.pdf", 100)];
+    let mut b = mirrored(&a, Mode::Personal);
+    b.items[0].attachments = vec![attachment("f2", "scan.pdf", 120)];
+    let a = apply(&b, &a, Mode::Personal);
+
+    // Each side's markers now disagree about the files, but together they
+    // show the files match.
+    let back = plan(&a, &b, Mode::Personal);
+    assert!(
+        back.updates
+            .iter()
+            .all(|u| !u.sync_attachments && !u.changed_in_dest)
+    );
+    let b = apply(&a, &b, Mode::Personal);
+    assert_converged(&a, &b, Mode::Personal);
+    assert_converged(&b, &a, Mode::Personal);
+}
+
+#[test]
+fn switching_over_a_replaced_attachment_counts_as_a_change_in_the_destination() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    a.items[0].attachments = vec![attachment("f1", "scan.pdf", 100)];
+    let b = mirrored(&a, Mode::Personal);
+    a.items[0].attachments = vec![attachment("f2", "scan.pdf", 150)];
+
+    let update = &plan(&b, &a, Mode::Personal).updates[0];
+    assert!(update.sync_attachments && update.changed_in_dest);
+}
+
+#[test]
+fn an_original_is_never_deleted_as_a_duplicate() {
+    let original = vault(vec![login("a1", "One", "pw1")]);
+    let copies = mirrored(&original, Mode::Personal);
+    // The original was in the trash when the copies were mirrored back, so
+    // that made a second item, listed first.
+    let mut trashed = original.clone();
+    trashed.items[0].in_trash = true;
+    let mut a = apply(&copies, &trashed, Mode::Personal);
+    a.items[0].in_trash = false;
+    a.items.reverse();
+
+    let plan = plan(&copies, &a, Mode::Personal);
+    assert!(plan.deletes.is_empty());
+    assert_eq!((plan.untracked, plan.reversed), (1, 0));
+}
+
+#[test]
+fn a_marker_naming_a_deleted_item_gives_way_to_the_source_items_marker() {
+    let a = vault(vec![login("a1", "One", "pw1"), login("a2", "Two", "pw2")]);
+    let mut b = mirrored(&a, Mode::Personal);
+    // So that no later copy gets its id.
+    b.items[0].id = "deleted".into();
+    let a = apply(&b, &a, Mode::Personal);
+    b.items.remove(0);
+    let b = apply(&a, &b, Mode::Personal);
+
+    let plan = plan(&b, &a, Mode::Personal);
+    assert_eq!((plan.creates.len(), plan.deletes.len()), (0, 0));
+    assert_eq!(plan.reversed, 0);
+    let a = apply(&b, &a, Mode::Personal);
+    assert_converged(&b, &a, Mode::Personal);
+    assert_converged(&a, &b, Mode::Personal);
+}
+
+#[test]
+fn a_clone_of_a_pending_copy_with_its_own_attachment_is_left_alone() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let mut dest = mirrored(&source, Mode::Personal);
+    // A run stopped before copying the attachments.
+    let entry = &super::plan(&source, &Vault::default(), Mode::Personal).entries[0];
+    let pending = entry
+        .pending_draft(&source, &HashMap::new(), &HashMap::new())
+        .unwrap();
+    dest.items[0].content = pending.content;
+    dest.items[0].attachments = vec![];
+    let mut clone = dest.items[0].clone();
+    clone.id = "clone".into();
+    clone.attachments = vec![attachment("mine", "mine.txt", 5)];
+    dest.items.push(clone);
+
+    let plan = plan(&source, &dest, Mode::Personal);
+    assert!(plan.deletes.is_empty());
+    assert_eq!(plan.detached, 1);
+}
+
+#[test]
+fn a_source_field_named_like_the_marker_is_copied() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].content.insert(
+        "fields".into(),
+        Node::List(vec![map(vec![
+            ("name", text(MARKER_FIELD)),
+            ("value", text("my own note")),
+        ])]),
+    );
+    let dest = mirrored(&source, Mode::Personal);
+
+    let fields = dest.items[0].fields();
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].as_map().unwrap()["value"], text("my own note"));
+    assert!(is_mirror_marker(&fields[1]));
 }
 
 #[test]
