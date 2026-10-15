@@ -251,6 +251,10 @@ pub struct Meta {
     pub salt: String,
     pub fingerprint: String,
     pub attachments: Vec<String>,
+    /// The vault's server-side id: the user's for a personal vault, else the
+    /// organization's. Missing in snapshots made before 0.4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -371,6 +375,7 @@ impl<'a> Store<'a> {
     /// holds the same vault. `stamp` adds the creation time to the document.
     pub fn write_snapshot(
         &self,
+        vault: &str,
         mut document: Value,
         attachment_ids: Vec<String>,
         now: OffsetDateTime,
@@ -420,6 +425,7 @@ impl<'a> Store<'a> {
             fingerprint: fingerprint_of(&salt, &content),
             salt,
             attachments: attachment_ids,
+            vault: Some(vault.to_string()),
         };
         let path = self.snapshots.join(format!("{stem}{SNAPSHOT_SUFFIX}"));
         let pretty = serde_json::to_vec_pretty(&document)?;
@@ -454,16 +460,24 @@ impl<'a> Store<'a> {
         let keep_from = snapshots
             .len()
             .saturating_sub(retention.keep_at_least.max(1));
-        let newest_of_day: BTreeMap<time::Date, usize> = snapshots
+        // One directory holds several vaults once the settings name another
+        // account or organization, so each vault is thinned on its own. A
+        // snapshot of an unknown vault is kept for the whole retention.
+        let vault_of = |snapshot: &SnapshotInfo| {
+            let vault = snapshot.meta.as_ref()?.vault.clone()?;
+            Some((vault, snapshot.created.date()))
+        };
+        let newest_of_day: BTreeMap<(String, time::Date), usize> = snapshots
             .iter()
             .enumerate()
-            .map(|(index, snapshot)| (snapshot.created.date(), index))
+            .filter_map(|(index, snapshot)| Some((vault_of(snapshot)?, index)))
             .collect();
         let mut kept = Vec::new();
         for (index, snapshot) in snapshots.into_iter().enumerate() {
-            let day_kept = snapshot.created >= cutoff
-                && newest_of_day.get(&snapshot.created.date()) == Some(&index);
-            if index >= keep_from || snapshot.created >= recent || day_kept {
+            let thinned =
+                vault_of(&snapshot).is_some_and(|day| newest_of_day.get(&day) != Some(&index));
+            let in_retention = snapshot.created >= cutoff && !thinned;
+            if index >= keep_from || snapshot.created >= recent || in_retention {
                 kept.push(snapshot);
                 continue;
             }
@@ -521,8 +535,18 @@ fn fingerprint_of(salt: &str, content: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// The time in a name `write_snapshot` gave, and `None` for any other name, so
+/// that pruning never removes a file vault-mirror didn't write.
 fn parse_snapshot_time(stem: &str) -> Option<OffsetDateTime> {
-    let stamp = stem.strip_prefix("vault-")?.get(..16)?;
+    let rest = stem.strip_prefix("vault-")?;
+    let (stamp, counter) = rest.split_at_checked(16)?;
+    let counter_ok = match counter.strip_prefix('-') {
+        Some(digits) => !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()),
+        None => counter.is_empty(),
+    };
+    if !counter_ok {
+        return None;
+    }
     let format = format_description!("[year][month][day]T[hour][minute][second]Z");
     PrimitiveDateTime::parse(stamp, format)
         .ok()
@@ -556,7 +580,7 @@ mod tests {
         let now = datetime!(2026-10-14 02:30:00 UTC);
 
         let path = store
-            .write_snapshot(document("hunter2"), vec![], now, stamp)
+            .write_snapshot("v", document("hunter2"), vec![], now, stamp)
             .unwrap()
             .unwrap();
         assert_eq!(path.file_name().unwrap(), "vault-20261014T023000Z.json.age");
@@ -630,26 +654,26 @@ mod tests {
 
         assert!(
             store
-                .write_snapshot(document("a"), vec![], t0, stamp)
+                .write_snapshot("v", document("a"), vec![], t0, stamp)
                 .unwrap()
                 .is_some()
         );
         assert!(
             store
-                .write_snapshot(document("a"), vec![], t0 + Duration::hours(1), stamp)
+                .write_snapshot("v", document("a"), vec![], t0 + Duration::hours(1), stamp)
                 .unwrap()
                 .is_none()
         );
         assert!(
             store
-                .write_snapshot(document("b"), vec![], t0 + Duration::hours(2), stamp)
+                .write_snapshot("v", document("b"), vec![], t0 + Duration::hours(2), stamp)
                 .unwrap()
                 .is_some()
         );
         // Changing back is a change relative to the newest snapshot.
         assert!(
             store
-                .write_snapshot(document("a"), vec![], t0 + Duration::hours(3), stamp)
+                .write_snapshot("v", document("a"), vec![], t0 + Duration::hours(3), stamp)
                 .unwrap()
                 .is_some()
         );
@@ -663,11 +687,11 @@ mod tests {
         let store = Store::open(dir.path(), "source", &keys).unwrap();
         let now = datetime!(2026-10-14 02:30:00 UTC);
         let first = store
-            .write_snapshot(document("a"), vec![], now, stamp)
+            .write_snapshot("v", document("a"), vec![], now, stamp)
             .unwrap()
             .unwrap();
         let second = store
-            .write_snapshot(document("b"), vec![], now, stamp)
+            .write_snapshot("v", document("b"), vec![], now, stamp)
             .unwrap()
             .unwrap();
         assert_ne!(first, second);
@@ -709,6 +733,7 @@ mod tests {
             let at = now - Duration::days(age_days);
             store
                 .write_snapshot(
+                    "v",
                     document(&age_days.to_string()),
                     vec![attachment.to_string()],
                     at,
@@ -766,7 +791,7 @@ mod tests {
         for hours in (1..=7 * 24).rev() {
             let at = now - Duration::hours(hours);
             store
-                .write_snapshot(document(&hours.to_string()), vec![], at, stamp)
+                .write_snapshot("v", document(&hours.to_string()), vec![], at, stamp)
                 .unwrap();
         }
         let retention = Retention {
@@ -796,13 +821,48 @@ mod tests {
     }
 
     #[test]
+    fn each_vault_keeps_its_own_snapshot_of_the_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), &passphrase("p")).unwrap();
+        let store = Store::open(dir.path(), "source", &keys).unwrap();
+        let now = datetime!(2026-10-15 12:00:00 UTC);
+        let day = now - Duration::days(2);
+        let personal = store
+            .write_snapshot("user", document("mine"), vec![], day, stamp)
+            .unwrap()
+            .unwrap();
+        // The settings then name an organization, which is backed up hourly.
+        for hour in 1..=11 {
+            let at = day + Duration::hours(hour);
+            store
+                .write_snapshot("org", document(&hour.to_string()), vec![], at, stamp)
+                .unwrap();
+        }
+        // A file vault-mirror didn't write, with a name like a snapshot's.
+        let foreign = store
+            .snapshots
+            .join("vault-20261013T230000Z-imported.json.age");
+        fs::write(&foreign, b"x").unwrap();
+
+        let retention = Retention {
+            days: 30,
+            keep_at_least: 1,
+        };
+        store.prune(&retention, now).unwrap();
+        let kept: Vec<PathBuf> = store.list().unwrap().into_iter().map(|s| s.path).collect();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0], personal);
+        assert!(foreign.exists());
+    }
+
+    #[test]
     fn attachments_are_not_collected_when_a_snapshot_has_no_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Keys::open(dir.path(), &passphrase("p")).unwrap();
         let store = Store::open(dir.path(), "source", &keys).unwrap();
         let now = datetime!(2026-10-14 00:00:00 UTC);
         let path = store
-            .write_snapshot(document("a"), vec!["needed".into()], now, stamp)
+            .write_snapshot("v", document("a"), vec!["needed".into()], now, stamp)
             .unwrap()
             .unwrap();
         store.write_attachment("needed", b"x").unwrap();
@@ -832,6 +892,7 @@ mod tests {
         let store = Store::open(dir.path(), "source", &keys).unwrap();
         let path = store
             .write_snapshot(
+                "v",
                 document("a"),
                 vec![],
                 datetime!(2026-10-14 00:00:00 UTC),

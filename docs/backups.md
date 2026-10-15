@@ -38,7 +38,7 @@ Backups don't grow forever. After each backup, vault-mirror prunes the
 snapshots of that vault:
 
 - it keeps every snapshot from the last 24 hours;
-- for older days, it keeps only the newest snapshot of each day;
+- for older days, it keeps only the newest snapshot of each day, in UTC;
 - it deletes snapshots older than `RETENTION_DAYS`, 30 by default;
 - it always keeps the newest `MIN_FILES` snapshots, 10 by default, however old
   they are.
