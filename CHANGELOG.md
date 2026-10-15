@@ -6,9 +6,35 @@ Notable changes for users. The format follows
 
 ## [0.5.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.4.0...v0.5.0) - 2026-10-15
 
+### Changed
+
+- **Breaking:** the hidden field on each copy is now called `vault-mirror`
+  instead of `__source`, and records the source and the copy's attachments
+  separately. Copies made by earlier versions aren't recognized, so empty the
+  destination before the first run, or each item is copied a second time.
+- Adding, removing or replacing an attachment on a copy now counts as a
+  change in the destination and gets the same warning as an edit.
+- A custom field you name `vault-mirror` yourself is copied like any other
+  field.
+
 ### Added
 
-- [**breaking**] a marker that tells which side changed, and switching source and destination ([#34](https://github.com/NikitaMGrimm/vault-mirror/pull/34))
+- Switching the source and destination. Swap the `SOURCE_` and `DEST_`
+  settings and run once with `run --reverse`: the existing items are updated
+  in place instead of copied again, and attachments that still match aren't
+  copied. After that, either direction runs without the flag, and no item
+  ever gets more than one marker. Without `--reverse`, the first run after a
+  swap stops, because swapped settings are usually a mistake. See
+  [Switching the source and destination](docs/how-it-works.md#switching-the-source-and-destination).
+- Clones of a copy. If you clone a copy and change the clone, runs leave the
+  clone alone and warn that it still carries the `vault-mirror` field.
+
+### Fixed
+
+- A run that stops while removing a copy's attachments no longer makes the
+  next run report a change in the destination.
+- A run stops instead of overwriting a copy that someone edits while the run
+  copies its attachments.
 
 ## [0.4.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.3.0...v0.4.0) - 2026-10-15
 
