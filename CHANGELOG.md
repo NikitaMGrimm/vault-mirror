@@ -6,15 +6,33 @@ Notable changes for users. The format follows
 
 ## [0.4.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.3.0...v0.4.0) - 2026-10-15
 
+### Changed
+
+- **Breaking:** vault-mirror changes and deletes only the copies it made in
+  the destination. Items without a `__source` marker stay as they are, and
+  so do the folders and collections that hold them, so you can keep your own
+  items there. `--allow-initial-overwrite` is gone, because a first run no
+  longer deletes anything. If the destination holds older copies of the
+  source, such as from another tool, delete them to avoid duplicates; the
+  first run warns about them.
+- `MAX_DELETE_PERCENT` counts copies only.
+- A run warns before it replaces copies that were changed in the
+  destination.
+- Backups stay small. Past the last 24 hours, only the newest snapshot of
+  each UTC day is kept, for each vault on its own. With the defaults and
+  hourly runs, that is at most about 54 snapshots per vault instead of about
+  720. Pruning only touches files vault-mirror wrote.
+
 ### Added
 
-- keep one snapshot a day after the first day, so backups stay small ([#28](https://github.com/NikitaMGrimm/vault-mirror/pull/28))
-- [**breaking**] leave destination items that vault-mirror didn't make alone ([#27](https://github.com/NikitaMGrimm/vault-mirror/pull/27))
-- warn when a server address sends the API key unencrypted over the internet ([#25](https://github.com/NikitaMGrimm/vault-mirror/pull/25))
+- A warning when `SOURCE_SERVER` or `DEST_SERVER` uses `http://` for a host
+  outside your network, where the API key would cross the internet
+  unencrypted.
+- [Questions](docs/questions.md): short answers to what people ask first.
 
 ### Fixed
 
-- keep folder and collection names out of error messages ([#31](https://github.com/NikitaMGrimm/vault-mirror/pull/31))
+- Error messages no longer contain folder or collection names.
 
 ## [0.3.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.2.0...v0.3.0) - 2026-10-14
 
