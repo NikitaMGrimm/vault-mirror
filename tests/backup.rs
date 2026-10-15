@@ -452,6 +452,31 @@ async fn a_pull_brings_back_what_changed_in_the_destination() -> Result<()> {
     )
     .await?;
 
+    let dry = Capture::default();
+    let previewed = app::run_once(
+        &config,
+        RunFlags {
+            pull: true,
+            dry_run: true,
+            ..RunFlags::default()
+        },
+        &dry,
+    )
+    .await;
+    assert!(previewed.succeeded(), "{previewed:?}");
+    assert!(
+        dry.0.lock().unwrap().contains(
+            &"info: Would pull 1 new item and 1 changed item into the source".to_string()
+        )
+    );
+    assert!(
+        !dry.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("Pulling"))
+    );
+
     let pulled = run(RunFlags {
         pull: true,
         ..RunFlags::default()

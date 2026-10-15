@@ -333,6 +333,22 @@ pub async fn pull(
 
     pulled.summary.items_updated = changed.len();
     pulled.summary.items_created = added.len();
+    let items: Vec<String> = [(added.len(), "new item"), (changed.len(), "changed item")]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, noun)| count(n, noun))
+        .collect();
+    match (items.is_empty(), options.dry_run) {
+        (true, _) => reporter.status("Found", "nothing to pull from the destination"),
+        (false, true) => reporter.status(
+            "Would pull",
+            &format!("{} into the source", items.join(" and ")),
+        ),
+        (false, false) => reporter.status(
+            "Pulling",
+            &format!("{} into the source", items.join(" and ")),
+        ),
+    }
     if options.dry_run {
         return Ok(pulled);
     }

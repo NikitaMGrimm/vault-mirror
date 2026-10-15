@@ -241,6 +241,9 @@ async fn run_and_report(config: &Config, flags: RunFlags) -> bool {
 fn finished(status: &app::Status) -> String {
     let seconds = status.duration_seconds;
     match &status.mirror {
+        _ if status.dry_run && status.pulled.is_some() => {
+            format!("dry run in {seconds:.1}s; neither vault was changed")
+        }
         _ if status.dry_run => format!("dry run in {seconds:.1}s; the destination is unchanged"),
         Some(app::SummaryRecord {
             summary: mirror, ..
