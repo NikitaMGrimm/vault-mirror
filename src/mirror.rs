@@ -257,6 +257,14 @@ pub async fn pull(
 ) -> Result<Pulled> {
     let mode = mode(&source.scope, &dest.scope)?;
     ensure_distinct(source, dest, source_vault, dest_vault)?;
+    // The mirror checks this too, but only after the pull has changed the
+    // source.
+    let mut selected_source = source_vault.clone();
+    options.filter.apply(&mut selected_source, mode);
+    plan::check_safety(
+        &plan::plan(&selected_source, dest_vault, mode),
+        &options.safety,
+    )?;
     let plan = plan::plan(source_vault, dest_vault, mode);
     let mut pulled = Pulled::default();
     let folder_name = |id: Option<&str>| {

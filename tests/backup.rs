@@ -593,6 +593,91 @@ async fn a_pull_run_again_finishes_an_item_it_added_halfway() -> Result<()> {
     Ok(())
 }
 
+/// A pull that the mirror after it would refuse stops on the same safety
+/// check before it changes the source: one into a source that holds none of
+/// the originals, such as a new account, or one whose filter selects none.
+#[tokio::test]
+async fn a_pull_the_mirror_would_refuse_stops_before_changing_the_source() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    fixtures::seed(&source).await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    assert!(
+        app::run_once(&config, RunFlags::default(), &Capture::default())
+            .await
+            .succeeded()
+    );
+    let mut content = fixtures::named("Bare login without folder").content;
+    content.insert("name".into(), Node::secret("Added during the outage"));
+    dest.create_item(
+        &PERSONAL,
+        &Draft {
+            content,
+            folder_id: None,
+            collection_ids: vec![],
+        },
+    )
+    .await?;
+    let vault = dest.load(&PERSONAL).await?;
+    let visa = by_name(&vault, "Visa");
+    let mut edited = Draft {
+        content: visa.content.clone(),
+        folder_id: visa.folder_id.clone(),
+        collection_ids: vec![],
+    };
+    edited
+        .content
+        .insert("notes".into(), Node::secret("edited during the outage"));
+    dest.update_item(&PERSONAL, visa, &edited).await?;
+    let before = source.load(&PERSONAL).await?;
+
+    let other_account = sandbox.register(&sandbox.source_url).await?;
+    let other_dir = tempfile::tempdir()?;
+    let configs = [
+        config_for(&other_account, Some(&dest_account), other_dir.path(), &[]),
+        config_for(
+            &source_account,
+            Some(&dest_account),
+            dir.path(),
+            &[("INCLUDE_FOLDERS", "Empty")],
+        ),
+    ];
+    for config in &configs {
+        for dry_run in [true, false] {
+            let flags = RunFlags {
+                pull: true,
+                dry_run,
+                ..RunFlags::default()
+            };
+            let refused = app::run_once(config, flags, &Capture::default()).await;
+            assert!(!refused.succeeded(), "{refused:?}");
+            assert_eq!(refused.failure_stage.as_deref(), Some("pull"));
+            assert!(
+                refused
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("--allow-mass-delete")
+            );
+        }
+    }
+    let other = sandbox.open(&other_account).await?;
+    assert!(other.load(&PERSONAL).await?.items.is_empty());
+    let after = source.load(&PERSONAL).await?;
+    assert_eq!(after.items.len(), before.items.len());
+    assert_eq!(
+        by_name(&after, "Visa").content,
+        by_name(&before, "Visa").content
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_failed_run_is_recorded_with_its_stage_and_changes_nothing() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
