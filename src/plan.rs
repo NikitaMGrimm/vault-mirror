@@ -61,6 +61,11 @@ impl Marker {
         valid.then_some(marker)
     }
 
+    /// The attachments were still being copied when the marker was written.
+    pub fn files_pending(&self) -> bool {
+        self.source_files == UNKNOWN || self.dest_files == UNKNOWN
+    }
+
     fn render(&self) -> String {
         format!(
             "{} {} {} {}",

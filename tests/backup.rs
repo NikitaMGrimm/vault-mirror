@@ -11,7 +11,7 @@ use vault_mirror::{
     config::Config,
     mirror::Endpoint,
     node::Node,
-    plan::marker_of,
+    plan::{Mode, mark_copy, marker_of},
     restore::{RestoreOptions, restore},
     snapshot,
     store::{Keys, Protection, Retention, Store},
@@ -483,6 +483,78 @@ async fn a_pull_brings_back_what_changed_in_the_destination() -> Result<()> {
     let again = run(RunFlags::default()).await;
     assert!(again.succeeded(), "{again:?}");
     assert!(!again.mirror.as_ref().unwrap().changed);
+    Ok(())
+}
+
+/// A pull that stopped after adding an item to the source, but before copying
+/// its attachments, finishes it when run again. The destination keeps its file.
+#[tokio::test]
+async fn a_pull_run_again_finishes_an_item_it_added_halfway() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    fixtures::seed(&source).await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    let capture = Capture::default();
+    let run = |flags| app::run_once(&config, flags, &capture);
+    assert!(run(RunFlags::default()).await.succeeded());
+
+    let mut content = fixtures::named("Bare login without folder").content;
+    content.insert("name".into(), Node::secret("Added during the outage"));
+    let added = dest
+        .create_item(
+            &PERSONAL,
+            &Draft {
+                content,
+                folder_id: None,
+                collection_ids: vec![],
+            },
+        )
+        .await?;
+    dest.upload_attachment(&PERSONAL, &added, "outage.txt", b"made during the outage")
+        .await?;
+    // What the stopped pull left: the item, marked as still waiting for its files.
+    source
+        .create_item(
+            &PERSONAL,
+            &Draft {
+                content: mark_copy(&added, &added, None, &[], Mode::Personal, None),
+                folder_id: None,
+                collection_ids: vec![],
+            },
+        )
+        .await?;
+
+    let pulled = run(RunFlags {
+        pull: true,
+        ..RunFlags::default()
+    })
+    .await;
+    assert!(pulled.succeeded(), "{pulled:?}");
+    assert_eq!(pulled.pulled.as_ref().unwrap().summary.items_created, 1);
+    for (account, vault) in [
+        (&source, source.load(&PERSONAL).await?),
+        (&dest, dest.load(&PERSONAL).await?),
+    ] {
+        let named: Vec<_> = (vault.items.iter())
+            .filter(|item| item.name() == "Added during the outage")
+            .collect();
+        assert_eq!(named.len(), 1);
+        let [attachment] = named[0].attachments.as_slice() else {
+            panic!("expected one attachment");
+        };
+        let data = account
+            .download_attachment(&PERSONAL, named[0], attachment)
+            .await?;
+        assert_eq!(data, b"made during the outage");
+    }
+    let back = source.load(&PERSONAL).await?;
+    assert!(back.items.iter().all(|item| marker_of(item).is_none()));
     Ok(())
 }
 

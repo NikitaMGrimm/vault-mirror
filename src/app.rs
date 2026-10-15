@@ -358,6 +358,7 @@ async fn execute(
     if flags.pull {
         progress.stage = "pull";
         reporter.status("Pulling", "changes from the destination into the source");
+        let backed_up = source_vault.is_some();
         let source_vault = match source_vault {
             Some(vault) => vault,
             None => source.account.load(&source.scope).await?,
@@ -371,7 +372,8 @@ async fn execute(
             &dest,
             &source_vault,
             &dest_vault,
-            flags.dry_run,
+            &options,
+            backed_up,
             reporter,
         )
         .await?;
