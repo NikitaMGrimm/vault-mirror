@@ -396,6 +396,72 @@ async fn a_full_run_backs_up_both_sides_mirrors_and_records_the_result() -> Resu
     Ok(())
 }
 
+/// While the source was down, the destination was used instead. A pull
+/// brings its changes back into the source and leaves no marker there.
+#[tokio::test]
+async fn a_pull_brings_back_what_changed_in_the_destination() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    fixtures::seed(&source).await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    let capture = Capture::default();
+    let run = |flags| app::run_once(&config, flags, &capture);
+    assert!(run(RunFlags::default()).await.succeeded());
+
+    let vault = dest.load(&PERSONAL).await?;
+    let visa = by_name(&vault, "Visa");
+    let mut edited = Draft {
+        content: visa.content.clone(),
+        folder_id: visa.folder_id.clone(),
+        collection_ids: vec![],
+    };
+    let Some(Node::Map(card)) = edited.content.get_mut("card") else {
+        panic!()
+    };
+    card.insert("number".into(), Node::secret("5555555555554444"));
+    dest.update_item(&PERSONAL, visa, &edited).await?;
+    let mut added = fixtures::named("Bare login without folder").content;
+    added.insert("name".into(), Node::secret("Added during the outage"));
+    dest.create_item(
+        &PERSONAL,
+        &Draft {
+            content: added,
+            folder_id: None,
+            collection_ids: vec![],
+        },
+    )
+    .await?;
+
+    let pulled = run(RunFlags {
+        pull: true,
+        ..RunFlags::default()
+    })
+    .await;
+    assert!(pulled.succeeded(), "{pulled:?}");
+    let summary = &pulled.pulled.as_ref().unwrap().summary;
+    assert_eq!((summary.items_created, summary.items_updated), (1, 1));
+
+    let back = source.load(&PERSONAL).await?;
+    let card = by_name(&back, "Visa").content["card"].as_map().unwrap();
+    assert_eq!(card["number"].as_str(), Some("5555555555554444"));
+    by_name(&back, "Added during the outage");
+    assert!(back.items.iter().all(|item| marker_of(item).is_none()));
+    let mirrored = dest.load(&PERSONAL).await?;
+    assert_eq!(mirrored.items.len(), fixtures::samples().len() + 1);
+    assert!(mirrored.items.iter().all(|item| marker_of(item).is_some()));
+
+    let again = run(RunFlags::default()).await;
+    assert!(again.succeeded(), "{again:?}");
+    assert!(!again.mirror.as_ref().unwrap().changed);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_failed_run_is_recorded_with_its_stage_and_changes_nothing() -> Result<()> {
     let Some(sandbox) = sandbox().await else {

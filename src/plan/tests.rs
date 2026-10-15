@@ -88,7 +88,7 @@ fn apply(source: &Vault, dest: &Vault, mode: Mode) -> Vault {
 }
 
 fn apply_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) -> Vault {
-    let plan = plan_with(source, dest, mode, copy_attachments);
+    let plan = plan_with(source, dest, mode, copy_attachments, true);
     let mut next = dest.clone();
     let taken: HashSet<String> = (dest.items.iter().map(|i| i.id.clone()))
         .chain(dest.folders.iter().map(|f| f.id.clone()))
@@ -445,12 +445,12 @@ fn attachments_the_destination_cannot_take_follow_once_it_can() {
     let mut source = vault(vec![login("s1", "One", "pw1"), login("s2", "Two", "pw2")]);
     source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
 
-    let first = plan_with(&source, &Vault::default(), Mode::Personal, false);
+    let first = plan_with(&source, &Vault::default(), Mode::Personal, false, true);
     assert_eq!(first.attachments_withheld, 1);
     assert_eq!(first.summary(&source).attachments_copied, 0);
     let dest = apply_with(&source, &Vault::default(), Mode::Personal, false);
     assert!(dest.items.iter().all(|item| item.attachments.is_empty()));
-    let again = plan_with(&source, &dest, Mode::Personal, false);
+    let again = plan_with(&source, &dest, Mode::Personal, false, true);
     assert!(!again.has_changes(), "{again:#?}");
     assert_eq!(again.attachments_withheld, 1);
 
@@ -461,7 +461,7 @@ fn attachments_the_destination_cannot_take_follow_once_it_can() {
         .content
         .insert("name".into(), text("Renamed"));
     let dest = apply_with(&edited, &dest, Mode::Personal, false);
-    assert!(!plan_with(&edited, &dest, Mode::Personal, false).has_changes());
+    assert!(!plan_with(&edited, &dest, Mode::Personal, false, true).has_changes());
 
     let able = plan(&edited, &dest, Mode::Personal);
     assert_eq!(able.updates.len(), 1);
@@ -478,12 +478,12 @@ fn attachments_already_mirrored_are_kept_when_no_more_can_be_copied() {
     let mut source = vault(vec![login("s1", "One", "pw1")]);
     source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
     let dest = mirrored(&source, Mode::Personal);
-    assert!(!plan_with(&source, &dest, Mode::Personal, false).has_changes());
+    assert!(!plan_with(&source, &dest, Mode::Personal, false, true).has_changes());
 
     source.items[0]
         .attachments
         .push(attachment("a2", "new.pdf", 50));
-    let withheld = plan_with(&source, &dest, Mode::Personal, false);
+    let withheld = plan_with(&source, &dest, Mode::Personal, false, true);
     assert!(!withheld.has_changes(), "{withheld:#?}");
     assert_eq!(withheld.attachments_withheld, 1);
     assert!(plan(&source, &dest, Mode::Personal).updates[0].sync_attachments);
@@ -529,7 +529,7 @@ fn a_source_file_replaced_under_the_same_name_counts_as_withheld() {
     let dest = mirrored(&source, Mode::Personal);
     source.items[0].attachments = vec![attachment("a2", "scan.pdf", 120)];
     assert_eq!(
-        plan_with(&source, &dest, Mode::Personal, false).attachments_withheld,
+        plan_with(&source, &dest, Mode::Personal, false, true).attachments_withheld,
         1
     );
 }
@@ -814,6 +814,38 @@ fn switching_source_and_destination_takes_over_the_copies() {
         let markers = item.fields().iter().filter(|f| is_mirror_marker(f)).count();
         assert_eq!(markers, 1, "{}", item.id);
     }
+}
+
+#[test]
+fn switching_back_after_items_were_added_needs_no_flag() {
+    let a = vault(vec![login("a1", "One", "pw1")]);
+    let mut b = mirrored(&a, Mode::Personal);
+    b.items
+        .push(login("b-new", "Added in the destination", "pw"));
+    let a = apply(&b, &a, Mode::Personal);
+
+    let back = plan(&a, &b, Mode::Personal);
+    assert_eq!(back.reversed, 0);
+    assert_eq!(check_safety(&back, &Safety::default()), Ok(()));
+    let b = apply(&a, &b, Mode::Personal);
+    assert_converged(&a, &b, Mode::Personal);
+}
+
+#[test]
+fn without_marking_originals_only_changed_ones_are_written() {
+    let original = vault(vec![login("a1", "One", "pw1"), login("a2", "Two", "pw2")]);
+    let mut copies = mirrored(&original, Mode::Personal);
+    copies.items[1]
+        .content
+        .insert("notes".into(), text("changed while the source was down"));
+
+    let plan = plan_with(&copies, &original, Mode::Personal, true, false);
+    let written: Vec<&str> = (plan.updates.iter())
+        .filter(|u| u.write_content)
+        .map(|u| original.items[u.dest].id.as_str())
+        .collect();
+    assert_eq!(written, ["a2"]);
+    assert_eq!(plan.unchanged, 1);
 }
 
 #[test]

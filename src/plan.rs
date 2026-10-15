@@ -343,13 +343,21 @@ pub enum Mode {
 }
 
 pub fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
-    plan_with(source, dest, mode, true)
+    plan_with(source, dest, mode, true, true)
 }
 
 /// Plans a mirror. Without `copy_attachments`, attachments are neither
 /// copied nor removed, and markers keep vouching for what the destination
-/// already holds, so that the attachments follow once they can.
-pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) -> Plan {
+/// already holds, so that the attachments follow once they can. Without
+/// `mark_originals`, an original that a source item was copied from gets a
+/// marker only when it has to be written anyway.
+pub fn plan_with(
+    source: &Vault,
+    dest: &Vault,
+    mode: Mode,
+    copy_attachments: bool,
+    mark_originals: bool,
+) -> Plan {
     let source_folders = names_by_id(source.folders.iter().map(|f| (&f.id, &f.name)));
     let source_collections = names_by_id(source.collections.iter().map(|c| (&c.id, &c.name)));
     // When the destination has two containers with one name, only the first
@@ -537,10 +545,14 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         }
         dest_by_entry.insert(entry, copy);
     }
-    plan.reversed = dest_by_entry
-        .values()
-        .filter(|(index, _)| marker_of(&dest.items[*index]).is_none())
-        .count();
+    // Once the destination holds copies of the source, the direction is set,
+    // and originals named by source items are just taken over.
+    if !dest_by_entry.values().any(|(_, own)| own.is_some()) {
+        plan.reversed = dest_by_entry
+            .values()
+            .filter(|(index, _)| marker_of(&dest.items[*index]).is_none())
+            .count();
+    }
 
     for entry_index in 0..plan.entries.len() {
         let source_item = &source.items[plan.entries[entry_index].source];
@@ -584,8 +596,11 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
             plan.entries[entry_index].marker.dest_files = dest_files(dest_item);
         }
         let entry = &plan.entries[entry_index];
-        let write_content =
-            own.as_ref() != Some(&entry.marker) || dest_content != entry.marker.content;
+        let marker_stale = match own {
+            Some(own) => own != &entry.marker,
+            None => mark_originals,
+        };
+        let write_content = marker_stale || dest_content != entry.marker.content;
         // Only a change that the source version then overwrites counts.
         let changed_in_dest = (dest_content != known.content
             && dest_content != entry.marker.content)

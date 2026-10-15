@@ -51,7 +51,7 @@ another account. Without a destination, it only makes backups.
 
 You need Docker, your main account, and a second account for the destination.
 vault-mirror only changes the copies it makes there. Everything else in the
-destination stays as it is, and the source is never changed.
+destination stays as it is, and the source is only changed when you ask for it.
 
 1. In the web vault of each account, open **Settings → Security → Keys** and
    select **View API key**. Keep both pages open.

@@ -11,9 +11,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     api::ApiError,
+    node::Node,
     plan::{self, Mode, Plan, Safety, Summary, comparable, differing_paths},
     text::count,
-    vault::{Account, Item, Scope, Vault},
+    vault::{Account, Draft, Item, Scope, Vault},
 };
 
 /// Receives progress lines. Messages never contain vault content, only
@@ -75,6 +76,9 @@ pub struct MirrorOptions {
     /// A backup of the destination was saved before this mirror, so it holds
     /// whatever the mirror replaces.
     pub dest_backed_up: bool,
+    /// Give a destination item that a source item was copied from a marker
+    /// even when it is unchanged, so that later runs know the direction.
+    pub mark_originals: bool,
 }
 
 /// Names of folders, or of collections in an organization, that select what
@@ -154,6 +158,7 @@ impl Default for MirrorOptions {
             verify_attachments: true,
             filter: Filter::default(),
             dest_backed_up: false,
+            mark_originals: true,
         }
     }
 }
@@ -226,6 +231,49 @@ pub async fn mirror_onto(
             source: error,
         }),
     }
+}
+
+/// Takes the markers off source items that name a destination item, as a
+/// pull leaves them. Returns how many items it rewrote.
+pub async fn unmark(
+    source: &Endpoint<'_>,
+    dest: &Endpoint<'_>,
+    concurrency: usize,
+) -> Result<usize> {
+    let source_vault = source.account.load(&source.scope).await?;
+    let dest_vault = dest.account.load(&dest.scope).await?;
+    let dest_ids: HashSet<&str> = dest_vault.items.iter().map(|i| i.id.as_str()).collect();
+    let marked: Vec<&Item> = (source_vault.items.iter())
+        .filter(|item| {
+            !item.in_trash
+                && plan::marker_of(item)
+                    .is_some_and(|marker| dest_ids.contains(marker.source_id.as_str()))
+        })
+        .collect();
+    stream::iter(marked.iter().map(|item| async move {
+        let mut content = item.content.clone();
+        let fields = item
+            .fields()
+            .iter()
+            .filter(|field| !plan::is_mirror_marker(field))
+            .cloned()
+            .collect();
+        content.insert("fields".to_string(), Node::List(fields));
+        let draft = Draft {
+            content,
+            folder_id: item.folder_id.clone(),
+            collection_ids: item.collection_ids.clone(),
+        };
+        source
+            .account
+            .update_item(&source.scope, item, &draft)
+            .await
+            .with_context(|| format!("updating source item {}", item.id))
+    }))
+    .buffer_unordered(concurrency.max(1))
+    .try_collect::<Vec<_>>()
+    .await?;
+    Ok(marked.len())
 }
 
 struct Run<'a> {
@@ -399,7 +447,13 @@ impl Run<'_> {
         }
 
         self.stage = "planning";
-        let plan = plan::plan_with(&source_vault, &dest_vault, mode, self.copy_attachments);
+        let plan = plan::plan_with(
+            &source_vault,
+            &dest_vault,
+            mode,
+            self.copy_attachments,
+            self.options.mark_originals,
+        );
         if plan.attachments_withheld > 0 {
             self.warn(format!(
                 "Not copying {}: the destination account has no premium subscription, which \
@@ -766,7 +820,13 @@ impl Run<'_> {
         // deleted only if a plan from the destination as it is now agrees.
         self.stage = "deleting obsolete folders and collections";
         let now = dest.account.load(&dest.scope).await?;
-        let fresh = plan::plan_with(source_vault, &now, mode, self.copy_attachments);
+        let fresh = plan::plan_with(
+            source_vault,
+            &now,
+            mode,
+            self.copy_attachments,
+            self.options.mark_originals,
+        );
         let mut kept = Summary::default();
         for folder in &plan.folders_to_delete {
             match fresh.folders_to_delete.contains(folder) {
@@ -794,7 +854,13 @@ impl Run<'_> {
     async fn verify(&mut self, source_vault: &Vault, mode: Mode) -> Result<()> {
         let dest = self.dest;
         let dest_vault = dest.account.load(&dest.scope).await?;
-        let mut again = plan::plan_with(source_vault, &dest_vault, mode, self.copy_attachments);
+        let mut again = plan::plan_with(
+            source_vault,
+            &dest_vault,
+            mode,
+            self.copy_attachments,
+            self.options.mark_originals,
+        );
         if self.archive_unsupported {
             again
                 .updates

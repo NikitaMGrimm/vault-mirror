@@ -73,9 +73,27 @@ vault-mirror also compares the content itself, so:
   that it still has the marker. Remove the `vault-mirror` field from it to keep
   it for good; otherwise it is deleted with its source item.
 
+### After an outage
+
+The destination is there for when the source is down. If you add or change
+items in it meanwhile, bring them back once the source is up again:
+
+```sh
+docker compose run --rm vault-mirror run --pull
+```
+
+After backing up both vaults, the run first copies into the source what changed
+in the destination since the last run: items you edited there replace their
+originals, with a warning if the source changed too, and items you added there
+are added to the source. Then it mirrors as usual. Items you deleted in the
+destination are still in the source, so the mirror copies them back; delete
+them in the source if you meant it. The source gets no `vault-mirror` fields:
+the ones the pull needs are removed at the end. With `--dry-run`, it shows only
+what it would copy into the source.
+
 ### Switching the source and destination
 
-To make the destination your main vault, swap the `SOURCE_` and `DEST_`
+To make the destination your main vault for good, swap the `SOURCE_` and `DEST_`
 settings. The new source's items are copies, and their markers name the items
 they came from, so vault-mirror can update those items in place instead of
 making new ones. The first run after the swap stops, because swapped settings

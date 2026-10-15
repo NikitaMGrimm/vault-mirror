@@ -15,7 +15,7 @@ use crate::{
     api::{self, ApiCredentials, ClientOptions, ServerUrls, build_http_client},
     backup::{BackupOptions, BackupReport, backup, backup_loaded},
     config::{Config, VaultConfig},
-    mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto},
+    mirror::{Endpoint, MirrorError, MirrorOptions, Outcome, Reporter, mirror_onto, unmark},
     plan::{Safety, Summary},
     store::{self, Keys, Store},
     text::count,
@@ -31,6 +31,7 @@ pub struct RunFlags {
     pub dry_run: bool,
     pub allow_mass_delete: bool,
     pub reverse: bool,
+    pub pull: bool,
 }
 
 /// The record of a run, written to `last-run.json`. It holds counts, times
@@ -43,6 +44,9 @@ pub struct Status {
     pub finished_at: String,
     pub duration_seconds: f64,
     pub version: String,
+    /// What a pull changed in the source, before the mirror.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pulled: Option<SummaryRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror: Option<SummaryRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -323,19 +327,6 @@ async fn execute(
         dest_vault = Some(vault);
     }
 
-    progress.stage = "mirror";
-    let options = MirrorOptions {
-        dry_run: flags.dry_run,
-        safety: Safety {
-            allow_mass_delete: flags.allow_mass_delete,
-            allow_reverse: flags.reverse,
-            ..config.safety.clone()
-        },
-        concurrency: config.concurrency,
-        verify_attachments: config.verify_attachments,
-        filter: config.filter.clone(),
-        dest_backed_up: dest_vault.is_some(),
-    };
     let source = Endpoint {
         account: &source,
         scope: source_scope,
@@ -344,9 +335,61 @@ async fn execute(
         account: &dest,
         scope: dest_scope,
     };
-    match mirror_onto(&source, &dest, dest_vault, &options, reporter).await {
+    let options = MirrorOptions {
+        dry_run: flags.dry_run,
+        safety: Safety {
+            allow_mass_delete: flags.allow_mass_delete,
+            allow_reverse: flags.reverse || flags.pull,
+            ..config.safety.clone()
+        },
+        concurrency: config.concurrency,
+        verify_attachments: config.verify_attachments,
+        filter: config.filter.clone(),
+        dest_backed_up: dest_vault.is_some(),
+        mark_originals: true,
+    };
+
+    if flags.pull {
+        // The destination's changes go into the source first, the way a run
+        // with the two switched would make them, but without marking what is
+        // unchanged.
+        progress.stage = "pull";
+        reporter.status("Pulling", "changes from the destination into the source");
+        let pull = MirrorOptions {
+            dest_backed_up: keys.is_some(),
+            mark_originals: false,
+            ..options.clone()
+        };
+        let outcome = mirror_onto(&dest, &source, None, &pull, reporter).await;
+        record(progress, outcome, |status| &mut status.pulled)?;
+        if flags.dry_run {
+            return Ok(());
+        }
+    }
+
+    progress.stage = "mirror";
+    let outcome = mirror_onto(&source, &dest, dest_vault, &options, reporter).await;
+    record(progress, outcome, |status| &mut status.mirror)?;
+
+    if flags.pull {
+        progress.stage = "removing markers from the source";
+        let unmarked = unmark(&source, &dest, config.concurrency).await?;
+        if unmarked > 0 {
+            reporter.status("Unmarked", &count(unmarked, "source item"));
+        }
+    }
+    Ok(())
+}
+
+/// Keeps a mirror's summary, in `field`, and its warnings in the status.
+fn record(
+    progress: &mut Progress,
+    outcome: Result<Outcome, MirrorError>,
+    field: fn(&mut Status) -> &mut Option<SummaryRecord>,
+) -> Result<()> {
+    match outcome {
         Ok(outcome) => {
-            progress.status.mirror = Some(SummaryRecord {
+            *field(&mut progress.status) = Some(SummaryRecord {
                 changed: outcome.changed,
                 summary: outcome.summary,
             });
@@ -355,7 +398,7 @@ async fn execute(
         }
         Err(error) => {
             progress.stage = error.stage;
-            progress.status.mirror = error.summary.map(|summary| SummaryRecord {
+            *field(&mut progress.status) = error.summary.map(|summary| SummaryRecord {
                 changed: false,
                 summary,
             });
