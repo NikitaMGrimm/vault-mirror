@@ -426,6 +426,20 @@ async fn a_pull_brings_back_what_changed_in_the_destination() -> Result<()> {
     };
     card.insert("number".into(), Node::secret("5555555555554444"));
     dest.update_item(&PERSONAL, visa, &edited).await?;
+    dest.delete_items(&[by_name(&vault, "Identity").id.clone()])
+        .await?;
+    // Changed only in the source: the pull leaves it as it is.
+    let originals = source.load(&PERSONAL).await?;
+    let passkey = by_name(&originals, "Passkey login");
+    let mut noted = Draft {
+        content: passkey.content.clone(),
+        folder_id: passkey.folder_id.clone(),
+        collection_ids: vec![],
+    };
+    noted
+        .content
+        .insert("notes".into(), Node::secret("edited in the source"));
+    source.update_item(&PERSONAL, passkey, &noted).await?;
     let mut added = fixtures::named("Bare login without folder").content;
     added.insert("name".into(), Node::secret("Added during the outage"));
     dest.create_item(
@@ -451,9 +465,19 @@ async fn a_pull_brings_back_what_changed_in_the_destination() -> Result<()> {
     let card = by_name(&back, "Visa").content["card"].as_map().unwrap();
     assert_eq!(card["number"].as_str(), Some("5555555555554444"));
     by_name(&back, "Added during the outage");
+    assert_eq!(
+        by_name(&back, "Passkey login").content["notes"].as_str(),
+        Some("edited in the source")
+    );
+    // Deleted in the destination, but the pull deletes nothing.
+    by_name(&back, "Identity");
     assert!(back.items.iter().all(|item| marker_of(item).is_none()));
     let mirrored = dest.load(&PERSONAL).await?;
     assert_eq!(mirrored.items.len(), fixtures::samples().len() + 1);
+    assert_eq!(
+        by_name(&mirrored, "Passkey login").content["notes"].as_str(),
+        Some("edited in the source")
+    );
     assert!(mirrored.items.iter().all(|item| marker_of(item).is_some()));
 
     let again = run(RunFlags::default()).await;

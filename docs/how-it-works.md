@@ -82,14 +82,18 @@ items in it meanwhile, bring them back once the source is up again:
 docker compose run --rm vault-mirror run --pull
 ```
 
-After backing up both vaults, the run first copies into the source what changed
-in the destination since the last run: items you edited there replace their
-originals, with a warning if the source changed too, and items you added there
-are added to the source. Then it mirrors as usual. Items you deleted in the
-destination are still in the source, so the mirror copies them back; delete
-them in the source if you meant it. The source gets no `vault-mirror` fields:
-the ones the pull needs are removed at the end. With `--dry-run`, it shows only
-what it would copy into the source.
+After backing up both vaults, the run copies into the source what changed in
+the destination since vault-mirror wrote it:
+
+- a copy you edited replaces its original, with a warning if the original
+  changed too. Its folder comes along; changes to its collections don't;
+- an item you added in the destination is added to the source.
+
+Then it mirrors as usual. A pull deletes nothing: an item you deleted in the
+destination is still in the source, and the mirror copies it back, so delete it
+in the source if you meant it. The source is left without `vault-mirror`
+fields. With `--dry-run`, the run only counts what it would copy into the
+source.
 
 ### Switching the source and destination
 
@@ -107,7 +111,8 @@ Changes made in the new destination since its last run as the source are
 replaced, with a warning, and are in that run's backup. Items you deleted in the
 new source stay in the new destination, with a warning, because nothing marks
 them as copies. Attachments that still match on both sides aren't copied
-again. After that, either direction runs without `--reverse`.
+again. After that, either direction runs without `--reverse`. If items were
+added since the last switch, switching back stops once more, for those items.
 
 ## Safety checks
 

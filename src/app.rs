@@ -13,9 +13,9 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     api::{self, ApiCredentials, ClientOptions, ServerUrls, build_http_client},
-    backup::{BackupOptions, BackupReport, backup, backup_loaded},
+    backup::{BackupOptions, BackupReport, backup_loaded},
     config::{Config, VaultConfig},
-    mirror::{Endpoint, MirrorError, MirrorOptions, Outcome, Reporter, mirror_onto, unmark},
+    mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto, pull, unmark},
     plan::{Safety, Summary},
     store::{self, Keys, Store},
     text::count,
@@ -291,15 +291,22 @@ async fn execute(
     progress.stage = "source login";
     let source = open_account(config, &http, &config.source, "source").await?;
     let source_scope = scope_of(&config.source);
+    // A pull writes to the source, and changes only what this backup holds.
+    let mut source_vault = None;
     if let (Some(keys), Some(options)) = (&keys, &backup_options) {
         progress.stage = "source backup";
         reporter.status("Backing up", "the source vault");
         let store = Store::open(&config.backups_dir, "source", keys)?;
+        let vault = source
+            .load(&source_scope)
+            .await
+            .context("reading the vault")?;
         progress.status.source_backup = Some(
-            backup(&source, &source_scope, &store, options, reporter)
+            backup_loaded(&source, &source_scope, &vault, &store, options, reporter)
                 .await?
                 .into(),
         );
+        source_vault = Some(vault);
     }
 
     let Some(dest_config) = &config.dest else {
@@ -346,30 +353,56 @@ async fn execute(
         verify_attachments: config.verify_attachments,
         filter: config.filter.clone(),
         dest_backed_up: dest_vault.is_some(),
-        mark_originals: true,
     };
 
     if flags.pull {
-        // The destination's changes go into the source first, the way a run
-        // with the two switched would make them, but without marking what is
-        // unchanged.
         progress.stage = "pull";
         reporter.status("Pulling", "changes from the destination into the source");
-        let pull = MirrorOptions {
-            dest_backed_up: keys.is_some(),
-            mark_originals: false,
-            ..options.clone()
+        let source_vault = match source_vault {
+            Some(vault) => vault,
+            None => source.account.load(&source.scope).await?,
         };
-        let outcome = mirror_onto(&dest, &source, None, &pull, reporter).await;
-        record(progress, outcome, |status| &mut status.pulled)?;
+        let dest_vault = match &dest_vault {
+            Some(vault) => vault.clone(),
+            None => dest.account.load(&dest.scope).await?,
+        };
+        let pulled = pull(
+            &source,
+            &dest,
+            &source_vault,
+            &dest_vault,
+            flags.dry_run,
+            reporter,
+        )
+        .await?;
+        progress.status.pulled = Some(SummaryRecord {
+            changed: !flags.dry_run && pulled.summary != Summary::default(),
+            summary: pulled.summary,
+        });
+        progress.status.warnings.extend(pulled.warnings);
         if flags.dry_run {
             return Ok(());
         }
     }
 
     progress.stage = "mirror";
-    let outcome = mirror_onto(&source, &dest, dest_vault, &options, reporter).await;
-    record(progress, outcome, |status| &mut status.mirror)?;
+    match mirror_onto(&source, &dest, dest_vault, &options, reporter).await {
+        Ok(outcome) => {
+            progress.status.mirror = Some(SummaryRecord {
+                changed: outcome.changed,
+                summary: outcome.summary,
+            });
+            progress.status.warnings.extend(outcome.warnings);
+        }
+        Err(error) => {
+            progress.stage = error.stage;
+            progress.status.mirror = error.summary.map(|summary| SummaryRecord {
+                changed: false,
+                summary,
+            });
+            return Err(error.source);
+        }
+    }
 
     if flags.pull {
         progress.stage = "removing markers from the source";
@@ -379,32 +412,6 @@ async fn execute(
         }
     }
     Ok(())
-}
-
-/// Keeps a mirror's summary, in `field`, and its warnings in the status.
-fn record(
-    progress: &mut Progress,
-    outcome: Result<Outcome, MirrorError>,
-    field: fn(&mut Status) -> &mut Option<SummaryRecord>,
-) -> Result<()> {
-    match outcome {
-        Ok(outcome) => {
-            *field(&mut progress.status) = Some(SummaryRecord {
-                changed: outcome.changed,
-                summary: outcome.summary,
-            });
-            progress.status.warnings.extend(outcome.warnings);
-            Ok(())
-        }
-        Err(error) => {
-            progress.stage = error.stage;
-            *field(&mut progress.status) = error.summary.map(|summary| SummaryRecord {
-                changed: false,
-                summary,
-            });
-            Err(error.source)
-        }
-    }
 }
 
 pub fn status_path(backups_dir: &Path) -> PathBuf {
