@@ -4,7 +4,7 @@ use anyhow::Result;
 use common::*;
 use vault_mirror::{
     crypto::KdfParams,
-    mirror::{Endpoint, MirrorOptions},
+    mirror::{Endpoint, MirrorOptions, pull},
     node::Node,
     restore::{RestoreOptions, restore},
     snapshot::{Restorable, RestorableItem},
@@ -420,6 +420,67 @@ async fn items_in_no_collection_are_never_lost_silently() -> Result<()> {
         !run_scoped(&source, source_scope, &dest, dest_scope, &options)
             .await?
             .changed
+    );
+    Ok(())
+}
+
+/// A destination item in no collection is left out of a pull, with a
+/// warning, when the source server refuses such items, instead of stopping
+/// every pull.
+#[tokio::test]
+async fn a_pull_leaves_out_items_in_no_collection_that_the_source_refuses() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, source_scope, _) = organization(&sandbox, &sandbox.source_url).await?;
+    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
+    if dest.server_traits().await?.items_need_collections {
+        eprintln!("skipping: the destination server hides items in no collection");
+        return Ok(());
+    }
+    let note = Draft {
+        content: [
+            ("type".to_string(), Node::Number(2.into())),
+            ("name".to_string(), Node::secret("Loose note")),
+            (
+                "secureNote".to_string(),
+                Node::Map([("type".to_string(), Node::Number(0.into()))].into()),
+            ),
+        ]
+        .into(),
+        folder_id: None,
+        collection_ids: vec![],
+    };
+    dest.create_item(&dest_scope, &note).await?;
+
+    let source_vault = source.load(&source_scope).await?;
+    let dest_vault = dest.load(&dest_scope).await?;
+    let pulled = pull(
+        &Endpoint {
+            account: &source,
+            scope: source_scope,
+        },
+        &Endpoint {
+            account: &dest,
+            scope: dest_scope,
+        },
+        &source_vault,
+        &dest_vault,
+        &MirrorOptions::default(),
+        true,
+        &Capture::default(),
+    )
+    .await?;
+    let refused = source.server_traits().await?.items_need_collections;
+    assert_eq!(pulled.summary.items_created, usize::from(!refused));
+    assert_eq!(
+        pulled
+            .warnings
+            .iter()
+            .any(|w| w.contains("out of the pull")),
+        refused,
+        "{:?}",
+        pulled.warnings
     );
     Ok(())
 }

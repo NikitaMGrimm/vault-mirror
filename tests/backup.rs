@@ -511,6 +511,69 @@ async fn a_pull_brings_back_what_changed_in_the_destination() -> Result<()> {
     Ok(())
 }
 
+/// An item the source server would accept but never show is left out of the
+/// pull, instead of being added again on every pull.
+#[tokio::test]
+async fn a_pull_leaves_out_items_the_source_would_not_show() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    if !dest.server_traits().await?.hidden_item_types.is_empty() {
+        eprintln!("skipping: the destination server does not show passports");
+        return Ok(());
+    }
+    let passport: std::collections::BTreeMap<String, Node> = [
+        ("surname", "Mustermann"),
+        ("givenName", "Erika"),
+        ("passportNumber", "C01X00T47"),
+        ("dateOfBirth", "1964-08-12"),
+        ("expirationDate", "2031-10-31"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), Node::secret(value)))
+    .collect();
+    let draft = Draft {
+        content: [
+            ("type".to_string(), Node::Number(8.into())),
+            ("name".to_string(), Node::secret("Passport")),
+            ("passport".to_string(), Node::Map(passport)),
+        ]
+        .into(),
+        folder_id: None,
+        collection_ids: vec![],
+    };
+    if let Err(error) = dest.create_item(&PERSONAL, &draft).await {
+        eprintln!("skipping: the destination server rejects passports: {error:#}");
+        return Ok(());
+    }
+
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    let hidden = !source.server_traits().await?.hidden_item_types.is_empty();
+    let flags = RunFlags {
+        pull: true,
+        ..RunFlags::default()
+    };
+    let first = app::run_once(&config, flags, &Capture::default()).await;
+    assert!(first.succeeded(), "{first:?}");
+    let created = first.pulled.as_ref().unwrap().summary.items_created;
+    assert_eq!(created, usize::from(!hidden));
+    assert_eq!(
+        first.warnings.iter().any(|w| w.contains("out of the pull")),
+        hidden,
+        "{:?}",
+        first.warnings
+    );
+    let second = app::run_once(&config, flags, &Capture::default()).await;
+    assert!(second.succeeded(), "{second:?}");
+    assert_eq!(second.pulled.as_ref().unwrap().summary.items_created, 0);
+    Ok(())
+}
+
 /// A pull that stopped after adding an item to the source, but before copying
 /// its attachments, finishes it when run again. The destination keeps its file,
 /// and the source keeps an edit made in between.

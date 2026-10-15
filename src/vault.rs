@@ -891,6 +891,13 @@ pub struct ServerTraits {
     pub items_need_collections: bool,
 }
 
+impl ServerTraits {
+    pub fn hides(&self, item: &Item) -> bool {
+        item.item_type()
+            .is_some_and(|kind| self.hidden_item_types.contains(&kind))
+    }
+}
+
 fn server_traits(config: &Value) -> ServerTraits {
     let vaultwarden = config.pointer("/server/name").and_then(Value::as_str) == Some("Vaultwarden");
     // Bitwarden's own server shows bank accounts, driver's licences and

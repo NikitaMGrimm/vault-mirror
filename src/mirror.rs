@@ -299,6 +299,29 @@ pub async fn pull(
             Some(&made) => (plan::marker_of(made)?.files_pending()).then_some((item, Some(made))),
         })
         .collect();
+    // Without these, an item the source hides would be added again on every
+    // pull, and one it refuses would stop every pull.
+    let traits = source
+        .account
+        .server_traits()
+        .await
+        .context("reading the source server's settings")?;
+    let (left_out, added): (Vec<_>, Vec<_>) = added.into_iter().partition(|(item, _)| {
+        traits.hides(item)
+            || (mode == Mode::Organization
+                && traits.items_need_collections
+                && collection_names(item).is_empty())
+    });
+    if !left_out.is_empty() {
+        let warning = format!(
+            "Left {} out of the pull because the source server would not show them: bank \
+             accounts, driver's licences and passports are not shown yet, and organization \
+             items must be in a collection.",
+            count(left_out.len(), "item")
+        );
+        reporter.warn(&warning);
+        pulled.warnings.push(warning);
+    }
     // A resumed item is finished below, whatever changed in it.
     let resumed: HashSet<&str> = (added.iter())
         .filter(|(_, made)| made.is_some())
@@ -802,10 +825,7 @@ impl Run<'_> {
             .context("reading the destination server's settings")?;
         self.leave_out(
             &mut source_vault,
-            |item| {
-                item.item_type()
-                    .is_some_and(|kind| traits.hidden_item_types.contains(&kind))
-            },
+            |item| traits.hides(item),
             "the destination server does not show bank accounts, driver's licences or passports yet",
         );
         // Organizations pay for attachments themselves.
