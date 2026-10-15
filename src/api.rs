@@ -172,6 +172,41 @@ impl ServerUrls {
     }
 }
 
+/// Whether a server address uses plain `http://` for a host beyond this
+/// machine and the local network, which sends the API key and access tokens
+/// across the internet unencrypted. Docker service names, private addresses
+/// and Tailscale are where plain HTTP is common, so they don't count.
+pub fn is_plain_http_to_remote(server: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(server.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str().filter(|_| url.scheme() == "http") else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            let tailscale = ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]);
+            !(ip.is_loopback() || ip.is_private() || ip.is_link_local() || tailscale)
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            !(ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local())
+        }
+        Err(_) => {
+            const LOCAL: [&str; 6] = [
+                ".localhost",
+                ".local",
+                ".internal",
+                ".lan",
+                ".home.arpa",
+                ".ts.net",
+            ];
+            let name = host.trim_end_matches('.').to_ascii_lowercase();
+            name.contains('.') && !LOCAL.iter().any(|suffix| name.ends_with(suffix))
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ApiCredentials {
     pub client_id: String,
@@ -686,6 +721,36 @@ mod tests {
         let eu = ServerUrls::from_server("https://vault.bitwarden.eu/").unwrap();
         assert_eq!(eu.api, "https://api.bitwarden.eu");
         assert_eq!(eu.identity, "https://identity.bitwarden.eu");
+    }
+
+    #[test]
+    fn only_plain_http_beyond_the_local_network_counts_as_remote() {
+        for remote in [
+            "http://vault.example.com",
+            "http://vault.example.com:8080/bw",
+            "http://203.0.113.7",
+            "http://[2001:db8::1]",
+        ] {
+            assert!(is_plain_http_to_remote(remote), "{remote}");
+        }
+        for local in [
+            "https://vault.example.com",
+            "http://localhost:8080",
+            "http://vaultwarden",
+            "http://127.0.0.1:8080",
+            "http://192.168.1.20",
+            "http://10.0.0.5",
+            "http://172.20.0.3",
+            "http://100.101.102.103",
+            "http://[::1]:8080",
+            "http://[fd00::5]",
+            "http://vault.lan",
+            "http://nas.local",
+            "http://vault.home.arpa",
+            "http://vault.tailnet-1234.ts.net",
+        ] {
+            assert!(!is_plain_http_to_remote(local), "{local}");
+        }
     }
 
     #[test]

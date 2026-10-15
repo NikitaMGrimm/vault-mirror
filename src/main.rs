@@ -324,7 +324,7 @@ fn describe_vault(vault: &vault_mirror::vault::Vault) -> String {
 async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
     let started = Instant::now();
     let http = app::http_client(config)?;
-    let source = app::open_account(config, &http, &config.source, "source").await?;
+    let source = app::open_account(config, &http, &config.source, "source", &Console).await?;
     let source_scope = app::scope_of(&config.source);
     if report_logins {
         Console::status(
@@ -340,7 +340,7 @@ async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
         Console::finished(&checked(started), false);
         return Ok(());
     };
-    let dest = app::open_account(config, &http, dest_config, "dest").await?;
+    let dest = app::open_account(config, &http, dest_config, "dest", &Console).await?;
     let dest_scope = app::scope_of(dest_config);
     if report_logins {
         Console::status(
@@ -468,7 +468,8 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
 
     let http = app::http_client(&config)?;
     let target_config = vault_config(&config, args.to)?;
-    let account = app::open_account(&config, &http, target_config, args.to.name()).await?;
+    let account =
+        app::open_account(&config, &http, target_config, args.to.name(), &Console).await?;
     let target = Endpoint {
         account: &account,
         scope: app::scope_of(target_config),

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    api::{ApiCredentials, ClientOptions, ServerUrls, build_http_client},
+    api::{self, ApiCredentials, ClientOptions, ServerUrls, build_http_client},
     backup::{BackupOptions, BackupReport, backup, backup_loaded},
     config::{Config, VaultConfig},
     mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto},
@@ -201,7 +201,15 @@ pub async fn open_account(
     http: &reqwest::Client,
     vault: &VaultConfig,
     role: &str,
+    reporter: &dyn Reporter,
 ) -> Result<Account> {
+    if api::is_plain_http_to_remote(&vault.server) {
+        reporter.warn(&format!(
+            "{}_SERVER uses http:// for a host outside your network, so the API key \
+             crosses the internet unencrypted. Use https:// instead.",
+            role.to_uppercase()
+        ));
+    }
     let credentials = ApiCredentials {
         client_id: vault.client_id.clone(),
         client_secret: vault.client_secret.clone(),
@@ -286,7 +294,7 @@ async fn execute(
     });
 
     progress.stage = "source login";
-    let source = open_account(config, &http, &config.source, "source").await?;
+    let source = open_account(config, &http, &config.source, "source", reporter).await?;
     let source_scope = scope_of(&config.source);
     if let (Some(keys), Some(options)) = (&keys, &backup_options) {
         progress.stage = "source backup";
@@ -303,7 +311,7 @@ async fn execute(
         return Ok(());
     };
     progress.stage = "destination login";
-    let dest = open_account(config, &http, dest_config, "dest").await?;
+    let dest = open_account(config, &http, dest_config, "dest", reporter).await?;
     let dest_scope = scope_of(dest_config);
     // Attachment content is stored on this side too. A destination file can
     // be the only copy: one the source never had, one changed in the

@@ -44,7 +44,7 @@ file.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SOURCE_SERVER` | required | The source server. Use `https://vault.bitwarden.com` or `https://vault.bitwarden.eu` for Bitwarden's cloud, or your own server's address. |
+| `SOURCE_SERVER` | required | The source server. Use `https://vault.bitwarden.com` or `https://vault.bitwarden.eu` for Bitwarden's cloud, or your own server's address. vault-mirror warns about `http://` for a host outside your network, because the API key would cross the internet unencrypted. |
 | `SOURCE_CLIENT_ID`, `SOURCE_CLIENT_SECRET` | required | The source account's personal API key. |
 | `SOURCE_PASSWORD` | required | The source account's master password. |
 | `SOURCE_ORGANIZATION_ID` | | Mirror this organization instead of the personal vault. See [Organizations](#organizations). |
