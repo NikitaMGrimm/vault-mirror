@@ -67,7 +67,7 @@ file.
 | `BACKUP_ENABLED` | `true` | Set to `false` to mirror without backups. |
 | `BACKUP_ATTACHMENTS` | `true` | Store attachment content in the backups, not only their names. |
 | `ENABLE_PRUNING` | `true` | Delete old snapshots. |
-| `RETENTION_DAYS` | `30` | Delete snapshots older than this… |
+| `RETENTION_DAYS` | `30` | Delete snapshots older than this. Of the older days before that, keep only each day's newest snapshot… |
 | `MIN_FILES` | `10` | …but always keep at least this many of the newest snapshots of each vault. |
 | `BACKUPS_DIR` | `backups` (`/data` in the image) | Where backups, `last-run.json` and login state live. |
 

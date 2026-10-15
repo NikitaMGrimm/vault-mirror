@@ -13,7 +13,7 @@
 //! and shared by every snapshot that references them.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -268,6 +268,8 @@ pub struct PruneReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Retention {
+    /// Snapshots older than this many days are removed. Below that, a day
+    /// keeps only its newest snapshot once it is more than a day old.
     pub days: u32,
     /// The newest snapshots that are kept whatever their age. At least one,
     /// because the newest snapshot of an unchanging vault only grows older.
@@ -442,17 +444,26 @@ impl<'a> Store<'a> {
     }
 
     /// Removes snapshots past their retention, then attachment files that no
-    /// remaining snapshot refers to.
+    /// remaining snapshot refers to. Thinning older days to one snapshot
+    /// bounds the count however often a changing vault is backed up.
     pub fn prune(&self, retention: &Retention, now: OffsetDateTime) -> Result<PruneReport> {
         let mut report = PruneReport::default();
         let snapshots = self.list()?;
         let cutoff = now - Duration::days(i64::from(retention.days));
+        let recent = now - Duration::days(1);
         let keep_from = snapshots
             .len()
             .saturating_sub(retention.keep_at_least.max(1));
+        let newest_of_day: BTreeMap<time::Date, usize> = snapshots
+            .iter()
+            .enumerate()
+            .map(|(index, snapshot)| (snapshot.created.date(), index))
+            .collect();
         let mut kept = Vec::new();
         for (index, snapshot) in snapshots.into_iter().enumerate() {
-            if index >= keep_from || snapshot.created >= cutoff {
+            let day_kept = snapshot.created >= cutoff
+                && newest_of_day.get(&snapshot.created.date()) == Some(&index);
+            if index >= keep_from || snapshot.created >= recent || day_kept {
                 kept.push(snapshot);
                 continue;
             }
@@ -743,6 +754,45 @@ mod tests {
         );
         assert_eq!(store.list().unwrap().len(), 1);
         assert!(store.has_attachment("recent"));
+    }
+
+    #[test]
+    fn hourly_snapshots_thin_out_to_one_a_day() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), &passphrase("p")).unwrap();
+        let store = Store::open(dir.path(), "source", &keys).unwrap();
+        let now = datetime!(2026-10-14 00:00:00 UTC);
+        // A vault that changed every hour for a week.
+        for hours in (1..=7 * 24).rev() {
+            let at = now - Duration::hours(hours);
+            store
+                .write_snapshot(document(&hours.to_string()), vec![], at, stamp)
+                .unwrap();
+        }
+        let retention = Retention {
+            days: 5,
+            keep_at_least: 10,
+        };
+        store.prune(&retention, now).unwrap();
+        let kept = store.list().unwrap();
+        // All 24 of the last day, then the newest of each of the 4 days
+        // before it that are within 5 days.
+        assert_eq!(kept.len(), 24 + 4);
+        assert_eq!(kept.last().unwrap().created, now - Duration::hours(1));
+        let older: Vec<_> = kept
+            .iter()
+            .filter(|s| s.created < now - Duration::days(1))
+            .collect();
+        assert!(
+            older.iter().all(|s| s.created.hour() == 23),
+            "the newest of each day"
+        );
+
+        // Pruning again removes nothing.
+        assert_eq!(
+            store.prune(&retention, now).unwrap(),
+            PruneReport::default()
+        );
     }
 
     #[test]

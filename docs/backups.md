@@ -31,7 +31,21 @@ A **snapshot** is a full export of one vault, without the trash, in Bitwarden's
 JSON export format. A run only saves a new snapshot when the vault has changed.
 
 Each attachment is stored once per vault, no matter how many snapshots use it.
-Pruning old snapshots also removes attachments that no snapshot needs anymore.
+
+### How long backups are kept
+
+Backups don't grow forever. After each backup, vault-mirror prunes the
+snapshots of that vault:
+
+- it keeps every snapshot from the last 24 hours;
+- for older days, it keeps only the newest snapshot of each day;
+- it deletes snapshots older than `RETENTION_DAYS`, 30 by default;
+- it always keeps the newest `MIN_FILES` snapshots, 10 by default, however old
+  they are.
+
+So with the defaults, each vault has at most about 54 snapshots, however often
+vault-mirror runs. Attachments that no remaining snapshot needs are deleted too.
+Set `ENABLE_PRUNING=false` to keep everything.
 
 ### The backup key
 
