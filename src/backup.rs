@@ -100,7 +100,13 @@ pub async fn backup_loaded(
         .map(|r| r.attachment_id.clone())
         .collect();
     let document = snapshot::build(vault, scope, &records);
-    let written = store.write_snapshot(document, stored_ids, options.now, snapshot::stamp)?;
+    let written = store.write_snapshot(
+        scope.organization_id().unwrap_or(&account.user_id),
+        document,
+        stored_ids,
+        options.now,
+        snapshot::stamp,
+    )?;
     let snapshot = written.and_then(|path| {
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
