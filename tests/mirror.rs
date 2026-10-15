@@ -267,7 +267,8 @@ async fn changes_to_copies_in_the_destination_are_undone_and_reported() -> Resul
         outcome
             .warnings
             .iter()
-            .any(|w| w.starts_with("1 copy changed in the destination")),
+            // The card number, and the attachment deleted from GitHub.
+            .any(|w| w.starts_with("2 copies changed in the destination")),
         "{:?}",
         outcome.warnings
     );
@@ -401,48 +402,61 @@ async fn one_vault_reached_through_two_addresses_is_refused() -> Result<()> {
     Ok(())
 }
 
-/// A marked item in the source is noticed even where a filter leaves it out.
+/// After the source and destination switch roles, the old source takes the
+/// new source's content into the items it already has, once confirmed, and
+/// either direction then runs without new copies or extra markers.
 #[tokio::test]
-async fn a_filter_does_not_hide_markers_in_the_source() -> Result<()> {
+async fn switching_source_and_destination_takes_over_the_copies() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
-    let (source, dest) = sandbox.pair().await?;
-    fixtures::seed(&source).await?;
-    let hidden = source.create_folder("Hidden").await?;
-    let mut content = fixtures::named("Bare login without folder").content;
-    content.insert(
-        "fields".into(),
-        Node::List(vec![Node::Map(
-            [
-                ("name".to_string(), Node::secret(MARKER_FIELD)),
-                ("value".to_string(), Node::secret("copied from elsewhere")),
-                ("type".to_string(), Node::Number(1.into())),
-            ]
-            .into(),
-        )]),
-    );
-    source
-        .create_item(
-            &PERSONAL,
-            &Draft {
-                content,
-                folder_id: Some(hidden.id),
-                collection_ids: vec![],
-            },
-        )
-        .await?;
+    let (first, second) = sandbox.pair().await?;
+    fixtures::seed(&first).await?;
+    run(&first, &second, &options()).await?;
+    let before = first.load(&PERSONAL).await?;
 
-    let filtered = MirrorOptions {
-        filter: Filter {
-            include: vec![],
-            exclude: vec!["Hidden".to_string()],
+    let error = run(&second, &first, &options()).await.unwrap_err();
+    assert!(format!("{error:#}").contains("--reverse"), "{error:#}");
+    let reverse = MirrorOptions {
+        safety: Safety {
+            allow_reverse: true,
+            ..Safety::default()
         },
         ..options()
     };
-    let error = run(&source, &dest, &filtered).await.unwrap_err();
-    assert!(format!("{error:#}").contains("swapped"), "{error:#}");
-    assert!(dest.load(&PERSONAL).await?.items.is_empty());
+    run(&second, &first, &reverse).await?;
+    assert!(!run(&second, &first, &options()).await?.changed);
+    assert!(!run(&first, &second, &options()).await?.changed);
+
+    let after = first.load(&PERSONAL).await?;
+    let ids = |vault: &vault_mirror::vault::Vault| {
+        let mut ids: Vec<String> = vault.items.iter().map(|item| item.id.clone()).collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(
+        ids(&after),
+        ids(&before),
+        "the same items, updated in place"
+    );
+    for item in after
+        .items
+        .iter()
+        .chain(&second.load(&PERSONAL).await?.items)
+    {
+        let markers = item
+            .fields()
+            .iter()
+            .filter(|field| {
+                field
+                    .as_map()
+                    .and_then(|m| m.get("name"))
+                    .and_then(Node::as_str)
+                    == Some(MARKER_FIELD)
+            })
+            .count();
+        assert!(markers <= 1, "{} has {markers} markers", item.id);
+    }
     Ok(())
 }
 

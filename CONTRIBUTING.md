@@ -125,7 +125,7 @@ same pull request and give the reason.
   English, addressed to "you", with short sentences and an example where one
   helps. Say why as well as what.
 - Use one term for one meaning: source, destination, run, snapshot, copy (a
-  destination item that vault-mirror made), marker (the `__source` field),
+  destination item that vault-mirror made), marker (the `vault-mirror` field),
   settings file (`vault-mirror.env`).
 - Do not use marketing words or filler, such as "simply", "seamless" or
   "robust".

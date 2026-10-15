@@ -30,6 +30,7 @@ const LOCK_FILE: &str = "run.lock";
 pub struct RunFlags {
     pub dry_run: bool,
     pub allow_mass_delete: bool,
+    pub reverse: bool,
 }
 
 /// The record of a run, written to `last-run.json`. It holds counts, times
@@ -327,6 +328,7 @@ async fn execute(
         dry_run: flags.dry_run,
         safety: Safety {
             allow_mass_delete: flags.allow_mass_delete,
+            allow_reverse: flags.reverse,
             ..config.safety.clone()
         },
         concurrency: config.concurrency,
