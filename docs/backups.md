@@ -43,8 +43,8 @@ snapshots of that vault:
 - it always keeps the newest `MIN_FILES` snapshots, 10 by default, however old
   they are.
 
-So with the defaults, each vault has at most about 54 snapshots, however often
-vault-mirror runs. Attachments that no remaining snapshot needs are deleted too.
+So with the defaults and hourly runs, each vault has at most about 54
+snapshots. Attachments that no remaining snapshot needs are deleted too.
 Set `ENABLE_PRUNING=false` to keep everything.
 
 ### The backup key
