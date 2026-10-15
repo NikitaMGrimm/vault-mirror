@@ -5,7 +5,7 @@
 pub mod fixtures;
 pub mod provision;
 
-use std::{collections::HashMap, sync::Mutex};
+use std::sync::Mutex;
 
 use anyhow::Result;
 use provision::TestAccount;
@@ -144,33 +144,6 @@ impl Sandbox {
         let dest = self.register(&self.dest_url).await?;
         Ok((self.open(&source).await?, self.open(&dest).await?))
     }
-}
-
-/// Fills an individual vault with the sample items.
-pub async fn seed(account: &Account) -> Result<()> {
-    let mut folders = HashMap::new();
-    for name in fixtures::FOLDERS {
-        folders.insert(*name, account.create_folder(name).await?.id);
-    }
-    for sample in fixtures::samples() {
-        let draft = Draft {
-            content: sample.content,
-            folder_id: sample.folder.map(|name| folders[name].clone()),
-            collection_ids: Vec::new(),
-        };
-        let item = account.create_item(&Scope::Personal, &draft).await?;
-        for (name, data) in &sample.attachments {
-            account
-                .upload_attachment(&Scope::Personal, &item, name, data)
-                .await?;
-        }
-        if sample.archived {
-            account
-                .set_archived(std::slice::from_ref(&item.id), true)
-                .await?;
-        }
-    }
-    Ok(())
 }
 
 /// Adds `count` notes, alternately in the "Work" folder and in none, so that

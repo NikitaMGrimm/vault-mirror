@@ -7,20 +7,19 @@
 //! cargo run -- --env-file sandbox.env run
 //! ```
 
+#[allow(dead_code)]
 #[path = "../tests/common/fixtures.rs"]
 mod fixtures;
 #[allow(dead_code)]
 #[path = "../tests/common/provision.rs"]
 mod provision;
 
-use std::collections::HashMap;
-
 use anyhow::Result;
 use clap::Parser;
 use vault_mirror::{
     api::{self, ServerUrls},
     crypto::KdfParams,
-    vault::{Account, Draft, Scope},
+    vault::Account,
 };
 
 #[derive(Parser)]
@@ -50,7 +49,7 @@ async fn main() -> Result<()> {
             let urls = ServerUrls::from_server(server)?;
             let opened =
                 Account::open(http.clone(), urls, account.credentials.clone(), password).await?;
-            seed(&opened).await?;
+            fixtures::seed(&opened).await?;
         }
         lines.push(format!("{prefix}_SERVER={server}"));
         lines.push(format!("{prefix}_PASSWORD={password}"));
@@ -65,31 +64,5 @@ async fn main() -> Result<()> {
     }
     lines.push("BACKUP_PASSPHRASE=sandbox-backup-passphrase".to_string());
     println!("{}", lines.join("\n"));
-    Ok(())
-}
-
-async fn seed(account: &Account) -> Result<()> {
-    let mut folders = HashMap::new();
-    for name in fixtures::FOLDERS {
-        folders.insert(*name, account.create_folder(name).await?.id);
-    }
-    for sample in fixtures::samples() {
-        let draft = Draft {
-            content: sample.content,
-            folder_id: sample.folder.map(|name| folders[name].clone()),
-            collection_ids: Vec::new(),
-        };
-        let item = account.create_item(&Scope::Personal, &draft).await?;
-        for (name, data) in &sample.attachments {
-            account
-                .upload_attachment(&Scope::Personal, &item, name, data)
-                .await?;
-        }
-        if sample.archived {
-            account
-                .set_archived(std::slice::from_ref(&item.id), true)
-                .await?;
-        }
-    }
     Ok(())
 }

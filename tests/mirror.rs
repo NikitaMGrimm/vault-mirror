@@ -38,7 +38,7 @@ async fn a_vault_is_mirrored_completely_and_then_left_alone() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     let samples = fixtures::samples();
 
     let first = run(&source, &dest, &options()).await?;
@@ -112,7 +112,7 @@ async fn source_changes_are_carried_over_in_place() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     run(&source, &dest, &options()).await?;
     let before = dest.load(&PERSONAL).await?;
     let vault = source.load(&PERSONAL).await?;
@@ -151,7 +151,7 @@ async fn source_changes_are_carried_over_in_place() -> Result<()> {
         collection_ids: vec![],
     };
     source.update_item(&PERSONAL, identity, &moved).await?;
-    let mut added = fixtures::samples().remove(2).content;
+    let mut added = fixtures::named("Bare login without folder").content;
     added.insert("name".into(), Node::secret("Added later"));
     source
         .create_item(
@@ -219,7 +219,7 @@ async fn changes_to_copies_in_the_destination_are_undone_and_reported() -> Resul
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     run(&source, &dest, &options()).await?;
     let vault = dest.load(&PERSONAL).await?;
 
@@ -241,7 +241,7 @@ async fn changes_to_copies_in_the_destination_are_undone_and_reported() -> Resul
         .await?;
     dest.trash_items(&[by_name(&vault, "Deploy key").id.clone()])
         .await?;
-    let stray = fixtures::samples().remove(2).content;
+    let stray = fixtures::named("Bare login without folder").content;
     dest.create_item(
         &PERSONAL,
         &Draft {
@@ -292,7 +292,7 @@ async fn a_dry_run_reports_the_plan_and_changes_nothing() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
 
     let dry = MirrorOptions {
         dry_run: true,
@@ -312,11 +312,11 @@ async fn items_vault_mirror_did_not_make_are_left_alone() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     dest.create_item(
         &PERSONAL,
         &Draft {
-            content: fixtures::samples().remove(4).content,
+            content: fixtures::named("Visa").content,
             folder_id: None,
             collection_ids: vec![],
         },
@@ -350,7 +350,7 @@ async fn swapped_source_and_destination_are_refused() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     run(&source, &dest, &options()).await?;
 
     let everything = MirrorOptions {
@@ -384,7 +384,7 @@ async fn one_vault_reached_through_two_addresses_is_refused() -> Result<()> {
         sandbox.open(&account).await?,
         sandbox.open(&elsewhere).await?,
     );
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
 
     let everything = MirrorOptions {
         safety: Safety {
@@ -408,9 +408,9 @@ async fn a_filter_does_not_hide_markers_in_the_source() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     let hidden = source.create_folder("Hidden").await?;
-    let mut content = fixtures::samples().remove(2).content;
+    let mut content = fixtures::named("Bare login without folder").content;
     content.insert(
         "fields".into(),
         Node::List(vec![Node::Map(
@@ -453,7 +453,7 @@ async fn an_emptied_source_does_not_empty_the_mirror() -> Result<()> {
     };
     let (source, dest) = sandbox.pair().await?;
     for index in 0..12 {
-        let mut content = fixtures::samples().remove(2).content;
+        let mut content = fixtures::named("Bare login without folder").content;
         content.insert("name".into(), Node::secret(format!("Item {index}")));
         source
             .create_item(
@@ -501,7 +501,7 @@ async fn editing_an_archived_item_keeps_it_archived() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     run(&source, &dest, &options()).await?;
 
     let vault = source.load(&PERSONAL).await?;
@@ -665,7 +665,7 @@ async fn a_folder_filter_mirrors_part_of_the_vault() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     let filtered = |include: &[&str], exclude: &[&str]| MirrorOptions {
         filter: Filter {
             include: include.iter().map(|n| n.to_string()).collect(),
@@ -723,7 +723,7 @@ async fn a_destination_without_premium_gets_everything_but_attachments() -> Resu
     let dest = sandbox
         .open(&sandbox.register_free(&sandbox.dest_url).await?)
         .await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
 
     let first = run(&source, &dest, &options()).await?;
     assert_eq!(first.summary.items_created, fixtures::samples().len());
@@ -853,7 +853,7 @@ async fn an_item_added_after_the_backup_is_left_alone() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     run(&source, &dest, &options()).await?;
     let folder_id = |vault: &vault_mirror::vault::Vault| {
         vault
@@ -867,7 +867,7 @@ async fn an_item_added_after_the_backup_is_left_alone() -> Result<()> {
 
     let backed_up = dest.load(&PERSONAL).await?;
     let dest_folder = folder_id(&backed_up);
-    let mut content = fixtures::samples().remove(2).content;
+    let mut content = fixtures::named("Bare login without folder").content;
     content.insert("name".into(), Node::secret("Added meanwhile"));
     let added = dest
         .create_item(
@@ -911,7 +911,7 @@ async fn copies_converge_with_two_folders_of_one_name() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     run(&source, &dest, &options()).await?;
     let first = dest.load(&PERSONAL).await?.folders;
     let first = first.iter().find(|f| f.name == "Work").unwrap();
@@ -919,7 +919,7 @@ async fn copies_converge_with_two_folders_of_one_name() -> Result<()> {
     // An item of your own in each keeps both folders, whichever the server
     // lists first.
     for folder in [&first.id, &second.id] {
-        let mut content = fixtures::samples().remove(2).content;
+        let mut content = fixtures::named("Bare login without folder").content;
         content.insert("name".into(), Node::secret("Own item"));
         dest.create_item(
             &PERSONAL,
@@ -937,7 +937,7 @@ async fn copies_converge_with_two_folders_of_one_name() -> Result<()> {
         .iter()
         .find(|f| f.name == "Work")
         .unwrap();
-    let mut content = fixtures::samples().remove(2).content;
+    let mut content = fixtures::named("Bare login without folder").content;
     content.insert("name".into(), Node::secret("New in Work"));
     source
         .create_item(
@@ -962,7 +962,7 @@ async fn the_destination_trash_is_left_alone() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     run(&source, &dest, &options()).await?;
     let mirrored = dest.load(&PERSONAL).await?;
     let trashed = mirrored.items[0].id.clone();
@@ -1042,7 +1042,7 @@ async fn many_new_items_are_imported_in_bulk() -> Result<()> {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     seed_extra(&source, 12).await?;
     let total = fixtures::samples().len() + 12;
 
