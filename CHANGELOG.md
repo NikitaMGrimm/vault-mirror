@@ -4,6 +4,14 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.5.2](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.5.1...v0.5.2) - 2026-10-15
+
+### Fixed
+
+- `run --pull --dry-run` now says what it would pull, for example "Would pull
+  1 new item and 1 changed item into the source", and that neither vault was
+  changed.
+
 ## [0.5.1](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.5.0...v0.5.1) - 2026-10-15
 
 ### Added
