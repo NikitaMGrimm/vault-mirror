@@ -323,11 +323,14 @@ fn describe_vault(vault: &vault_mirror::vault::Vault) -> String {
 /// `init` has reported the logins already.
 async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
     let started = Instant::now();
-    for warning in config
-        .vaults()
-        .filter_map(|(vault, role)| app::plain_http_warning(vault, role))
-    {
-        Console::warning(&warning);
+    // `init` warned before each login already.
+    if report_logins {
+        for warning in config
+            .vaults()
+            .filter_map(|(vault, role)| app::plain_http_warning(vault, role))
+        {
+            Console::warning(&warning);
+        }
     }
     let http = app::http_client(config)?;
     let source = app::open_account(config, &http, &config.source, "source").await?;
