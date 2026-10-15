@@ -251,8 +251,7 @@ async fn log_in(env: &HashMap<String, String>, prefix: &str, role: &str) -> Resu
         bail!("this is the source account; the destination must be another account");
     }
     let http = app::http_client(&config)?;
-    let account =
-        app::open_account(&config, &http, vault, &prefix.to_lowercase(), &Console).await?;
+    let account = app::open_account(&config, &http, vault, &prefix.to_lowercase()).await?;
     let loaded = account.load(&app::scope_of(vault)).await?;
     Console::status(
         "Logged in",

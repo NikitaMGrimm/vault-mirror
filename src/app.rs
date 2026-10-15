@@ -196,20 +196,28 @@ pub fn scope_of(vault: &VaultConfig) -> Scope {
     }
 }
 
+/// The warning for a vault whose server address sends the API key and access
+/// tokens across the internet unencrypted, if it does. `role` is `source` or
+/// `dest`.
+pub fn plain_http_warning(vault: &VaultConfig, role: &str) -> Option<String> {
+    // The address the login actually goes to: Bitwarden's cloud is always
+    // reached over https, whatever was written.
+    let urls = ServerUrls::from_server(&vault.server).ok()?;
+    api::is_plain_http_to_remote(&urls.identity).then(|| {
+        format!(
+            "{}_SERVER uses http:// for a host outside your network, so the API key crosses \
+             the internet unencrypted. Use https:// instead.",
+            role.to_uppercase()
+        )
+    })
+}
+
 pub async fn open_account(
     config: &Config,
     http: &reqwest::Client,
     vault: &VaultConfig,
     role: &str,
-    reporter: &dyn Reporter,
 ) -> Result<Account> {
-    if api::is_plain_http_to_remote(&vault.server) {
-        reporter.warn(&format!(
-            "{}_SERVER uses http:// for a host outside your network, so the API key \
-             crosses the internet unencrypted. Use https:// instead.",
-            role.to_uppercase()
-        ));
-    }
     let credentials = ApiCredentials {
         client_id: vault.client_id.clone(),
         client_secret: vault.client_secret.clone(),
@@ -293,8 +301,15 @@ async fn execute(
         now,
     });
 
+    for warning in config
+        .vaults()
+        .filter_map(|(vault, role)| plain_http_warning(vault, role))
+    {
+        reporter.warn(&warning);
+        progress.status.warnings.push(warning);
+    }
     progress.stage = "source login";
-    let source = open_account(config, &http, &config.source, "source", reporter).await?;
+    let source = open_account(config, &http, &config.source, "source").await?;
     let source_scope = scope_of(&config.source);
     if let (Some(keys), Some(options)) = (&keys, &backup_options) {
         progress.stage = "source backup";
@@ -311,7 +326,7 @@ async fn execute(
         return Ok(());
     };
     progress.stage = "destination login";
-    let dest = open_account(config, &http, dest_config, "dest", reporter).await?;
+    let dest = open_account(config, &http, dest_config, "dest").await?;
     let dest_scope = scope_of(dest_config);
     // Attachment content is stored on this side too. A destination file can
     // be the only copy: one the source never had, one changed in the
@@ -355,7 +370,7 @@ async fn execute(
     match mirror_onto(&source, &dest, dest_vault, &options, reporter).await {
         Ok(outcome) => {
             progress.status.mirror = Some(SummaryRecord::new(outcome.summary, outcome.changed));
-            progress.status.warnings = outcome.warnings;
+            progress.status.warnings.extend(outcome.warnings);
             Ok(())
         }
         Err(error) => {
@@ -512,6 +527,45 @@ mod tests {
     impl Reporter for Quiet {
         fn status(&self, _: &str, _: &str) {}
         fn warn(&self, _: &str) {}
+    }
+
+    #[tokio::test]
+    async fn an_unencrypted_server_address_is_recorded_as_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let env: HashMap<String, String> = [
+            // `.invalid` never resolves, so the login fails without a network.
+            ("SOURCE_SERVER", "http://vault.example.invalid"),
+            ("SOURCE_CLIENT_ID", "user.source"),
+            ("SOURCE_CLIENT_SECRET", "source-secret"),
+            ("SOURCE_PASSWORD", "source password"),
+            ("BACKUP_PASSPHRASE", "backup passphrase"),
+            ("BACKUPS_DIR", dir.path().to_str().unwrap()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let config = Config::from_env(&env).unwrap();
+
+        let status = run_once(&config, RunFlags::default(), &Quiet).await;
+        assert_eq!(status.failure_stage.as_deref(), Some("source login"));
+        assert_eq!(status.warnings.len(), 1);
+        assert!(status.warnings[0].starts_with("SOURCE_SERVER uses http://"));
+    }
+
+    #[test]
+    fn bitwarden_cloud_is_reached_over_https_whatever_was_written() {
+        let vault = |server: &str| VaultConfig {
+            server: server.into(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            password: String::new(),
+            organization_id: None,
+        };
+        assert_eq!(
+            plain_http_warning(&vault("http://vault.bitwarden.com"), "source"),
+            None
+        );
+        assert!(plain_http_warning(&vault("http://vault.example.com"), "dest").is_some());
     }
 
     #[tokio::test]

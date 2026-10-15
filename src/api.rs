@@ -184,14 +184,16 @@ pub fn is_plain_http_to_remote(server: &str) -> bool {
         return false;
     };
     let host = host.trim_start_matches('[').trim_end_matches(']');
+    let local_v4 = |ip: std::net::Ipv4Addr| {
+        let tailscale = ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]);
+        ip.is_loopback() || ip.is_private() || ip.is_link_local() || tailscale
+    };
     match host.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => {
-            let tailscale = ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]);
-            !(ip.is_loopback() || ip.is_private() || ip.is_link_local() || tailscale)
-        }
-        Ok(std::net::IpAddr::V6(ip)) => {
-            !(ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local())
-        }
+        Ok(std::net::IpAddr::V4(ip)) => !local_v4(ip),
+        Ok(std::net::IpAddr::V6(ip)) => match ip.to_ipv4_mapped() {
+            Some(ip) => !local_v4(ip),
+            None => !(ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()),
+        },
         Err(_) => {
             const LOCAL: [&str; 6] = [
                 ".localhost",
@@ -744,6 +746,7 @@ mod tests {
             "http://100.101.102.103",
             "http://[::1]:8080",
             "http://[fd00::5]",
+            "http://[::ffff:127.0.0.1]",
             "http://vault.lan",
             "http://nas.local",
             "http://vault.home.arpa",
