@@ -448,7 +448,14 @@ impl Run<'_> {
         self.stage = "verifying the destination";
         self.verify(&source_vault, mode).await?;
         self.reporter.status("Verified", "the destination");
-        Ok(true)
+        // Nothing changed if the plan only deleted a folder or collection that
+        // has gained an item since.
+        let done = self.summary.unwrap_or_default();
+        let nothing = Summary {
+            items_unchanged: done.items_unchanged,
+            ..Summary::default()
+        };
+        Ok(done != nothing)
     }
 
     async fn apply(
@@ -771,17 +778,24 @@ impl Run<'_> {
         self.stage = "deleting obsolete folders and collections";
         let now = dest.account.load(&dest.scope).await?;
         let fresh = plan::plan_with(source_vault, &now, mode, self.copy_attachments);
+        let mut kept = Summary::default();
         for folder in &plan.folders_to_delete {
-            if fresh.folders_to_delete.contains(folder) {
-                dest.account.delete_folder(&folder.id).await?;
+            match fresh.folders_to_delete.contains(folder) {
+                true => dest.account.delete_folder(&folder.id).await?,
+                false => kept.folders_deleted += 1,
             }
         }
         if let Scope::Organization(org) = &dest.scope {
             for collection in &plan.collections_to_delete {
-                if fresh.collections_to_delete.contains(collection) {
-                    dest.account.delete_collection(org, &collection.id).await?;
+                match fresh.collections_to_delete.contains(collection) {
+                    true => dest.account.delete_collection(org, &collection.id).await?,
+                    false => kept.collections_deleted += 1,
                 }
             }
+        }
+        if let Some(summary) = &mut self.summary {
+            summary.folders_deleted -= kept.folders_deleted;
+            summary.collections_deleted -= kept.collections_deleted;
         }
         Ok(())
     }

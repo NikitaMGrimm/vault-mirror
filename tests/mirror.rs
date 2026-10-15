@@ -883,7 +883,7 @@ async fn an_item_added_after_the_backup_is_left_alone() -> Result<()> {
         account,
         scope: PERSONAL,
     };
-    mirror_onto(
+    let outcome = mirror_onto(
         &endpoint(&source),
         &endpoint(&dest),
         Some(backed_up),
@@ -891,6 +891,8 @@ async fn an_item_added_after_the_backup_is_left_alone() -> Result<()> {
         &Capture::default(),
     )
     .await?;
+    assert_eq!(outcome.summary.folders_deleted, 0);
+    assert!(!outcome.changed);
 
     // Later runs see it, and leave it too.
     run(&source, &dest, &options()).await?;
@@ -911,18 +913,24 @@ async fn copies_converge_with_two_folders_of_one_name() -> Result<()> {
     let (source, dest) = sandbox.pair().await?;
     seed(&source).await?;
     run(&source, &dest, &options()).await?;
+    let first = dest.load(&PERSONAL).await?.folders;
+    let first = first.iter().find(|f| f.name == "Work").unwrap();
     let second = dest.create_folder("Work").await?;
-    let mut content = fixtures::samples().remove(2).content;
-    content.insert("name".into(), Node::secret("Own item"));
-    dest.create_item(
-        &PERSONAL,
-        &Draft {
-            content,
-            folder_id: Some(second.id.clone()),
-            collection_ids: vec![],
-        },
-    )
-    .await?;
+    // An item of your own in each keeps both folders, whichever the server
+    // lists first.
+    for folder in [&first.id, &second.id] {
+        let mut content = fixtures::samples().remove(2).content;
+        content.insert("name".into(), Node::secret("Own item"));
+        dest.create_item(
+            &PERSONAL,
+            &Draft {
+                content,
+                folder_id: Some(folder.clone()),
+                collection_ids: vec![],
+            },
+        )
+        .await?;
+    }
     let source_vault = source.load(&PERSONAL).await?;
     let work = source_vault
         .folders
