@@ -93,6 +93,11 @@ fn apply_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) 
     let taken: HashSet<String> = (dest.items.iter().map(|i| i.id.clone()))
         .chain(dest.folders.iter().map(|f| f.id.clone()))
         .chain(dest.collections.iter().map(|c| c.id.clone()))
+        .chain(
+            dest.items
+                .iter()
+                .flat_map(|i| i.attachments.iter().map(|a| a.id.clone())),
+        )
         .collect();
     let mut counter = 0;
     let mut fresh = |prefix: &str| loop {
@@ -907,11 +912,16 @@ fn a_clone_of_a_pending_copy_with_its_own_attachment_is_left_alone() {
     let mut clone = dest.items[0].clone();
     clone.id = "clone".into();
     clone.attachments = vec![attachment("mine", "mine.txt", 5)];
-    dest.items.push(clone);
+    let copy = dest.items[0].id.clone();
 
-    let plan = plan(&source, &dest, Mode::Personal);
-    assert!(plan.deletes.is_empty());
-    assert_eq!(plan.detached, 1);
+    for clone_first in [false, true] {
+        let mut dest = dest.clone();
+        dest.items.insert(usize::from(!clone_first), clone.clone());
+        let plan = plan(&source, &dest, Mode::Personal);
+        assert!(plan.deletes.is_empty());
+        assert_eq!(plan.detached, 1);
+        assert_eq!(dest.items[plan.updates[0].dest].id, copy);
+    }
 }
 
 #[test]

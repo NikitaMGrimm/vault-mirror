@@ -648,6 +648,17 @@ impl Run<'_> {
                         .await
                         .with_context(|| format!("reading destination item {}", dest_item.id))?;
                     stored.collection_ids = dest_item.collection_ids.clone();
+                    // Edited since this run wrote it: the final write would
+                    // overwrite an edit that no backup holds yet.
+                    if comparable(&stored, None, &[], mode)
+                        != comparable(dest_item, None, &[], mode)
+                        || stored.folder_id != dest_item.folder_id
+                    {
+                        bail!(
+                            "destination item {} changed during the run. Run again to mirror it",
+                            dest_item.id
+                        );
+                    }
                     if verify_attachments {
                         let mut found = Vec::new();
                         for attachment in &stored.attachments {

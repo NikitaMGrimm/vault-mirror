@@ -493,27 +493,34 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         }
     }
 
-    // One copy per source item: the first that is as vault-mirror left it,
-    // else the first. Another copy that is surely unchanged is a leftover and
-    // goes; a changed one, such as a clone someone edited, is left alone, and
-    // so is an original.
+    // One copy per source item: the first that surely is as vault-mirror
+    // left it, else the first that seems so, else the first. Another copy
+    // that surely is unchanged is a leftover and goes; any other, such as a
+    // clone someone edited, is left alone, and so is an original.
+    let unchanged = |index: usize, own: &Option<Marker>| {
+        let item = &dest.items[index];
+        own.as_ref().is_some_and(|own| {
+            dest_content(item) == own.content
+                && (own.dest_files == dest_files(item)
+                    || (own.dest_files == UNKNOWN && item.attachments.is_empty()))
+        })
+    };
     let mut dest_by_entry: HashMap<usize, (usize, Option<Marker>)> = HashMap::new();
     for (entry, mut candidates) in claims {
-        let chosen = candidates
-            .iter()
-            .position(|(index, own)| {
-                let known = known(entry, *index, own.as_ref());
-                dest_content(&dest.items[*index]) == known.content && !known.files_changed_in_dest
+        let chosen = (candidates.iter())
+            .position(|(index, own)| unchanged(*index, own))
+            .or_else(|| {
+                candidates.iter().position(|(index, own)| {
+                    let known = known(entry, *index, own.as_ref());
+                    dest_content(&dest.items[*index]) == known.content
+                        && !known.files_changed_in_dest
+                })
             })
             .unwrap_or(0);
         let copy = candidates.remove(chosen);
         for (index, own) in candidates {
             let item = &dest.items[index];
-            let unchanged = own.is_some_and(|own| {
-                dest_content(item) == own.content
-                    && (own.dest_files == dest_files(item)
-                        || (own.dest_files == UNKNOWN && item.attachments.is_empty()))
-            });
+            let unchanged = unchanged(index, &own);
             if unchanged {
                 plan.deletes.push(Delete {
                     dest: index,
