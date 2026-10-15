@@ -223,6 +223,65 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # Windows binaries are built natively on each architecture.
+  build-windows:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PUBLISH: ${{ needs.version.outputs.publish }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.tag || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          # The Arm runner image comes without rustup.
+          if ! command -v rustup >/dev/null; then
+            curl -sSfL -o rustup-init.exe "https://static.rust-lang.org/rustup/dist/$TARGET/rustup-init.exe"
+            ./rustup-init.exe -y --profile minimal --default-toolchain none
+            rm rustup-init.exe
+            echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$USERPROFILE/.cargo/bin:$PATH"
+          fi
+          toolchain=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
+          rustup toolchain install "$toolchain" --profile minimal --target "$TARGET"
+          rustup default "$toolchain"
+      - name: Build and package
+        run: |
+          cargo build --release --locked --target "$TARGET"
+          name="vault-mirror-$VERSION-$TARGET"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/release/vault-mirror.exe" LICENSE README.md "dist/$name/"
+          "dist/$name/vault-mirror.exe" --version
+          (cd dist && 7z a -tzip "$name.zip" "$name" >/dev/null)
+          rm -r "dist/$name"
+      - if: env.PUBLISH == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
   image:
     needs: [version, build]
     if: needs.version.outputs.publish == 'true'
@@ -274,7 +333,7 @@ jobs:
           push-to-registry: true
 
   release:
-    needs: [version, build, build-macos, image]
+    needs: [version, build, build-macos, build-windows, image]
     if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -290,7 +349,7 @@ jobs:
           path: dist
           merge-multiple: true
       - working-directory: dist
-        run: sha256sum -- *.tar.gz > SHA256SUMS && cat SHA256SUMS
+        run: sha256sum -- *.tar.gz *.zip > SHA256SUMS && cat SHA256SUMS
       # Release-plz creates the release with its notes; a release from a
       # pushed tag is created here.
       - name: Publish the release

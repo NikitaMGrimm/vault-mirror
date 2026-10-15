@@ -268,7 +268,7 @@ async fn daemon() -> Result<ExitCode> {
         )
     })?;
     let timetable = Timetable::new(schedule, config.timezone.as_deref())?;
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut terminate = Terminate::new()?;
 
     if timetable.runs_at_start() {
         run_and_report(&config, RunFlags::default()).await;
@@ -296,6 +296,35 @@ async fn daemon() -> Result<ExitCode> {
     }
     Console::status("Stopping", "the daemon");
     Ok(ExitCode::SUCCESS)
+}
+
+/// The signal Docker and systemd stop the daemon with. Windows has none.
+#[cfg(unix)]
+struct Terminate(tokio::signal::unix::Signal);
+
+#[cfg(unix)]
+impl Terminate {
+    fn new() -> std::io::Result<Self> {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map(Self)
+    }
+
+    async fn recv(&mut self) {
+        self.0.recv().await;
+    }
+}
+
+#[cfg(not(unix))]
+struct Terminate;
+
+#[cfg(not(unix))]
+impl Terminate {
+    fn new() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn recv(&mut self) {
+        std::future::pending().await
+    }
 }
 
 async fn check() -> Result<ExitCode> {

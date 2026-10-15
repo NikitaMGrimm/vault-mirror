@@ -168,6 +168,45 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --all-targets --locked
 
+  # The release has Windows binaries, so the code must build and pass its
+  # tests there. The end-to-end tests skip themselves: the sandbox needs
+  # Linux containers.
+  windows:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    strategy:
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          # The Arm runner image comes without rustup.
+          if ! command -v rustup >/dev/null; then
+            curl -sSfL -o rustup-init.exe "https://static.rust-lang.org/rustup/dist/$TARGET/rustup-init.exe"
+            ./rustup-init.exe -y --profile minimal --default-toolchain none
+            rm rustup-init.exe
+            echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$USERPROFILE/.cargo/bin:$PATH"
+          fi
+          toolchain=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
+          rustup toolchain install "$toolchain" --profile minimal && rustup default "$toolchain"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --locked
+
   image:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -192,7 +231,7 @@ jobs:
   # documentation-only change, counts as passed.
   ci:
     if: always()
-    needs: [changes, lint, test, official, deny, msrv, image]
+    needs: [changes, lint, test, official, deny, msrv, windows, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:

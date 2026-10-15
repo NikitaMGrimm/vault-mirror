@@ -83,8 +83,9 @@ docker pull ghcr.io/nikitamgrimm/vault-mirror
 ```
 
 The [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases) has
-binaries for Linux (x86-64, arm64) and macOS (Apple silicon, Intel), with
-checksums and [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations).
+binaries for Linux (x86-64, arm64), macOS (Apple silicon, Intel) and Windows
+(x86-64, arm64), with checksums and [build
+provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations).
 
 With Rust installed, download the release binary with
 [cargo-binstall](https://github.com/cargo-bins/cargo-binstall):

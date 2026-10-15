@@ -26,6 +26,14 @@ bin-dir = "vault-mirror-{ version }-x86_64-unknown-linux-musl/{ bin }{ binary-ex
 pkg-url = "{ repo }/releases/download/v{ version }/vault-mirror-{ version }-aarch64-unknown-linux-musl.tar.gz"
 bin-dir = "vault-mirror-{ version }-aarch64-unknown-linux-musl/{ bin }{ binary-ext }"
 
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/vault-mirror-{ version }-{ target }.zip"
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/vault-mirror-{ version }-{ target }.zip"
+pkg-fmt = "zip"
+
 [dependencies]
 age = { version = "0.12.1", features = ["armor"] }
 anstream = "1.0.0"
