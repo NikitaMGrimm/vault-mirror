@@ -13,9 +13,9 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     api::{self, ApiCredentials, ClientOptions, ServerUrls, build_http_client},
-    backup::{BackupOptions, BackupReport, backup, backup_loaded},
+    backup::{BackupOptions, BackupReport, backup_loaded},
     config::{Config, VaultConfig},
-    mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto},
+    mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto, pull, unmark},
     plan::{Safety, Summary},
     store::{self, Keys, Store},
     text::count,
@@ -31,6 +31,7 @@ pub struct RunFlags {
     pub dry_run: bool,
     pub allow_mass_delete: bool,
     pub reverse: bool,
+    pub pull: bool,
 }
 
 /// The record of a run, written to `last-run.json`. It holds counts, times
@@ -43,6 +44,9 @@ pub struct Status {
     pub finished_at: String,
     pub duration_seconds: f64,
     pub version: String,
+    /// What a pull changed in the source, before the mirror.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pulled: Option<SummaryRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror: Option<SummaryRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,15 +291,22 @@ async fn execute(
     progress.stage = "source login";
     let source = open_account(config, &http, &config.source, "source").await?;
     let source_scope = scope_of(&config.source);
+    // A pull writes to the source, and changes only what this backup holds.
+    let mut source_vault = None;
     if let (Some(keys), Some(options)) = (&keys, &backup_options) {
         progress.stage = "source backup";
         reporter.status("Backing up", "the source vault");
         let store = Store::open(&config.backups_dir, "source", keys)?;
+        let vault = source
+            .load(&source_scope)
+            .await
+            .context("reading the vault")?;
         progress.status.source_backup = Some(
-            backup(&source, &source_scope, &store, options, reporter)
+            backup_loaded(&source, &source_scope, &vault, &store, options, reporter)
                 .await?
                 .into(),
         );
+        source_vault = Some(vault);
     }
 
     let Some(dest_config) = &config.dest else {
@@ -323,19 +334,6 @@ async fn execute(
         dest_vault = Some(vault);
     }
 
-    progress.stage = "mirror";
-    let options = MirrorOptions {
-        dry_run: flags.dry_run,
-        safety: Safety {
-            allow_mass_delete: flags.allow_mass_delete,
-            allow_reverse: flags.reverse,
-            ..config.safety.clone()
-        },
-        concurrency: config.concurrency,
-        verify_attachments: config.verify_attachments,
-        filter: config.filter.clone(),
-        dest_backed_up: dest_vault.is_some(),
-    };
     let source = Endpoint {
         account: &source,
         scope: source_scope,
@@ -344,6 +342,52 @@ async fn execute(
         account: &dest,
         scope: dest_scope,
     };
+    let options = MirrorOptions {
+        dry_run: flags.dry_run,
+        safety: Safety {
+            allow_mass_delete: flags.allow_mass_delete,
+            allow_reverse: flags.reverse || flags.pull,
+            ..config.safety.clone()
+        },
+        concurrency: config.concurrency,
+        verify_attachments: config.verify_attachments,
+        filter: config.filter.clone(),
+        dest_backed_up: dest_vault.is_some(),
+    };
+
+    if flags.pull {
+        progress.stage = "pull";
+        reporter.status("Pulling", "changes from the destination into the source");
+        let backed_up = source_vault.is_some();
+        let source_vault = match source_vault {
+            Some(vault) => vault,
+            None => source.account.load(&source.scope).await?,
+        };
+        let dest_vault = match &dest_vault {
+            Some(vault) => vault.clone(),
+            None => dest.account.load(&dest.scope).await?,
+        };
+        let pulled = pull(
+            &source,
+            &dest,
+            &source_vault,
+            &dest_vault,
+            &options,
+            backed_up,
+            reporter,
+        )
+        .await?;
+        progress.status.pulled = Some(SummaryRecord {
+            changed: !flags.dry_run && pulled.summary != Summary::default(),
+            summary: pulled.summary,
+        });
+        progress.status.warnings.extend(pulled.warnings);
+        if flags.dry_run {
+            return Ok(());
+        }
+    }
+
+    progress.stage = "mirror";
     match mirror_onto(&source, &dest, dest_vault, &options, reporter).await {
         Ok(outcome) => {
             progress.status.mirror = Some(SummaryRecord {
@@ -351,7 +395,6 @@ async fn execute(
                 summary: outcome.summary,
             });
             progress.status.warnings.extend(outcome.warnings);
-            Ok(())
         }
         Err(error) => {
             progress.stage = error.stage;
@@ -359,9 +402,18 @@ async fn execute(
                 changed: false,
                 summary,
             });
-            Err(error.source)
+            return Err(error.source);
         }
     }
+
+    if flags.pull {
+        progress.stage = "removing markers from the source";
+        let unmarked = unmark(&source, &dest, config.concurrency).await?;
+        if unmarked > 0 {
+            reporter.status("Unmarked", &count(unmarked, "source item"));
+        }
+    }
+    Ok(())
 }
 
 pub fn status_path(backups_dir: &Path) -> PathBuf {

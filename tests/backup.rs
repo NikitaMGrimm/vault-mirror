@@ -11,7 +11,7 @@ use vault_mirror::{
     config::Config,
     mirror::Endpoint,
     node::Node,
-    plan::marker_of,
+    plan::{Mode, mark_copy, marker_of},
     restore::{RestoreOptions, restore},
     snapshot,
     store::{Keys, Protection, Retention, Store},
@@ -393,6 +393,178 @@ async fn a_full_run_backs_up_both_sides_mirrors_and_records_the_result() -> Resu
     let restored = target.load(&PERSONAL).await?;
     assert_eq!(restored.items.len(), count);
     assert!(restored.items.iter().all(|item| marker_of(item).is_none()));
+    Ok(())
+}
+
+/// While the source was down, the destination was used instead. A pull
+/// brings its changes back into the source and leaves no marker there.
+#[tokio::test]
+async fn a_pull_brings_back_what_changed_in_the_destination() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    fixtures::seed(&source).await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    let capture = Capture::default();
+    let run = |flags| app::run_once(&config, flags, &capture);
+    assert!(run(RunFlags::default()).await.succeeded());
+
+    let vault = dest.load(&PERSONAL).await?;
+    let visa = by_name(&vault, "Visa");
+    let mut edited = Draft {
+        content: visa.content.clone(),
+        folder_id: visa.folder_id.clone(),
+        collection_ids: vec![],
+    };
+    let Some(Node::Map(card)) = edited.content.get_mut("card") else {
+        panic!()
+    };
+    card.insert("number".into(), Node::secret("5555555555554444"));
+    dest.update_item(&PERSONAL, visa, &edited).await?;
+    dest.delete_items(&[by_name(&vault, "Identity").id.clone()])
+        .await?;
+    // Changed only in the source: the pull leaves it as it is.
+    let originals = source.load(&PERSONAL).await?;
+    let passkey = by_name(&originals, "Passkey login");
+    let mut noted = Draft {
+        content: passkey.content.clone(),
+        folder_id: passkey.folder_id.clone(),
+        collection_ids: vec![],
+    };
+    noted
+        .content
+        .insert("notes".into(), Node::secret("edited in the source"));
+    source.update_item(&PERSONAL, passkey, &noted).await?;
+    let mut added = fixtures::named("Bare login without folder").content;
+    added.insert("name".into(), Node::secret("Added during the outage"));
+    dest.create_item(
+        &PERSONAL,
+        &Draft {
+            content: added,
+            folder_id: None,
+            collection_ids: vec![],
+        },
+    )
+    .await?;
+
+    let pulled = run(RunFlags {
+        pull: true,
+        ..RunFlags::default()
+    })
+    .await;
+    assert!(pulled.succeeded(), "{pulled:?}");
+    let summary = &pulled.pulled.as_ref().unwrap().summary;
+    assert_eq!((summary.items_created, summary.items_updated), (1, 1));
+
+    let back = source.load(&PERSONAL).await?;
+    let card = by_name(&back, "Visa").content["card"].as_map().unwrap();
+    assert_eq!(card["number"].as_str(), Some("5555555555554444"));
+    by_name(&back, "Added during the outage");
+    assert_eq!(
+        by_name(&back, "Passkey login").content["notes"].as_str(),
+        Some("edited in the source")
+    );
+    // Deleted in the destination, but the pull deletes nothing.
+    by_name(&back, "Identity");
+    assert!(back.items.iter().all(|item| marker_of(item).is_none()));
+    let mirrored = dest.load(&PERSONAL).await?;
+    assert_eq!(mirrored.items.len(), fixtures::samples().len() + 1);
+    assert_eq!(
+        by_name(&mirrored, "Passkey login").content["notes"].as_str(),
+        Some("edited in the source")
+    );
+    assert!(mirrored.items.iter().all(|item| marker_of(item).is_some()));
+
+    let again = run(RunFlags::default()).await;
+    assert!(again.succeeded(), "{again:?}");
+    assert!(!again.mirror.as_ref().unwrap().changed);
+    Ok(())
+}
+
+/// A pull that stopped after adding an item to the source, but before copying
+/// its attachments, finishes it when run again. The destination keeps its file,
+/// and the source keeps an edit made in between.
+#[tokio::test]
+async fn a_pull_run_again_finishes_an_item_it_added_halfway() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    fixtures::seed(&source).await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    let capture = Capture::default();
+    let run = |flags| app::run_once(&config, flags, &capture);
+    assert!(run(RunFlags::default()).await.succeeded());
+
+    let mut content = fixtures::named("Bare login without folder").content;
+    content.insert("name".into(), Node::secret("Added during the outage"));
+    let added = dest
+        .create_item(
+            &PERSONAL,
+            &Draft {
+                content,
+                folder_id: None,
+                collection_ids: vec![],
+            },
+        )
+        .await?;
+    dest.upload_attachment(&PERSONAL, &added, "outage.txt", b"made during the outage")
+        .await?;
+    // What the stopped pull left: the item, marked as still waiting for its
+    // files, and edited in the source since.
+    let mut edited = added.clone();
+    edited
+        .content
+        .insert("notes".into(), Node::secret("edited in the source"));
+    source
+        .create_item(
+            &PERSONAL,
+            &Draft {
+                content: mark_copy(&edited, &added, None, &[], Mode::Personal, None),
+                folder_id: None,
+                collection_ids: vec![],
+            },
+        )
+        .await?;
+
+    let pulled = run(RunFlags {
+        pull: true,
+        ..RunFlags::default()
+    })
+    .await;
+    assert!(pulled.succeeded(), "{pulled:?}");
+    assert_eq!(pulled.pulled.as_ref().unwrap().summary.items_created, 1);
+    for (account, vault) in [
+        (&source, source.load(&PERSONAL).await?),
+        (&dest, dest.load(&PERSONAL).await?),
+    ] {
+        let named: Vec<_> = (vault.items.iter())
+            .filter(|item| item.name() == "Added during the outage")
+            .collect();
+        assert_eq!(named.len(), 1);
+        assert_eq!(
+            named[0].content["notes"].as_str(),
+            Some("edited in the source")
+        );
+        let [attachment] = named[0].attachments.as_slice() else {
+            panic!("expected one attachment");
+        };
+        let data = account
+            .download_attachment(&PERSONAL, named[0], attachment)
+            .await?;
+        assert_eq!(data, b"made during the outage");
+    }
+    let back = source.load(&PERSONAL).await?;
+    assert!(back.items.iter().all(|item| marker_of(item).is_none()));
     Ok(())
 }
 

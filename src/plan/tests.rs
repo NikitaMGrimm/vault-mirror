@@ -256,7 +256,8 @@ fn a_source_edit_rewrites_only_that_item() {
             entry: 1,
             dest: 1,
             write_content: true,
-            changed_in_dest: false,
+            content_changed_in_dest: false,
+            files_changed_in_dest: false,
             sync_attachments: false,
             set_archived: None
         }]
@@ -281,7 +282,7 @@ fn a_hand_edited_destination_item_is_repaired_although_its_marker_is_current() {
     let plan = plan(&source, &dest, Mode::Personal);
     assert_eq!(plan.updates.len(), 1);
     assert!(plan.updates[0].write_content);
-    assert!(plan.updates[0].changed_in_dest);
+    assert!(plan.updates[0].changed_in_dest());
     assert_converged(
         &source,
         &apply(&source, &dest, Mode::Personal),
@@ -317,7 +318,7 @@ fn copies_without_a_live_source_are_deleted_with_a_reason() {
         ]
     );
     assert_eq!(plan.unchanged, 1);
-    assert_eq!(plan.untracked, 1, "the item added by hand stays");
+    assert_eq!(plan.untracked.len(), 1, "the item added by hand stays");
     assert_converged(
         &source,
         &apply(&source, &dest, Mode::Personal),
@@ -350,7 +351,7 @@ fn a_malformed_marker_is_not_trusted() {
     let plan = plan(&source, &dest, Mode::Personal);
     assert_eq!(plan.creates, [0]);
     assert!(plan.deletes.is_empty());
-    assert_eq!(plan.untracked, 1);
+    assert_eq!(plan.untracked.len(), 1);
 }
 
 #[test]
@@ -367,7 +368,7 @@ fn a_field_that_only_looks_like_a_marker_is_not_trusted() {
 
     assert_eq!(marker_of(&dest.items[0]), None);
     let plan = plan(&source, &dest, Mode::Personal);
-    assert_eq!((plan.untracked, plan.deletes.len()), (1, 0));
+    assert_eq!((plan.untracked.len(), plan.deletes.len()), (1, 0));
 }
 
 #[test]
@@ -474,6 +475,16 @@ fn attachments_the_destination_cannot_take_follow_once_it_can() {
 }
 
 #[test]
+fn attachments_withheld_from_the_destination_are_no_change_there() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let dest = apply_with(&source, &Vault::default(), Mode::Personal, false);
+
+    let plan = plan(&source, &dest, Mode::Personal);
+    assert!(plan.updates.iter().all(|u| !u.changed_in_dest()));
+}
+
+#[test]
 fn attachments_already_mirrored_are_kept_when_no_more_can_be_copied() {
     let mut source = vault(vec![login("s1", "One", "pw1")]);
     source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
@@ -557,7 +568,8 @@ fn archive_state_is_mirrored_without_rewriting_content() {
             entry: 0,
             dest: 0,
             write_content: false,
-            changed_in_dest: false,
+            content_changed_in_dest: false,
+            files_changed_in_dest: false,
             sync_attachments: false,
             set_archived: Some(true)
         }]
@@ -797,7 +809,7 @@ fn switching_source_and_destination_takes_over_the_copies() {
         ..Safety::default()
     };
     assert_eq!(check_safety(&plan, &reverse), Ok(()));
-    let changed: Vec<bool> = plan.updates.iter().map(|u| u.changed_in_dest).collect();
+    let changed: Vec<bool> = plan.updates.iter().map(|u| u.changed_in_dest()).collect();
     assert_eq!(changed, [true, false, false]);
 
     let original = apply(&mirror, &original, Mode::Personal);
@@ -844,7 +856,7 @@ fn switching_back_after_attachments_changed_copies_them_once() {
     assert!(
         back.updates
             .iter()
-            .all(|u| !u.sync_attachments && !u.changed_in_dest)
+            .all(|u| !u.sync_attachments && !u.changed_in_dest())
     );
     let b = apply(&a, &b, Mode::Personal);
     assert_converged(&a, &b, Mode::Personal);
@@ -859,7 +871,7 @@ fn switching_over_a_replaced_attachment_counts_as_a_change_in_the_destination() 
     a.items[0].attachments = vec![attachment("f2", "scan.pdf", 150)];
 
     let update = &plan(&b, &a, Mode::Personal).updates[0];
-    assert!(update.sync_attachments && update.changed_in_dest);
+    assert!(update.sync_attachments && update.changed_in_dest());
 }
 
 #[test]
@@ -876,7 +888,7 @@ fn an_original_is_never_deleted_as_a_duplicate() {
 
     let plan = plan(&copies, &a, Mode::Personal);
     assert!(plan.deletes.is_empty());
-    assert_eq!((plan.untracked, plan.reversed), (1, 0));
+    assert_eq!((plan.untracked.len(), plan.reversed), (1, 0));
 }
 
 #[test]
@@ -968,13 +980,13 @@ fn an_attachment_added_to_a_copy_counts_as_a_change_in_the_destination() {
         .push(attachment("extra", "mine.txt", 5));
 
     let update = &plan(&source, &dest, Mode::Personal).updates[0];
-    assert!(update.sync_attachments && update.changed_in_dest);
+    assert!(update.sync_attachments && update.changed_in_dest());
     // A source change alone is not one.
     let mut dest = mirrored(&source, Mode::Personal);
     source.items[0].attachments = vec![attachment("a2", "scan.pdf", 120)];
     dest.items[0].revision_date = None;
     let update = &plan(&source, &dest, Mode::Personal).updates[0];
-    assert!(update.sync_attachments && !update.changed_in_dest);
+    assert!(update.sync_attachments && !update.changed_in_dest());
 }
 
 #[test]
@@ -987,7 +999,7 @@ fn what_vault_mirror_did_not_make_is_left_alone() {
     // A first run into a destination that is in use.
     let plan = plan(&source, &dest, Mode::Personal);
     assert_eq!((plan.creates.len(), plan.deletes.len()), (3, 0));
-    assert_eq!(plan.untracked, 1);
+    assert_eq!(plan.untracked.len(), 1);
     assert_eq!(plan.folders_to_delete, [folder("empty", "Leftover")]);
     assert_eq!(check_safety(&plan, &Safety::default()), Ok(()));
     let after = apply(&source, &dest, Mode::Personal);
@@ -1002,7 +1014,7 @@ fn what_vault_mirror_did_not_make_is_left_alone() {
     // Later runs leave it alone too.
     let again = super::plan(&source, &after, Mode::Personal);
     assert!(!again.has_changes());
-    assert_eq!(again.untracked, 1);
+    assert_eq!(again.untracked.len(), 1);
 }
 
 #[test]

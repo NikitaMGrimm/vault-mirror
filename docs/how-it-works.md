@@ -73,9 +73,33 @@ vault-mirror also compares the content itself, so:
   that it still has the marker. Remove the `vault-mirror` field from it to keep
   it for good; otherwise it is deleted with its source item.
 
+### After an outage
+
+The destination is there for when the source is down. If you add or change
+items in it meanwhile, bring them back once the source is up again:
+
+```sh
+docker compose run --rm vault-mirror run --pull
+```
+
+After backing up both vaults, the run copies into the source what changed in
+the destination since vault-mirror wrote it:
+
+- a copy you edited replaces its original, with a warning if the original
+  changed too. Its folder comes along; changes to its collections don't;
+- an item you added in the destination is added to the source, in a folder or
+  collections of the same name. With a filter, only items it selects are
+  added.
+
+Then it mirrors as usual. A pull deletes nothing: an item you deleted in the
+destination is still in the source, and the mirror copies it back, so delete it
+in the source if you meant it. The source is left without `vault-mirror`
+fields. With `--dry-run`, the run only counts what it would copy into the
+source.
+
 ### Switching the source and destination
 
-To make the destination your main vault, swap the `SOURCE_` and `DEST_`
+To make the destination your main vault for good, swap the `SOURCE_` and `DEST_`
 settings. The new source's items are copies, and their markers name the items
 they came from, so vault-mirror can update those items in place instead of
 making new ones. The first run after the swap stops, because swapped settings
@@ -89,7 +113,8 @@ Changes made in the new destination since its last run as the source are
 replaced, with a warning, and are in that run's backup. Items you deleted in the
 new source stay in the new destination, with a warning, because nothing marks
 them as copies. Attachments that still match on both sides aren't copied
-again. After that, either direction runs without `--reverse`.
+again. After that, either direction runs without `--reverse`. If items were
+added since the last switch, switching back stops once more, for those items.
 
 ## Safety checks
 

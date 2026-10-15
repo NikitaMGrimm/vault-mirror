@@ -51,6 +51,9 @@ struct RunArgs {
     /// Let this run take over copies made the other way round, after you switched the source and destination.
     #[arg(long)]
     reverse: bool,
+    /// First copy what changed in the destination back into the source, such as after using the destination while the source was down.
+    #[arg(long)]
+    pull: bool,
 }
 
 #[derive(Subcommand)]
@@ -215,6 +218,7 @@ fn flags(args: RunArgs) -> RunFlags {
         dry_run: args.dry_run,
         allow_mass_delete: args.allow_mass_delete,
         reverse: args.reverse,
+        pull: args.pull,
     }
 }
 
@@ -240,13 +244,22 @@ fn finished(status: &app::Status) -> String {
         _ if status.dry_run => format!("dry run in {seconds:.1}s; the destination is unchanged"),
         Some(app::SummaryRecord {
             summary: mirror, ..
-        }) => format!(
-            "{} created, {} updated, {} deleted, {} unchanged in {seconds:.1}s",
-            mirror.items_created,
-            mirror.items_updated,
-            mirror.items_deleted,
-            mirror.items_unchanged
-        ),
+        }) => {
+            let pulled = match &status.pulled {
+                Some(app::SummaryRecord { summary, .. }) => format!(
+                    "{} created and {} updated in the source, then ",
+                    summary.items_created, summary.items_updated
+                ),
+                None => String::new(),
+            };
+            format!(
+                "{pulled}{} created, {} updated, {} deleted, {} unchanged in {seconds:.1}s",
+                mirror.items_created,
+                mirror.items_updated,
+                mirror.items_deleted,
+                mirror.items_unchanged
+            )
+        }
         None => format!("backup in {seconds:.1}s"),
     }
 }

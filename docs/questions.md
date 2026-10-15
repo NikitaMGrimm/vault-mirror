@@ -4,8 +4,9 @@
 
 ## Does vault-mirror change my source vault?
 
-No. It only reads the source. The one exception is a restore you ask for with
-`restore --to source`.
+No. It only reads the source. The exceptions are the ones you ask for: a restore
+with `restore --to source`, and `run --pull`, which copies changes from the
+destination back into the source.
 
 ## What happens to items I add or change in the destination?
 
@@ -23,10 +24,14 @@ no right answer, and a mistake on either side would spread to the other. Make
 your changes in the source, and use the destination to read from when the
 source is unavailable.
 
-You can switch which vault is the source, for example to move back to a server
-after using the other one for a while. vault-mirror then updates the items
-that already exist instead of copying everything again. See [Switching the
-source and destination](how-it-works.md#switching-the-source-and-destination).
+If you used the destination while the source was down, `run --pull` copies what
+you changed there back into the source once, and then mirrors as usual. See
+[After an outage](how-it-works.md#after-an-outage).
+
+You can also switch which vault is the source for good, for example to move to
+the other server. vault-mirror then updates the items that already exist
+instead of copying everything again. See [Switching the source and
+destination](how-it-works.md#switching-the-source-and-destination).
 
 ## What happens when I delete an item in the source?
 

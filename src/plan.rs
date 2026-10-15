@@ -61,6 +61,23 @@ impl Marker {
         valid.then_some(marker)
     }
 
+    /// The attachments were still being copied when the marker was written.
+    pub fn files_pending(&self) -> bool {
+        self.source_files == UNKNOWN || self.dest_files == UNKNOWN
+    }
+
+    /// `item`, in a folder or collections with these names, is as it was
+    /// when the marker was written.
+    pub fn content_matches(
+        &self,
+        item: &Item,
+        folder: Option<&str>,
+        collections: &[String],
+        mode: Mode,
+    ) -> bool {
+        self.content == content_hash(item, folder, collections, mode)
+    }
+
     fn render(&self) -> String {
         format!(
             "{} {} {} {}",
@@ -115,11 +132,19 @@ pub struct Update {
     /// Index into the destination vault's items.
     pub dest: usize,
     pub write_content: bool,
-    /// The copy was changed in the destination since vault-mirror last
-    /// wrote it, and the source version replaces that change.
-    pub changed_in_dest: bool,
+    /// The copy's content was changed in the destination since vault-mirror
+    /// last wrote it, and the source version replaces that change.
+    pub content_changed_in_dest: bool,
+    /// The same for its attachments.
+    pub files_changed_in_dest: bool,
     pub sync_attachments: bool,
     pub set_archived: Option<bool>,
+}
+
+impl Update {
+    pub fn changed_in_dest(&self) -> bool {
+        self.content_changed_in_dest || self.files_changed_in_dest
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,9 +186,10 @@ pub struct Plan {
     pub collection_ids: HashMap<String, String>,
     /// Destination items that carry a marker, before this plan is applied.
     pub tracked_before: usize,
-    /// Destination items without a marker. vault-mirror did not make them,
-    /// so it leaves them, and the folders and collections they are in, alone.
-    pub untracked: usize,
+    /// Destination items without a marker, as indexes. vault-mirror did not
+    /// make them, so it leaves them, and the folders and collections they are
+    /// in, alone.
+    pub untracked: Vec<usize>,
     /// Copies that a source item's own marker names: the source used to be
     /// the destination. Paired for the first time in this plan.
     pub reversed: usize,
@@ -487,7 +513,7 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
                 reason: DeleteReason::Stale,
             }),
             (None, None) => {
-                plan.untracked += 1;
+                plan.untracked.push(index);
                 keep_containers(index);
             }
         }
@@ -530,7 +556,7 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
                 if marker_of(item).is_some() {
                     plan.detached += 1;
                 } else {
-                    plan.untracked += 1;
+                    plan.untracked.push(index);
                 }
                 keep_containers(index);
             }
@@ -587,9 +613,9 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         let write_content =
             own.as_ref() != Some(&entry.marker) || dest_content != entry.marker.content;
         // Only a change that the source version then overwrites counts.
-        let changed_in_dest = (dest_content != known.content
-            && dest_content != entry.marker.content)
-            || (copy_attachments && known.files_changed_in_dest);
+        let content_changed_in_dest =
+            dest_content != known.content && dest_content != entry.marker.content;
+        let files_changed_in_dest = copy_attachments && known.files_changed_in_dest;
         let set_archived =
             (dest_item.archived != source_item.archived).then_some(source_item.archived);
 
@@ -598,7 +624,8 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
                 entry: entry_index,
                 dest: *dest_index,
                 write_content,
-                changed_in_dest,
+                content_changed_in_dest,
+                files_changed_in_dest,
                 sync_attachments,
                 set_archived,
             });
@@ -771,6 +798,43 @@ pub fn comparable(item: &Item, folder: Option<&str>, collections: &[String], mod
         "folder": folder,
         "collections": collections,
     })
+}
+
+/// `item`'s content without the markers vault-mirror wrote.
+pub fn unmarked(item: &Item) -> BTreeMap<String, Node> {
+    let mut content = item.content.clone();
+    let fields = (item.fields().iter())
+        .filter(|field| !is_mirror_marker(field))
+        .cloned()
+        .collect();
+    content.insert("fields".to_string(), Node::List(fields));
+    content
+}
+
+/// `item`'s content, unmarked, with a marker that makes it a copy of
+/// `original`, an item in the other vault in a folder or collections with
+/// these names. `copy` is the item the content is for, once it holds the same
+/// attachments as `original`. Without it the attachments count as unknown, so
+/// the next mirror copies them again.
+pub fn mark_copy(
+    item: &Item,
+    original: &Item,
+    folder: Option<&str>,
+    collections: &[String],
+    mode: Mode,
+    copy: Option<&Item>,
+) -> BTreeMap<String, Node> {
+    let marker = Marker {
+        source_id: original.id.clone(),
+        content: content_hash(original, folder, collections, mode),
+        source_files: copy.map_or(UNKNOWN.to_string(), |_| source_files(original)),
+        dest_files: copy.map_or(UNKNOWN.to_string(), dest_files),
+    };
+    let mut marked = unmarked(item);
+    if let Some(Node::List(fields)) = marked.get_mut("fields") {
+        fields.push(marker.to_field());
+    }
+    marked
 }
 
 fn content_hash(item: &Item, folder: Option<&str>, collections: &[String], mode: Mode) -> String {
