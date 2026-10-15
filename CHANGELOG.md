@@ -8,8 +8,20 @@ Notable changes for users. The format follows
 
 ### Added
 
-- bring changes back from the destination with run --pull ([#36](https://github.com/NikitaMGrimm/vault-mirror/pull/36))
-- Windows binaries for x86-64 and Arm ([#37](https://github.com/NikitaMGrimm/vault-mirror/pull/37))
+- `run --pull` brings back what you changed in the destination while the
+  source was down. After backing up both vaults, it copies edited copies and
+  new items into the source, then mirrors as usual. It deletes nothing, keeps
+  edits made only in the source, and leaves no `vault-mirror` fields in the
+  source. A pull that stops halfway finishes when run again. See
+  [After an outage](docs/how-it-works.md#after-an-outage).
+- Windows binaries for x86-64 and Arm, as zip files on the release page and
+  through `cargo binstall`.
+
+### Documentation
+
+- [Limitations](docs/limitations.md#accounts) now says which accounts can't be
+  used: vault-mirror needs an API key and a master password, so accounts that
+  sign in only through SSO with trusted devices or Key Connector don't work.
 
 ## [0.5.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.4.0...v0.5.0) - 2026-10-15
 
