@@ -234,7 +234,7 @@ async fn accounts_using_argon2_work() -> Result<()> {
     let dest = sandbox
         .open(&sandbox.register(&sandbox.dest_url).await?)
         .await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     let outcome = run(&source, &dest, &MirrorOptions::default()).await?;
     assert_eq!(outcome.summary.items_created, fixtures::samples().len());
     Ok(())

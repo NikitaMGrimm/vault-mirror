@@ -98,7 +98,7 @@ async fn a_backup_restores_into_an_identical_vault() -> Result<()> {
     let source = sandbox
         .open(&sandbox.register(&sandbox.source_url).await?)
         .await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     // Enough items that the restore imports them in bulk.
     seed_extra(&source, 12).await?;
     let dir = tempfile::tempdir()?;
@@ -171,7 +171,7 @@ async fn later_backups_fetch_only_new_attachments_and_skip_unchanged_vaults() ->
     let source = sandbox
         .open(&sandbox.register(&sandbox.source_url).await?)
         .await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     let dir = tempfile::tempdir()?;
     let keys = keys(dir.path());
     let store = Store::open(dir.path(), "source", &keys)?;
@@ -227,7 +227,7 @@ async fn a_backup_without_attachment_content_restores_the_items_and_says_what_is
     let source = sandbox
         .open(&sandbox.register(&sandbox.source_url).await?)
         .await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     let dir = tempfile::tempdir()?;
     let keys = keys(dir.path());
     let store = Store::open(dir.path(), "source", &keys)?;
@@ -311,7 +311,7 @@ async fn a_full_run_backs_up_both_sides_mirrors_and_records_the_result() -> Resu
     let source_account = sandbox.register(&sandbox.source_url).await?;
     let dest_account = sandbox.register(&sandbox.dest_url).await?;
     let source = sandbox.open(&source_account).await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     let dir = tempfile::tempdir()?;
     let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
     let count = fixtures::samples().len();
@@ -401,7 +401,7 @@ async fn a_failed_run_is_recorded_with_its_stage_and_changes_nothing() -> Result
     let source_account = sandbox.register(&sandbox.source_url).await?;
     let dest_account = sandbox.register(&sandbox.dest_url).await?;
     let source = sandbox.open(&source_account).await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     let dir = tempfile::tempdir()?;
     let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
     assert!(
@@ -448,7 +448,7 @@ async fn destination_attachments_are_backed_up_before_the_mirror_deletes_them() 
         .create_item(
             &PERSONAL,
             &Draft {
-                content: fixtures::samples().remove(4).content,
+                content: fixtures::named("Visa").content,
                 folder_id: None,
                 collection_ids: vec![],
             },
@@ -496,7 +496,7 @@ async fn a_setup_without_a_destination_only_backs_up() -> Result<()> {
         return Ok(());
     };
     let source_account = sandbox.register(&sandbox.source_url).await?;
-    seed(&sandbox.open(&source_account).await?).await?;
+    fixtures::seed(&sandbox.open(&source_account).await?).await?;
     let dir = tempfile::tempdir()?;
     let config = config_for(&source_account, None, dir.path(), &[]);
     let status = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
@@ -523,7 +523,7 @@ async fn the_official_cli_imports_a_snapshot() -> Result<()> {
     let source = sandbox
         .open(&sandbox.register(&sandbox.source_url).await?)
         .await?;
-    seed(&source).await?;
+    fixtures::seed(&source).await?;
     let dir = tempfile::tempdir()?;
     let keys = keys(dir.path());
     let store = Store::open(dir.path(), "source", &keys)?;

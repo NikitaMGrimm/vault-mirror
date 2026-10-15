@@ -1,9 +1,13 @@
 //! A sample vault that exercises every item type and awkward value the
 //! mirror has to carry. Used by the integration suite and `examples/sandbox.rs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use vault_mirror::node::Node;
+use anyhow::Result;
+use vault_mirror::{
+    node::Node,
+    vault::{Account, Draft, Scope},
+};
 
 pub struct Sample {
     pub folder: Option<&'static str>,
@@ -343,4 +347,39 @@ pub fn samples() -> Vec<Sample> {
     ];
     samples[7].archived = true;
     samples
+}
+
+/// The sample with this item name.
+pub fn named(name: &str) -> Sample {
+    samples()
+        .into_iter()
+        .find(|sample| sample.content.get("name") == Some(&Node::secret(name)))
+        .unwrap_or_else(|| panic!("no sample named {name:?}"))
+}
+
+/// Fills an individual vault with the folders and the sample items.
+pub async fn seed(account: &Account) -> Result<()> {
+    let mut folders = HashMap::new();
+    for name in FOLDERS {
+        folders.insert(*name, account.create_folder(name).await?.id);
+    }
+    for sample in samples() {
+        let draft = Draft {
+            content: sample.content,
+            folder_id: sample.folder.map(|name| folders[name].clone()),
+            collection_ids: Vec::new(),
+        };
+        let item = account.create_item(&Scope::Personal, &draft).await?;
+        for (name, data) in &sample.attachments {
+            account
+                .upload_attachment(&Scope::Personal, &item, name, data)
+                .await?;
+        }
+        if sample.archived {
+            account
+                .set_archived(std::slice::from_ref(&item.id), true)
+                .await?;
+        }
+    }
+    Ok(())
 }
