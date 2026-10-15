@@ -18,7 +18,7 @@ fn map(entries: Vec<(&str, Node)>) -> Node {
     )
 }
 
-fn login(id: &str, name: &str, password: &str) -> Item {
+fn login(id: &str, name: &str, pw: &str) -> Item {
     let content = BTreeMap::from([
         ("type".to_string(), Node::Number(1.into())),
         ("name".to_string(), text(name)),
@@ -29,7 +29,7 @@ fn login(id: &str, name: &str, password: &str) -> Item {
             "login".to_string(),
             map(vec![
                 ("username", text("user")),
-                ("password", text(password)),
+                ("password", text(pw)),
                 ("totp", Node::Null),
             ]),
         ),
