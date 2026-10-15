@@ -844,8 +844,9 @@ async fn an_interrupted_attachment_copy_is_repaired() -> Result<()> {
     Ok(())
 }
 
-/// The mirror changes only what the destination backup holds: an item added
-/// after the backup was read is left for a later run.
+/// The mirror plans against the destination backup. An item added after the
+/// backup was read is left alone, and so is a folder it was put in that the
+/// plan meant to delete.
 #[tokio::test]
 async fn an_item_added_after_the_backup_is_left_alone() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
@@ -854,8 +855,18 @@ async fn an_item_added_after_the_backup_is_left_alone() -> Result<()> {
     let (source, dest) = sandbox.pair().await?;
     seed(&source).await?;
     run(&source, &dest, &options()).await?;
+    let folder_id = |vault: &vault_mirror::vault::Vault| {
+        vault
+            .folders
+            .iter()
+            .find(|f| f.name == "Empty")
+            .map(|f| f.id.clone())
+    };
+    let source_folder = folder_id(&source.load(&PERSONAL).await?).unwrap();
+    source.delete_folder(&source_folder).await?;
 
     let backed_up = dest.load(&PERSONAL).await?;
+    let dest_folder = folder_id(&backed_up);
     let mut content = fixtures::samples().remove(2).content;
     content.insert("name".into(), Node::secret("Added meanwhile"));
     let added = dest
@@ -863,7 +874,7 @@ async fn an_item_added_after_the_backup_is_left_alone() -> Result<()> {
             &PERSONAL,
             &Draft {
                 content,
-                folder_id: None,
+                folder_id: dest_folder.clone(),
                 collection_ids: vec![],
             },
         )
@@ -880,13 +891,59 @@ async fn an_item_added_after_the_backup_is_left_alone() -> Result<()> {
         &Capture::default(),
     )
     .await?;
-    let after = dest.load(&PERSONAL).await?;
-    assert!(after.items.iter().any(|item| item.id == added.id));
 
-    // The next run has it in its backup, and removes it.
+    // Later runs see it, and leave it too.
     run(&source, &dest, &options()).await?;
     let after = dest.load(&PERSONAL).await?;
-    assert!(after.items.iter().all(|item| item.id != added.id));
+    let kept = after.items.iter().find(|item| item.id == added.id).unwrap();
+    assert_eq!(kept.folder_id, dest_folder);
+    assert_eq!(folder_id(&after), dest_folder);
+    Ok(())
+}
+
+/// Copies go into the folder the plan picked, even when the destination has
+/// two of that name that both have to stay.
+#[tokio::test]
+async fn copies_converge_with_two_folders_of_one_name() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    seed(&source).await?;
+    run(&source, &dest, &options()).await?;
+    let second = dest.create_folder("Work").await?;
+    let mut content = fixtures::samples().remove(2).content;
+    content.insert("name".into(), Node::secret("Own item"));
+    dest.create_item(
+        &PERSONAL,
+        &Draft {
+            content,
+            folder_id: Some(second.id.clone()),
+            collection_ids: vec![],
+        },
+    )
+    .await?;
+    let source_vault = source.load(&PERSONAL).await?;
+    let work = source_vault
+        .folders
+        .iter()
+        .find(|f| f.name == "Work")
+        .unwrap();
+    let mut content = fixtures::samples().remove(2).content;
+    content.insert("name".into(), Node::secret("New in Work"));
+    source
+        .create_item(
+            &PERSONAL,
+            &Draft {
+                content,
+                folder_id: Some(work.id.clone()),
+                collection_ids: vec![],
+            },
+        )
+        .await?;
+
+    assert!(run(&source, &dest, &options()).await?.changed);
+    assert!(!run(&source, &dest, &options()).await?.changed);
     Ok(())
 }
 

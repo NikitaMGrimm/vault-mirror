@@ -872,6 +872,25 @@ fn a_collection_holding_an_item_vault_mirror_did_not_make_is_kept() {
 }
 
 #[test]
+fn a_folder_holding_anything_but_copies_is_kept() {
+    let source = numbered(1);
+    let mut dest = mirrored(&source, Mode::Personal);
+    dest.folders = vec![
+        folder("trash", "Restorable"),
+        folder("org", "Shared"),
+        folder("empty", "Leftover"),
+    ];
+    let mut trashed = login("own-item", "Old login", "pw");
+    trashed.folder_id = Some("trash".into());
+    trashed.in_trash = true;
+    dest.items.push(trashed);
+    dest.folders_used_elsewhere = ["org".to_string()].into();
+
+    let plan = plan(&source, &dest, Mode::Personal);
+    assert_eq!(plan.folders_to_delete, [folder("empty", "Leftover")]);
+}
+
+#[test]
 fn deleting_every_earlier_copy_is_refused() {
     let dest = mirrored(&numbered(40), Mode::Personal);
     let confirmed = Safety {

@@ -403,23 +403,32 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
     }
 
     let mut dest_by_entry: HashMap<usize, (usize, Marker)> = HashMap::new();
-    let mut untracked_folders: HashSet<&str> = HashSet::new();
+    // Folders and collections that hold anything besides copies are kept.
+    let mut untracked_folders: HashSet<&str> = dest
+        .folders_used_elsewhere
+        .iter()
+        .map(String::as_str)
+        .collect();
     let mut untracked_collections: HashSet<&str> = HashSet::new();
     for (index, item) in dest.items.iter().enumerate() {
         let delete = |reason| Delete {
             dest: index,
             reason,
         };
+        let marker = marker_of(item);
+        if marker.is_none() {
+            // Even from the trash, where the item can still be restored.
+            untracked_folders.extend(item.folder_id.as_deref());
+            untracked_collections.extend(item.collection_ids.iter().map(String::as_str));
+        }
         // The trash is left to the server, which empties it on its own
         // schedule. Until then whoever put an item there can take it back,
         // and backups do not cover it.
         if item.in_trash {
             continue;
         }
-        let Some(marker) = marker_of(item) else {
+        let Some(marker) = marker else {
             plan.untracked += 1;
-            untracked_folders.extend(item.folder_id.as_deref());
-            untracked_collections.extend(item.collection_ids.iter().map(String::as_str));
             continue;
         };
         plan.tracked_before += 1;

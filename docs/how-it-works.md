@@ -63,7 +63,10 @@ destination, and anything you add there while the source is unreachable stays.
 vault-mirror also compares the content itself, so:
 
 - if you edit a copy, the next run puts the source version back and warns you;
-  with backups on, your edit is in that run's destination backup;
+  with backups on, your edit is in that run's destination backup. An
+  attachment you add to a copy, or archiving it, is undone the same way but
+  without the warning: the marker can't tell whether that change came from
+  the source or the destination;
 - if you delete a copy's marker, the item is no longer a copy, and the next run
   makes a new one next to it.
 

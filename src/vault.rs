@@ -1,6 +1,6 @@
 //! A decrypted view of one account's vault, and the operations that change it.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{StreamExt, TryStreamExt, stream};
@@ -148,6 +148,9 @@ pub struct Vault {
     pub folders: Vec<Folder>,
     pub collections: Vec<Collection>,
     pub items: Vec<Item>,
+    /// Personal folders that organization items are in. Folders belong to
+    /// the account, so a personal run has to see what else uses them.
+    pub folders_used_elsewhere: BTreeSet<String>,
 }
 
 struct Keys {
@@ -307,6 +310,11 @@ impl Account {
         for cipher in list("ciphers")? {
             let owner = cipher.get("organizationId").and_then(Value::as_str);
             if owner != scope.organization_id() {
+                if *scope == Scope::Personal {
+                    vault
+                        .folders_used_elsewhere
+                        .extend(optional_str(&cipher, "folderId"));
+                }
                 continue;
             }
             let id = required_str(&cipher, "id", "item")?;

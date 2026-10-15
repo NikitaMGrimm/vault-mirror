@@ -346,8 +346,8 @@ mod tests {
                 id: "folder-1".into(),
                 name: "Work".into(),
             }],
-            collections: vec![],
             items: vec![item("item-1", "GitHub"), trashed],
+            ..Vault::default()
         }
     }
 
