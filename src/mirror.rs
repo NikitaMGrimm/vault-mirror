@@ -455,9 +455,19 @@ pub async fn pull(
                     .await
                 {
                     Ok(()) => {
-                        let collection_ids = stored.collection_ids;
-                        stored = source.account.get_item(&source.scope, &stored.id).await?;
-                        stored.collection_ids = collection_ids;
+                        let mut archived =
+                            source.account.get_item(&source.scope, &stored.id).await?;
+                        archived.collection_ids = stored.collection_ids.clone();
+                        if comparable(&archived, None, &[], mode)
+                            != comparable(&stored, None, &[], mode)
+                            || archived.folder_id != stored.folder_id
+                        {
+                            bail!(
+                                "item {} changed during the run. Run again to copy it",
+                                stored.id
+                            );
+                        }
+                        stored = archived;
                     }
                     Err(error) if refused(&error) => {
                         not_archived += 1;
