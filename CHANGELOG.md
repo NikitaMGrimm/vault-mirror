@@ -4,6 +4,13 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.5.1](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.5.0...v0.5.1) - 2026-10-15
+
+### Added
+
+- bring changes back from the destination with run --pull ([#36](https://github.com/NikitaMGrimm/vault-mirror/pull/36))
+- Windows binaries for x86-64 and Arm ([#37](https://github.com/NikitaMGrimm/vault-mirror/pull/37))
+
 ## [0.5.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.4.0...v0.5.0) - 2026-10-15
 
 ### Changed
