@@ -808,6 +808,23 @@ fn switching_source_and_destination_takes_over_the_copies() {
 }
 
 #[test]
+fn switching_source_and_destination_copies_only_changed_attachments() {
+    let mut original = vault(vec![
+        login("s1", "One", "pw1"),
+        login("s2", "Two", "pw2"),
+    ]);
+    original.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    original.items[1].attachments = vec![attachment("a2", "key.txt", 5)];
+    let mut mirror = mirrored(&original, Mode::Personal);
+    // Replaced in the old destination, which gives it a new id.
+    mirror.items[1].attachments = vec![attachment("b2", "key.txt", 6)];
+
+    let plan = plan(&mirror, &original, Mode::Personal);
+    let synced: Vec<bool> = plan.updates.iter().map(|u| u.sync_attachments).collect();
+    assert_eq!(synced, [false, true]);
+}
+
+#[test]
 fn an_edited_clone_of_a_copy_is_left_alone() {
     let source = numbered(1);
     let mut dest = mirrored(&source, Mode::Personal);

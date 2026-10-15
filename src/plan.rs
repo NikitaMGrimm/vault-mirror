@@ -380,8 +380,8 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
     let mut entry_by_source_id: HashMap<&str, usize> = HashMap::new();
     // A source item that is itself a copy names a destination item: the
     // two vaults have switched roles since that copy was made. Its marker
-    // holds that item's content at the time.
-    let mut reverse_links: HashMap<String, (usize, String)> = HashMap::new();
+    // holds both items' state at the time.
+    let mut reverse_links: HashMap<String, (usize, Marker)> = HashMap::new();
     for (index, item) in source.items.iter().enumerate() {
         if item.in_trash {
             continue;
@@ -411,8 +411,8 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         };
         if let Some(link) = marker_of(item) {
             reverse_links
-                .entry(link.source_id)
-                .or_insert((plan.entries.len(), link.content));
+                .entry(link.source_id.clone())
+                .or_insert((plan.entries.len(), link));
         }
         entry_by_source_id.insert(&item.id, plan.entries.len());
         plan.entries.push(Entry {
@@ -475,13 +475,22 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         }
         let Some(marker) = marker else {
             match reverse_links.get(&item.id) {
-                Some((entry, content)) => {
+                Some((entry, link)) => {
                     let entry = *entry;
+                    let source_item = &source.items[plan.entries[entry].source];
+                    // Neither item's attachments changed since the copy, so
+                    // they still match and need no copying.
+                    let files_in_sync = link.source_files == source_files(item)
+                        && link.dest_files == dest_files(source_item);
+                    let files = |hash: String| match files_in_sync {
+                        true => hash,
+                        false => UNKNOWN.to_string(),
+                    };
                     let marker = Marker {
-                        source_id: plan.entries[entry].marker.source_id.clone(),
-                        content: content.clone(),
-                        source_files: UNKNOWN.to_string(),
-                        dest_files: UNKNOWN.to_string(),
+                        source_id: source_item.id.clone(),
+                        content: link.content.clone(),
+                        source_files: files(source_files(source_item)),
+                        dest_files: files(dest_files(item)),
                     };
                     claims.entry(entry).or_default().push((index, marker, true));
                 }

@@ -267,7 +267,8 @@ async fn changes_to_copies_in_the_destination_are_undone_and_reported() -> Resul
         outcome
             .warnings
             .iter()
-            .any(|w| w.starts_with("1 copy changed in the destination")),
+            // The card number, and the attachment deleted from GitHub.
+            .any(|w| w.starts_with("2 copies changed in the destination")),
         "{:?}",
         outcome.warnings
     );
