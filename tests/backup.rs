@@ -322,7 +322,10 @@ async fn a_full_run_backs_up_both_sides_mirrors_and_records_the_result() -> Resu
     let mirror = first.mirror.as_ref().unwrap();
     assert!(mirror.changed);
     assert_eq!(
-        (mirror.items_created, mirror.attachments_copied),
+        (
+            mirror.summary.items_created,
+            mirror.summary.attachments_copied
+        ),
         (count, 4)
     );
     assert_eq!(

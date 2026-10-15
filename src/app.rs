@@ -70,39 +70,15 @@ impl Status {
     }
 }
 
-// The status file is read back by `healthcheck`, so these mirror the report
-// types with owned, deserializable fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SummaryRecord {
     pub changed: bool,
-    pub items_created: usize,
-    pub items_updated: usize,
-    pub items_deleted: usize,
-    pub items_unchanged: usize,
-    pub folders_created: usize,
-    pub folders_deleted: usize,
-    pub collections_created: usize,
-    pub collections_deleted: usize,
-    pub attachments_copied: usize,
+    #[serde(flatten)]
+    pub summary: Summary,
 }
 
-impl SummaryRecord {
-    fn new(summary: Summary, changed: bool) -> Self {
-        Self {
-            changed,
-            items_created: summary.items_created,
-            items_updated: summary.items_updated,
-            items_deleted: summary.items_deleted,
-            items_unchanged: summary.items_unchanged,
-            folders_created: summary.folders_created,
-            folders_deleted: summary.folders_deleted,
-            collections_created: summary.collections_created,
-            collections_deleted: summary.collections_deleted,
-            attachments_copied: summary.attachments_copied,
-        }
-    }
-}
-
+// The status file is read back by `healthcheck`, so this mirrors the report
+// with owned, deserializable fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct BackupRecord {
     pub snapshot: Option<String>,
@@ -368,15 +344,19 @@ async fn execute(
     };
     match mirror_onto(&source, &dest, dest_vault, &options, reporter).await {
         Ok(outcome) => {
-            progress.status.mirror = Some(SummaryRecord::new(outcome.summary, outcome.changed));
+            progress.status.mirror = Some(SummaryRecord {
+                changed: outcome.changed,
+                summary: outcome.summary,
+            });
             progress.status.warnings.extend(outcome.warnings);
             Ok(())
         }
         Err(error) => {
             progress.stage = error.stage;
-            progress.status.mirror = error
-                .summary
-                .map(|summary| SummaryRecord::new(summary, false));
+            progress.status.mirror = error.summary.map(|summary| SummaryRecord {
+                changed: false,
+                summary,
+            });
             Err(error.source)
         }
     }
@@ -411,7 +391,10 @@ pub fn describe(status: &Status) -> String {
         },
         if status.dry_run { " (dry run)" } else { "" }
     )];
-    if let Some(mirror) = &status.mirror {
+    if let Some(SummaryRecord {
+        summary: mirror, ..
+    }) = &status.mirror
+    {
         parts.push(format!(
             "{} created, {} updated, {} deleted, {} unchanged",
             count(mirror.items_created, "item"),
@@ -502,9 +485,12 @@ mod tests {
             status: RunResult::Success,
             finished_at: "2026-10-14T02:00:00Z".into(),
             mirror: Some(SummaryRecord {
-                items_created: 2,
-                items_unchanged: 40,
-                ..SummaryRecord::default()
+                changed: false,
+                summary: Summary {
+                    items_created: 2,
+                    items_unchanged: 40,
+                    ..Summary::default()
+                },
             }),
             ..Status::default()
         }

@@ -234,7 +234,9 @@ fn finished(status: &app::Status) -> String {
     let seconds = status.duration_seconds;
     match &status.mirror {
         _ if status.dry_run => format!("dry run in {seconds:.1}s; the destination is unchanged"),
-        Some(mirror) => format!(
+        Some(app::SummaryRecord {
+            summary: mirror, ..
+        }) => format!(
             "{} created, {} updated, {} deleted, {} unchanged in {seconds:.1}s",
             mirror.items_created,
             mirror.items_updated,

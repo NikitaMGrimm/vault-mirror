@@ -825,8 +825,7 @@ async fn an_interrupted_attachment_copy_is_repaired() -> Result<()> {
     let plan = plan::plan(&source_vault, &dest_vault, plan::Mode::Personal);
     let update = &plan.updates[0];
     assert!(update.sync_attachments);
-    let draft = plan.pending_draft(
-        &plan.entries[update.entry],
+    let draft = plan.entries[update.entry].pending_draft(
         &source_vault,
         &Default::default(),
         &Default::default(),

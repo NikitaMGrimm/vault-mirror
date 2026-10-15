@@ -185,11 +185,12 @@ pub async fn restore(
         })
         .await?;
 
-    let outcomes: Vec<(bool, String, usize, usize)> = stream::iter(items.iter().zip(&created).map(
+    // Restored and missing attachments of each item.
+    let outcomes: Vec<(usize, usize)> = stream::iter(items.iter().zip(&created).map(
         |(item, created)| async move {
             let (mut restored, mut missing) = (0, 0);
             if !attachments_allowed {
-                return anyhow::Ok((item.archived, created.id.clone(), 0, 0));
+                return anyhow::Ok((0, 0));
             }
             for attachment in &item.attachments {
                 let data = match store {
@@ -211,17 +212,18 @@ pub async fn restore(
                     })?;
                 restored += 1;
             }
-            anyhow::Ok((item.archived, created.id.clone(), restored, missing))
+            anyhow::Ok((restored, missing))
         },
     ))
     .buffer_unordered(concurrency)
     .try_collect()
     .await?;
 
-    let archived: Vec<String> = outcomes
+    let archived: Vec<String> = items
         .iter()
-        .filter(|(archived, ..)| *archived)
-        .map(|(_, id, ..)| id.clone())
+        .zip(&created)
+        .filter(|(item, _)| item.archived)
+        .map(|(_, created)| created.id.clone())
         .collect();
     if !archived.is_empty()
         && let Err(error) = account.set_archived(&archived, true).await
@@ -253,9 +255,9 @@ pub async fn restore(
             count(invisible, "restored item")
         );
     }
-    report.items = outcomes.len();
-    report.attachments_restored = outcomes.iter().map(|(_, _, restored, _)| restored).sum();
-    report.attachments_missing = outcomes.iter().map(|(_, _, _, missing)| missing).sum();
+    report.items = created.len();
+    report.attachments_restored = outcomes.iter().map(|(restored, _)| restored).sum();
+    report.attachments_missing = outcomes.iter().map(|(_, missing)| missing).sum();
     if !attachments_allowed {
         report.attachments_skipped = items.iter().map(|item| item.attachments.len()).sum();
     }

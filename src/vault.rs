@@ -167,7 +167,6 @@ pub struct Account {
     keys: Keys,
     memberships: Memberships,
     pub user_id: String,
-    pub email: String,
     /// Whether the account may upload attachments to its individual vault.
     /// Bitwarden requires a premium subscription; Vaultwarden reports every
     /// account as premium.
@@ -206,7 +205,7 @@ impl Account {
 
         // Key derivation is deliberately expensive; keep it off the async workers.
         let password = master_password.to_string();
-        let salt = email.clone();
+        let salt = email;
         let master =
             tokio::task::spawn_blocking(move || MasterSecret::derive(&password, &salt, &kdf))
                 .await
@@ -240,7 +239,6 @@ impl Account {
             },
             memberships: member_ids,
             user_id,
-            email,
             premium,
         })
     }

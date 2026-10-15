@@ -161,6 +161,11 @@ pub struct Plan {
     pub folders_to_delete: Vec<Folder>,
     pub collections_to_create: Vec<NewCollection>,
     pub collections_to_delete: Vec<Collection>,
+    /// The destination folder that copies go into, by name. A run adds the
+    /// folders it creates.
+    pub folder_ids: HashMap<String, String>,
+    /// The same for collections.
+    pub collection_ids: HashMap<String, String>,
     /// Destination items that carry a marker, before this plan is applied.
     pub tracked_before: usize,
     /// Destination items without a marker. vault-mirror did not make them,
@@ -176,7 +181,7 @@ pub struct Plan {
     pub attachments_withheld: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Summary {
     pub items_created: usize,
     pub items_updated: usize,
@@ -227,16 +232,17 @@ impl Plan {
                     .sum::<usize>(),
         }
     }
+}
 
-    /// What to write to the destination for `entry`.
+impl Entry {
+    /// What to write to the destination for this entry.
     pub fn draft(
         &self,
-        entry: &Entry,
         source: &Vault,
         folder_ids: &HashMap<String, String>,
         collection_ids: &HashMap<String, String>,
     ) -> Result<Draft, PlanError> {
-        self.draft_marked(entry, &entry.marker, source, folder_ids, collection_ids)
+        self.draft_marked(&self.marker, source, folder_ids, collection_ids)
     }
 
     /// Like `draft`, but the marker does not yet vouch for the attachments.
@@ -244,44 +250,41 @@ impl Plan {
     /// before they are complete and verified copies them again next time.
     pub fn pending_draft(
         &self,
-        entry: &Entry,
         source: &Vault,
         folder_ids: &HashMap<String, String>,
         collection_ids: &HashMap<String, String>,
     ) -> Result<Draft, PlanError> {
         let pending = Marker {
             attachments_hash: NO_ATTACHMENTS.to_string(),
-            ..entry.marker.clone()
+            ..self.marker.clone()
         };
-        self.draft_marked(entry, &pending, source, folder_ids, collection_ids)
+        self.draft_marked(&pending, source, folder_ids, collection_ids)
     }
 
     /// The draft that completes an item once its attachments are copied to
     /// `dest`, the destination item as the server now holds it.
     pub fn finished_draft(
         &self,
-        entry: &Entry,
         source: &Vault,
         dest: &Item,
         folder_ids: &HashMap<String, String>,
         collection_ids: &HashMap<String, String>,
     ) -> Result<Draft, PlanError> {
         let finished = Marker {
-            attachments_hash: attachments_hash(&source.items[entry.source], dest),
-            ..entry.marker.clone()
+            attachments_hash: attachments_hash(&source.items[self.source], dest),
+            ..self.marker.clone()
         };
-        self.draft_marked(entry, &finished, source, folder_ids, collection_ids)
+        self.draft_marked(&finished, source, folder_ids, collection_ids)
     }
 
     fn draft_marked(
         &self,
-        entry: &Entry,
         marker: &Marker,
         source: &Vault,
         folder_ids: &HashMap<String, String>,
         collection_ids: &HashMap<String, String>,
     ) -> Result<Draft, PlanError> {
-        let item = &source.items[entry.source];
+        let item = &source.items[self.source];
         let mut content = item.content.clone();
         let mut fields: Vec<Node> = item
             .fields()
@@ -292,7 +295,7 @@ impl Plan {
         fields.push(marker.to_field());
         content.insert("fields".to_string(), Node::List(fields));
 
-        let folder_id = match &entry.folder {
+        let folder_id = match &self.folder {
             Some(name) => Some(
                 folder_ids
                     .get(name)
@@ -301,7 +304,7 @@ impl Plan {
             ),
             None => None,
         };
-        let collection_ids = entry
+        let collection_ids = self
             .collections
             .iter()
             .map(|name| {
@@ -362,6 +365,8 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
 
     let mut plan = Plan {
         copy_attachments,
+        folder_ids: owned(&dest_folders),
+        collection_ids: owned(&dest_collections),
         ..Plan::default()
     };
 
@@ -582,6 +587,12 @@ fn first_id_by_name<'a>(
         map.entry(name.as_str()).or_insert(id.as_str());
     }
     map
+}
+
+fn owned(map: &HashMap<&str, &str>) -> HashMap<String, String> {
+    map.iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
 }
 
 fn sorted_names<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {

@@ -96,41 +96,21 @@ fn apply_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) 
         format!("{prefix}-{counter}")
     };
 
+    let mut folder_ids = plan.folder_ids.clone();
     for name in &plan.folders_to_create {
         let id = fresh("dest-folder");
         next.folders.push(folder(&id, name));
+        folder_ids.insert(name.clone(), id);
     }
+    let mut collection_ids = plan.collection_ids.clone();
     for new in &plan.collections_to_create {
         let id = fresh("dest-collection");
         next.collections.push(collection(&id, &new.name));
+        collection_ids.insert(new.name.clone(), id);
     }
-    let doomed_folders: Vec<&str> = plan
-        .folders_to_delete
-        .iter()
-        .map(|f| f.id.as_str())
-        .collect();
-    let doomed_collections: Vec<&str> = plan
-        .collections_to_delete
-        .iter()
-        .map(|c| c.id.as_str())
-        .collect();
-    let folder_ids: HashMap<String, String> = next
-        .folders
-        .iter()
-        .filter(|f| !doomed_folders.contains(&f.id.as_str()))
-        .map(|f| (f.name.clone(), f.id.clone()))
-        .collect();
-    let collection_ids: HashMap<String, String> = next
-        .collections
-        .iter()
-        .filter(|c| !doomed_collections.contains(&c.id.as_str()))
-        .map(|c| (c.name.clone(), c.id.clone()))
-        .collect();
 
     let write = |item: &mut Item, entry: &Entry| {
-        let draft = plan
-            .draft(entry, source, &folder_ids, &collection_ids)
-            .unwrap();
+        let draft = entry.draft(source, &folder_ids, &collection_ids).unwrap();
         item.content = draft.content;
         item.folder_id = draft.folder_id;
         item.collection_ids = draft.collection_ids;
@@ -140,8 +120,8 @@ fn apply_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) 
         if item.attachments.is_empty() {
             return;
         }
-        let draft = plan
-            .finished_draft(entry, source, item, &folder_ids, &collection_ids)
+        let draft = entry
+            .finished_draft(source, item, &folder_ids, &collection_ids)
             .unwrap();
         item.content = draft.content;
     };
@@ -187,10 +167,9 @@ fn apply_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: bool) 
         .map(|d| dest.items[d.dest].id.clone())
         .collect();
     next.items.retain(|item| !doomed.contains(&item.id));
-    next.folders
-        .retain(|f| !doomed_folders.contains(&f.id.as_str()));
+    next.folders.retain(|f| !plan.folders_to_delete.contains(f));
     next.collections
-        .retain(|c| !doomed_collections.contains(&c.id.as_str()));
+        .retain(|c| !plan.collections_to_delete.contains(c));
     next
 }
 
@@ -524,13 +503,8 @@ fn an_item_left_with_a_pending_marker_gets_its_attachments_again() {
     // As a run leaves an item that stopped while copying: the files may be
     // incomplete although their names match.
     let plan_now = plan(&source, &Vault::default(), Mode::Personal);
-    let draft = plan_now
-        .pending_draft(
-            &plan_now.entries[0],
-            &source,
-            &HashMap::new(),
-            &HashMap::new(),
-        )
+    let draft = plan_now.entries[0]
+        .pending_draft(&source, &HashMap::new(), &HashMap::new())
         .unwrap();
     dest.items[0].content = draft.content;
 
@@ -793,8 +767,8 @@ fn a_draft_without_its_folder_fails_without_naming_it() {
     source.folders = vec![folder("f1", "Work")];
     source.items[0].folder_id = Some("f1".into());
     let plan = plan(&source, &Vault::default(), Mode::Personal);
-    let error = plan
-        .draft(&plan.entries[0], &source, &HashMap::new(), &HashMap::new())
+    let error = plan.entries[0]
+        .draft(&source, &HashMap::new(), &HashMap::new())
         .unwrap_err();
     assert_eq!(error, PlanError::MissingFolder);
     assert!(!error.to_string().contains("Work"));
