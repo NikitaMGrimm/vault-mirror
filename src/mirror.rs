@@ -470,34 +470,12 @@ impl Run<'_> {
         let concurrency = self.options.concurrency.max(1);
 
         self.stage = "creating folders and collections";
-        let doomed_folders: Vec<&str> = plan
-            .folders_to_delete
-            .iter()
-            .map(|f| f.id.as_str())
-            .collect();
-        let mut folder_ids = first_id_by_name(
-            dest_vault
-                .folders
-                .iter()
-                .filter(|f| !doomed_folders.contains(&f.id.as_str()))
-                .map(|f| (&f.name, &f.id)),
-        );
+        let mut folder_ids = plan.folder_ids.clone();
         for name in &plan.folders_to_create {
             let folder = dest.account.create_folder(name).await?;
             folder_ids.insert(folder.name, folder.id);
         }
-        let doomed_collections: Vec<&str> = plan
-            .collections_to_delete
-            .iter()
-            .map(|c| c.id.as_str())
-            .collect();
-        let mut collection_ids = first_id_by_name(
-            dest_vault
-                .collections
-                .iter()
-                .filter(|c| !doomed_collections.contains(&c.id.as_str()))
-                .map(|c| (&c.name, &c.id)),
-        );
+        let mut collection_ids = plan.collection_ids.clone();
         if let Scope::Organization(org) = &dest.scope {
             for new in &plan.collections_to_create {
                 let collection = dest
@@ -526,8 +504,8 @@ impl Run<'_> {
             .map(|&entry_index| {
                 let entry = &plan.entries[entry_index];
                 match pending(entry_index) {
-                    true => plan.pending_draft(entry, source_vault, &folder_ids, &collection_ids),
-                    false => plan.draft(entry, source_vault, &folder_ids, &collection_ids),
+                    true => entry.pending_draft(source_vault, &folder_ids, &collection_ids),
+                    false => entry.draft(source_vault, &folder_ids, &collection_ids),
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -556,9 +534,9 @@ impl Run<'_> {
                     let existing = &dest_vault.items[update.dest];
                     let entry = &plan.entries[update.entry];
                     let draft = if update.sync_attachments && pending(update.entry) {
-                        plan.pending_draft(entry, source_vault, folder_ids, collection_ids)?
+                        entry.pending_draft(source_vault, folder_ids, collection_ids)?
                     } else if update.write_content {
-                        plan.draft(entry, source_vault, folder_ids, collection_ids)?
+                        entry.draft(source_vault, folder_ids, collection_ids)?
                     } else {
                         return anyhow::Ok((index, existing.clone()));
                     };
@@ -685,13 +663,8 @@ impl Run<'_> {
                             );
                         }
                     }
-                    let draft = plan.finished_draft(
-                        entry,
-                        source_vault,
-                        &stored,
-                        folder_ids,
-                        collection_ids,
-                    )?;
+                    let draft =
+                        entry.finished_draft(source_vault, &stored, folder_ids, collection_ids)?;
                     let finished = dest
                         .account
                         .update_item(&dest.scope, &stored, &draft)
@@ -758,7 +731,8 @@ impl Run<'_> {
             }
         }
 
-        // Deletions come last: until here a failed run has removed nothing.
+        // Deleting items comes last, so a run that fails before has removed
+        // no item, only attachments it was replacing.
         self.stage = "deleting obsolete items";
         let ids: Vec<String> = plan
             .deletes
@@ -895,18 +869,6 @@ pub(crate) fn refused(error: &anyhow::Error) -> bool {
 
 /// The plan's changes in a few words, leaving out what does not happen, as
 /// a verb and the rest of the sentence.
-/// The first container of each name, as the plan picks it, so that copies go
-/// where the plan expects them.
-fn first_id_by_name<'a>(
-    pairs: impl Iterator<Item = (&'a String, &'a String)>,
-) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for (name, id) in pairs {
-        map.entry(name.clone()).or_insert_with(|| id.clone());
-    }
-    map
-}
-
 fn describe_plan(summary: &Summary, dry_run: bool) -> (&'static str, String) {
     let changes: Vec<String> = [
         (summary.items_created, "create", "item"),

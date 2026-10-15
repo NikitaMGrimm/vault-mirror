@@ -126,7 +126,6 @@ pub struct RestorableItem {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Restorable {
     pub organization: bool,
-    pub created_at: Option<String>,
     pub folders: Vec<Folder>,
     pub collections: Vec<Collection>,
     pub items: Vec<RestorableItem>,
@@ -166,7 +165,6 @@ pub fn parse(document: &Value) -> Result<Restorable> {
     let mut restorable = Restorable {
         organization: root.contains_key("collections")
             || block.and_then(|b| b.get("scope")).and_then(Value::as_str) == Some("organization"),
-        created_at: block.and_then(|b| text(b, "createdAt")),
         ..Restorable::default()
     };
     // Servers accept empty folder and collection names, and items refer to
@@ -397,10 +395,7 @@ mod tests {
         let restorable = parse(&document).unwrap();
 
         assert!(!restorable.organization);
-        assert_eq!(
-            restorable.created_at.as_deref(),
-            Some("2026-10-14T00:00:00Z")
-        );
+        assert_eq!(document[BLOCK]["createdAt"], "2026-10-14T00:00:00Z");
         assert_eq!(restorable.folders, vault.folders);
         assert_eq!(restorable.items.len(), 1);
         let restored = &restorable.items[0];
