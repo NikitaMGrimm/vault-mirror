@@ -55,7 +55,7 @@ Use these terms the way the docs do:
 | Path | Role |
 | --- | --- |
 | `src/main.rs`, `src/console.rs`, `src/wizard.rs` | The command line: commands, terminal output, `init` |
-| `src/app.rs` | One full run: backups, mirror, status file, notification |
+| `src/app.rs`, `src/schedule.rs` | One full run: backups, mirror, status file, notification; the `daemon` schedule |
 | `src/config.rs` | Environment variables |
 | `src/api.rs` | HTTP client, login, retries |
 | `src/crypto.rs` | The only module that uses `bitwarden-crypto` |
