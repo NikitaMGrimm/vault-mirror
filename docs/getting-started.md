@@ -45,7 +45,7 @@ docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
    logs in right away to check them.
 2. The same for the destination. Answer no to "Mirror the source into a second
    account?" if you only want backups.
-3. How often to run.
+3. How often to run, and in which time zone.
 4. A backup passphrase. Let `init` generate one.
 
 It then writes two files and shows what the first run would do:
@@ -79,8 +79,7 @@ The two files:
 docker compose up -d
 ```
 
-With a daily schedule, the first run starts at the next 03:00. With an interval,
-it starts right away.
+The first run starts at the next scheduled time, such as 03:00.
 
 To run once now instead of waiting:
 

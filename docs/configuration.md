@@ -75,12 +75,9 @@ file.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SCHEDULE` | | When `daemon` runs, as a cron expression such as `0 3 * * *`. |
-| `INTERVAL` | | Or how often `daemon` runs, such as `30m`, `6h` or `1d`. The first run starts right away. |
 | `TZ` | UTC | The time zone `SCHEDULE` is read in, such as `Europe/Berlin`. |
 | `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After each run, `POST` a one-line summary here. Works with [ntfy](https://ntfy.sh), [healthchecks.io](https://healthchecks.io), Gotify and anything else that accepts a plain-text `POST`. The summary has counts and error messages, never vault content. A delivery failure is a warning. |
-| `CONCURRENCY` | `4` | How many items are written at once, from 1 to 32. |
 | `CA_CERT_FILE` | | A PEM file of extra certificate authorities to trust, for a server with a private CA. |
-| `BITWARDEN_CLIENT_VERSION` | a recent version | The client version reported to servers. Only change this if a server rejects the default. |
 
 When `CA_CERT_FILE` is set during `init`, the settings file keeps its absolute
 path for native runs. Generated Compose settings mount it read-only at
@@ -93,7 +90,7 @@ pass `-e CA_CERT_FILE=/work/ca.pem` when that directory is mounted at `/work`.
 If you can't run `init`, for example because there's no terminal:
 
 1. Write `vault-mirror.env` with the required variables above,
-   `BACKUP_PASSPHRASE`, and `SCHEDULE` or `INTERVAL`.
+   `BACKUP_PASSPHRASE`, and `SCHEDULE`.
 
 2. In the same directory, create `backups` and `compose.yaml`. The container
    runs as you, so it can write to `backups`.

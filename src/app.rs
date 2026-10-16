@@ -132,10 +132,7 @@ pub fn lock_backups_dir(backups_dir: &Path) -> Result<fs::File> {
 }
 
 pub fn http_client(config: &Config) -> Result<reqwest::Client> {
-    let mut options = ClientOptions {
-        client_version: config.client_version.clone(),
-        ..ClientOptions::default()
-    };
+    let mut options = ClientOptions::default();
     if let Some(path) = &config.ca_cert_file {
         options.extra_root_certs.push(
             fs::read(path).with_context(|| format!("reading CA_CERT_FILE {}", path.display()))?,
@@ -333,7 +330,6 @@ async fn execute(
             allow_reverse: flags.reverse,
             ..config.safety.clone()
         },
-        concurrency: config.concurrency,
         filter: config.filter.clone(),
     };
 

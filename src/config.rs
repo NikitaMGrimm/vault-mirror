@@ -1,12 +1,8 @@
 //! Configuration, read from environment variables.
 
-use std::{collections::HashMap, fs, path::PathBuf, str::FromStr, time::Duration};
+use std::{collections::HashMap, fs, path::PathBuf, str::FromStr};
 
-use crate::{
-    api::{ClientOptions, DEFAULT_CLIENT_VERSION},
-    mirror::Filter,
-    plan::Safety,
-};
+use crate::{api::ClientOptions, mirror::Filter, plan::Safety};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("{0}")]
@@ -29,13 +25,6 @@ pub struct BackupConfig {
     pub retention_days: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Schedule {
-    /// A five- or six-field cron expression, evaluated in `timezone`.
-    Cron(String),
-    Every(Duration),
-}
-
 #[derive(Clone)]
 pub struct Config {
     pub source: VaultConfig,
@@ -44,11 +33,11 @@ pub struct Config {
     pub backups_dir: PathBuf,
     pub backup: BackupConfig,
     pub safety: Safety,
-    pub concurrency: usize,
     pub filter: Filter,
-    pub client_version: String,
     pub ca_cert_file: Option<PathBuf>,
-    pub schedule: Option<Schedule>,
+    /// When `daemon` runs: a five- or six-field cron expression, evaluated in
+    /// `timezone`.
+    pub schedule: Option<String>,
     pub timezone: Option<String>,
     pub notify_success_url: Option<String>,
     pub notify_failure_url: Option<String>,
@@ -150,14 +139,6 @@ impl Env<'_> {
             organization_id,
         }))
     }
-
-    fn concurrency(&self) -> Result<usize> {
-        let concurrency = self.parse("CONCURRENCY", 4)?;
-        if !(1..=32).contains(&concurrency) {
-            return Err(ConfigError("CONCURRENCY must be between 1 and 32".into()));
-        }
-        Ok(concurrency)
-    }
 }
 
 impl Config {
@@ -218,18 +199,6 @@ impl Config {
                 ));
             }
         };
-        let concurrency = env.concurrency()?;
-
-        let schedule = match (env.get("SCHEDULE"), env.get("INTERVAL")) {
-            (Some(_), Some(_)) => {
-                return Err(ConfigError(
-                    "set either SCHEDULE or INTERVAL, not both".into(),
-                ));
-            }
-            (Some(cron), None) => Some(Schedule::Cron(cron)),
-            (None, Some(interval)) => Some(Schedule::Every(parse_interval(&interval)?)),
-            (None, None) => None,
-        };
 
         Ok(Self {
             source,
@@ -240,13 +209,9 @@ impl Config {
                 max_delete_percent,
                 ..Safety::default()
             },
-            concurrency,
             filter,
-            client_version: env
-                .get("BITWARDEN_CLIENT_VERSION")
-                .unwrap_or_else(|| DEFAULT_CLIENT_VERSION.into()),
             ca_cert_file: env.get("CA_CERT_FILE").map(PathBuf::from),
-            schedule,
+            schedule: env.get("SCHEDULE"),
             timezone: env.get("TZ"),
             notify_success_url: env.token("NOTIFY_SUCCESS_URL")?,
             notify_failure_url: env.token("NOTIFY_FAILURE_URL")?,
@@ -274,18 +239,9 @@ pub fn vault_config(env: &HashMap<String, String>, prefix: &str) -> Result<Vault
         .ok_or_else(|| ConfigError(format!("no {} vault is configured", prefix.to_lowercase())))
 }
 
-pub fn concurrency(env: &HashMap<String, String>) -> Result<usize> {
-    Env(env).concurrency()
-}
-
 pub fn client_options(env: &HashMap<String, String>) -> Result<ClientOptions> {
     let env = Env(env);
-    let mut options = ClientOptions {
-        client_version: env
-            .get("BITWARDEN_CLIENT_VERSION")
-            .unwrap_or_else(|| DEFAULT_CLIENT_VERSION.into()),
-        ..ClientOptions::default()
-    };
+    let mut options = ClientOptions::default();
     if let Some(path) = env.get("CA_CERT_FILE") {
         options.extra_root_certs.push(
             fs::read(&path)
@@ -293,28 +249,6 @@ pub fn client_options(env: &HashMap<String, String>) -> Result<ClientOptions> {
         );
     }
     Ok(options)
-}
-
-/// Parses an interval such as `90s`, `30m`, `6h` or `1d`.
-fn parse_interval(raw: &str) -> Result<Duration> {
-    let invalid = || ConfigError(format!("INTERVAL must look like 30m, 6h or 1d, not {raw}"));
-    let split = raw
-        .find(|c: char| !c.is_ascii_digit())
-        .ok_or_else(invalid)?;
-    let (number, unit) = raw.split_at(split);
-    let number: u64 = number.parse().map_err(|_| invalid())?;
-    let seconds = match unit.trim() {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86400,
-        _ => return Err(invalid()),
-    };
-    let total = number.checked_mul(seconds).ok_or_else(invalid)?;
-    if total < 60 {
-        return Err(ConfigError("INTERVAL must be at least one minute".into()));
-    }
-    Ok(Duration::from_secs(total))
 }
 
 #[cfg(test)]
@@ -369,7 +303,6 @@ mod tests {
         assert_eq!(config.backup.passphrase, "backup passphrase");
         assert_eq!(config.backup.retention_days, 30);
         assert_eq!(config.safety, Safety::default());
-        assert_eq!(config.concurrency, 4);
         assert!(config.schedule.is_none());
         assert_eq!(config.backups_dir, PathBuf::from("backups"));
     }
@@ -508,9 +441,6 @@ mod tests {
             Some("backup passphrase")
         );
         assert!(client_options(&values).is_ok());
-        assert_eq!(concurrency(&values).unwrap(), 4);
-        values.insert("CONCURRENCY".into(), "0".into());
-        assert!(concurrency(&values).is_err());
     }
 
     #[test]
@@ -518,37 +448,12 @@ mod tests {
         let config = Config::from_env(&with(&[
             ("RETENTION_DAYS", "7"),
             ("MAX_DELETE_PERCENT", "20"),
-            ("CONCURRENCY", "8"),
         ]))
         .unwrap();
         assert_eq!(config.backup.retention_days, 7);
         assert_eq!(config.safety.max_delete_percent, Some(20));
-        assert_eq!(config.concurrency, 8);
 
         assert!(error(with(&[("MAX_DELETE_PERCENT", "101")])).contains("between 0 and 100"));
-        assert!(error(with(&[("CONCURRENCY", "0")])).contains("between 1 and 32"));
         assert!(error(with(&[("RETENTION_DAYS", "soon")])).contains("RETENTION_DAYS"));
-    }
-
-    #[test]
-    fn schedules_are_a_cron_expression_or_an_interval() {
-        let cron =
-            Config::from_env(&with(&[("SCHEDULE", "0 3 * * *"), ("TZ", "Europe/Berlin")])).unwrap();
-        assert_eq!(cron.schedule, Some(Schedule::Cron("0 3 * * *".into())));
-        assert_eq!(cron.timezone.as_deref(), Some("Europe/Berlin"));
-        let every = Config::from_env(&with(&[("INTERVAL", "6h")])).unwrap();
-        assert_eq!(
-            every.schedule,
-            Some(Schedule::Every(Duration::from_secs(6 * 3600)))
-        );
-
-        assert!(error(with(&[("SCHEDULE", "0 3 * * *"), ("INTERVAL", "6h")])).contains("not both"));
-        assert!(error(with(&[("INTERVAL", "10s")])).contains("at least one minute"));
-        for invalid in ["6", "h", "6 hours", "-1h"] {
-            assert!(
-                error(with(&[("INTERVAL", invalid)])).contains("INTERVAL must look like"),
-                "{invalid}"
-            );
-        }
     }
 }

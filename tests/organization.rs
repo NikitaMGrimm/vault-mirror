@@ -515,7 +515,6 @@ async fn a_restore_leaves_out_items_the_target_would_hide() -> Result<()> {
         &store.snapshot(&id),
         &RestoreOptions {
             allow_non_empty: false,
-            concurrency: 1,
         },
         &capture,
     )

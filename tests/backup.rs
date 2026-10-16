@@ -70,7 +70,6 @@ async fn restored_copy(sandbox: &Sandbox, store: &Store<'_>) -> Result<Account> 
     };
     let options = RestoreOptions {
         allow_non_empty: false,
-        concurrency: 4,
     };
     restore(
         &endpoint,
@@ -132,7 +131,6 @@ async fn a_backup_restores_into_an_identical_vault() -> Result<()> {
     };
     let refused = RestoreOptions {
         allow_non_empty: false,
-        concurrency: 4,
     };
     let error = restore(
         &endpoint,
@@ -302,7 +300,6 @@ async fn a_full_run_backs_up_both_sides_mirrors_and_records_the_result() -> Resu
     };
     let options = RestoreOptions {
         allow_non_empty: false,
-        concurrency: 4,
     };
     restore(
         &endpoint,

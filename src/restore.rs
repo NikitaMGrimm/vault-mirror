@@ -18,7 +18,7 @@ use crate::{
     snapshot::{self, RestorableItem, SnapshotAttachment},
     store::Snapshot,
     text::count,
-    vault::{Draft, Item, Scope, Vault},
+    vault::{Draft, Item, Scope, Vault, WRITES_AT_ONCE},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,7 +40,6 @@ pub struct RestoreOptions {
     /// Restore into a vault that already has items. They are kept, so
     /// restoring the same snapshot twice duplicates everything.
     pub allow_non_empty: bool,
-    pub concurrency: usize,
 }
 
 pub async fn restore(
@@ -212,12 +211,9 @@ pub async fn restore(
             ))
         })
         .collect();
-    let concurrency = options.concurrency.max(1);
     let writes = Tally::new(reporter, "Restoring", drafts.len(), "items");
     let created = account
-        .create_items(scope, &drafts, &folder_names, concurrency, &|n| {
-            writes.add(n)
-        })
+        .create_items(scope, &drafts, &folder_names, &|n| writes.add(n))
         .await?;
 
     let files: Vec<Vec<String>> = stream::iter(items.iter().zip(&created).map(
@@ -239,7 +235,7 @@ pub async fn restore(
             anyhow::Ok(names)
         },
     ))
-    .buffered(concurrency)
+    .buffered(WRITES_AT_ONCE)
     .try_collect()
     .await?;
 

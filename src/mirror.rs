@@ -13,7 +13,7 @@ use crate::{
     api::ApiError,
     plan::{self, DeleteReason, Mode, Plan, Safety, Summary, comparable, differing_paths},
     text::count,
-    vault::{Account, Draft, Item, Scope, ServerTraits, Vault},
+    vault::{Account, Draft, Item, Scope, ServerTraits, Vault, WRITES_AT_ONCE},
 };
 
 /// Receives progress lines. Messages never contain vault content, only
@@ -60,13 +60,11 @@ impl<'a> Tally<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MirrorOptions {
     /// Work out and report the plan, but change nothing.
     pub dry_run: bool,
     pub safety: Safety,
-    /// How many item writes run at once.
-    pub concurrency: usize,
     /// The folders, or in an organization the collections, to mirror.
     pub filter: Filter,
 }
@@ -135,17 +133,6 @@ impl Filter {
                     !item.collection_ids.is_empty()
                 });
             }
-        }
-    }
-}
-
-impl Default for MirrorOptions {
-    fn default() -> Self {
-        Self {
-            dry_run: false,
-            safety: Safety::default(),
-            concurrency: 4,
-            filter: Filter::default(),
         }
     }
 }
@@ -898,7 +885,6 @@ impl Run<'_> {
     ) -> Result<()> {
         let source = self.source;
         let dest = self.dest;
-        let concurrency = self.options.concurrency.max(1);
 
         self.stage = "creating folders and collections";
         let mut folder_ids = plan.folder_ids.clone();
@@ -953,9 +939,7 @@ impl Run<'_> {
         let writes = Tally::new(self.reporter, "Writing", drafts.len() + rewritten, "items");
         let new_items = dest
             .account
-            .create_items(&dest.scope, &drafts, &folder_names, concurrency, &|n| {
-                writes.add(n)
-            })
+            .create_items(&dest.scope, &drafts, &folder_names, &|n| writes.add(n))
             .await?;
         let created: Vec<(usize, Item)> = plan.creates.iter().copied().zip(new_items).collect();
 
@@ -981,7 +965,7 @@ impl Run<'_> {
                     Ok((index, item))
                 }
             }))
-            .buffer_unordered(concurrency)
+            .buffer_unordered(WRITES_AT_ONCE)
             .try_collect()
             .await?;
         if !created.is_empty() {
@@ -1050,7 +1034,7 @@ impl Run<'_> {
             },
         ))
         // Attachments are held in memory while they are re-encrypted.
-        .buffer_unordered(concurrency.min(2))
+        .buffer_unordered(2)
         .try_collect()
         .await?;
         let mut finished: HashMap<usize, Item> = HashMap::new();

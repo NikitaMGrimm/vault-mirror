@@ -31,11 +31,11 @@ const SERVERS: &[(&str, Option<&str>)] = &[
     ("Self-hosted Bitwarden or Vaultwarden", None),
 ];
 
-/// The schedule choices and the settings each one writes.
-const SCHEDULES: &[(&str, &str, &str)] = &[
-    ("Every day at 03:00", "SCHEDULE", "0 3 * * *"),
-    ("Every 6 hours", "INTERVAL", "6h"),
-    ("Every hour", "INTERVAL", "1h"),
+/// The schedule choices and the cron expression each one writes.
+const SCHEDULES: &[(&str, &str)] = &[
+    ("Every day at 03:00", "0 3 * * *"),
+    ("Every 6 hours", "0 */6 * * *"),
+    ("Every hour", "0 * * * *"),
 ];
 
 pub async fn init(dir: &Path) -> Result<ExitCode> {
@@ -100,20 +100,17 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
         .items(SCHEDULES.iter().map(|(label, ..)| *label))
         .default(0)
         .interact()?;
-    let (_, name, value) = SCHEDULES[choice];
-    written.push((name, value.to_string()));
-    if name == "SCHEDULE" {
-        let zone: String = Input::with_theme(&theme)
-            .with_prompt("Time zone")
-            .default(local_timezone())
-            .validate_with(|zone: &String| {
-                zone.parse::<chrono_tz::Tz>()
-                    .map(|_| ())
-                    .map_err(|_| "not a time zone name, such as Europe/Berlin")
-            })
-            .interact_text()?;
-        written.push(("TZ", zone));
-    }
+    written.push(("SCHEDULE", SCHEDULES[choice].1.to_string()));
+    let zone: String = Input::with_theme(&theme)
+        .with_prompt("Time zone")
+        .default(local_timezone())
+        .validate_with(|zone: &String| {
+            zone.parse::<chrono_tz::Tz>()
+                .map(|_| ())
+                .map_err(|_| "not a time zone name, such as Europe/Berlin")
+        })
+        .interact_text()?;
+    written.push(("TZ", zone));
 
     let generate = Select::with_theme(&theme)
         .with_prompt("Backups are encrypted with a passphrase")
@@ -290,7 +287,7 @@ fn env_file(settings: &[(&str, String)]) -> String {
     let mut last_group = "";
     for (name, value) in settings {
         let group = match name.split('_').next().unwrap_or_default() {
-            "INTERVAL" | "TZ" => "SCHEDULE",
+            "TZ" => "SCHEDULE",
             group => group,
         };
         if group != last_group {

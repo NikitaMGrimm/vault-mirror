@@ -140,6 +140,9 @@ const ENCRYPTED_FIELDS: &[(&[&str], &[&str])] = &[
 /// The largest batch the Bitwarden server accepts for bulk item operations.
 const BULK_LIMIT: usize = 500;
 
+/// How many item writes run at once.
+pub const WRITES_AT_ONCE: usize = 4;
+
 /// Up to this many new items are created one by one, which avoids the
 /// extra sync an import needs.
 const SINGLE_CREATE_LIMIT: usize = 10;
@@ -506,12 +509,11 @@ impl Account {
         scope: &Scope,
         drafts: &[Draft],
         folder_names: &HashMap<String, String>,
-        concurrency: usize,
         created: &(dyn Fn(usize) + Sync),
     ) -> Result<Vec<Item>> {
         if *scope != Scope::Personal || drafts.len() <= SINGLE_CREATE_LIMIT {
             return stream::iter(drafts.iter().map(|draft| self.create_item(scope, draft)))
-                .buffered(concurrency.max(1))
+                .buffered(WRITES_AT_ONCE)
                 .inspect_ok(|_| created(1))
                 .try_collect()
                 .await;

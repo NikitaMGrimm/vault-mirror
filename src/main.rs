@@ -64,7 +64,7 @@ enum Command {
     },
     /// Back up, then mirror the source into the destination, once.
     Run(RunArgs),
-    /// Keep running on SCHEDULE or every INTERVAL.
+    /// Keep running on SCHEDULE.
     Daemon,
     /// Log in to the configured vaults and report what a run would do, without changing them.
     Check,
@@ -268,17 +268,10 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
 
 async fn daemon() -> Result<ExitCode> {
     let config = config()?;
-    let schedule = config.schedule.as_ref().ok_or_else(|| {
-        anyhow!(
-            "configuration: the daemon needs SCHEDULE (a cron expression) or INTERVAL (such as 6h)"
-        )
-    })?;
+    let schedule = (config.schedule.as_deref())
+        .ok_or_else(|| anyhow!("configuration: the daemon needs SCHEDULE, a cron expression"))?;
     let timetable = Timetable::new(schedule, config.timezone.as_deref())?;
     let mut terminate = Terminate::new()?;
-
-    if timetable.runs_at_start() {
-        run_and_report(&config, RunFlags::default()).await;
-    }
     loop {
         let next = timetable.next(chrono::Utc::now())?;
         Console::status(
@@ -402,7 +395,6 @@ async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
         dry_run: true,
         safety: config.safety.clone(),
         filter: config.filter.clone(),
-        ..MirrorOptions::default()
     };
     let source = Endpoint {
         account: &source,
@@ -482,7 +474,6 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
     };
     let options = RestoreOptions {
         allow_non_empty: args.allow_non_empty,
-        concurrency: config::concurrency(&env)?,
     };
     let report = restore(&target, &backup, &options, &Console).await?;
     Console::finished(

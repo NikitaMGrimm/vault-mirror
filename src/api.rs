@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 
 /// Sent as `Bitwarden-Client-Version`. Servers hide newer item types from
 /// clients that report an old version, so this has to track current releases.
-pub const DEFAULT_CLIENT_VERSION: &str = "2026.9.0";
+const CLIENT_VERSION: &str = "2026.9.0";
 
 /// The Linux CLI device type, the client this tool stands in for.
 const DEVICE_TYPE: &str = "25";
@@ -230,7 +230,6 @@ impl std::fmt::Debug for ApiCredentials {
 
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
-    pub client_version: String,
     pub timeout: Duration,
     /// Extra root certificates in PEM form, for servers behind a private CA.
     pub extra_root_certs: Vec<Vec<u8>>,
@@ -239,7 +238,6 @@ pub struct ClientOptions {
 impl Default for ClientOptions {
     fn default() -> Self {
         Self {
-            client_version: DEFAULT_CLIENT_VERSION.to_string(),
             timeout: Duration::from_secs(120),
             extra_root_certs: Vec::new(),
         }
@@ -256,7 +254,7 @@ pub fn build_http_client(options: &ClientOptions) -> Result<reqwest::Client> {
         }
     };
     header("bitwarden-client-name", "cli");
-    header("bitwarden-client-version", &options.client_version);
+    header("bitwarden-client-version", CLIENT_VERSION);
     header("device-type", DEVICE_TYPE);
     let mut builder = reqwest::Client::builder()
         .user_agent(concat!("vault-mirror/", env!("CARGO_PKG_VERSION")))
