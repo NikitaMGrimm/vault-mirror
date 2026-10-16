@@ -4,6 +4,16 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.5.3](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.5.2...v0.5.3) - 2026-10-16
+
+### Fixed
+
+- warn about attachments changed on both sides before run --pull replaces them ([#46](https://github.com/NikitaMGrimm/vault-mirror/pull/46))
+- keep an archived item archived when run --pull copies its files ([#45](https://github.com/NikitaMGrimm/vault-mirror/pull/45))
+- leave out of run --pull what the source server would not show ([#44](https://github.com/NikitaMGrimm/vault-mirror/pull/44))
+- check run --pull against the safety rules before it changes the source ([#43](https://github.com/NikitaMGrimm/vault-mirror/pull/43))
+- don't delete a copy that was edited during the run ([#42](https://github.com/NikitaMGrimm/vault-mirror/pull/42))
+
 ## [0.5.2](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.5.1...v0.5.2) - 2026-10-15
 
 ### Fixed
