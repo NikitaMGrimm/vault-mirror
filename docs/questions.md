@@ -39,7 +39,8 @@ last run copied. The next run that reaches the source catches up.
 ## Do backups pile up?
 
 No. Snapshots older than a day thin out to one a day and expire after
-`RETENTION_DAYS`, and an unchanged vault gets no new snapshot. See
+`RETENTION_DAYS`, except the newest, and an unchanged vault gets no new
+snapshot. See
 [Backups and restoring](backups.md).
 
 ## Where are my master passwords stored?

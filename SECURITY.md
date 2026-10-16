@@ -29,7 +29,7 @@ destination.
 | File | Contents | Protection |
 | --- | --- | --- |
 | `key.age` | The backup key. | Encrypted with `BACKUP_PASSPHRASE`, using scrypt. |
-| `*/<snapshot>/vault.json.age` | Complete vault exports, secrets included. | Encrypted to the backup key with age. |
+| `*/<snapshot>/vault.json.age` | Vault exports without the trash, secrets included. | Encrypted to the backup key with age. |
 | `*/<snapshot>/attachments/*.age` | Attachment content. | Encrypted to the backup key with age. |
 | `last-run.json` | Time, result and counts of the last run. | None. No vault content. |
 | `state.json` | The device ids vault-mirror logs in with. | None. |
