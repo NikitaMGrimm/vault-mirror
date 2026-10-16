@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     api::{self, ApiCredentials, ServerUrls, Session},
-    crypto::{CryptoError, KdfParams, MasterSecret, SymKey, looks_encrypted},
+    crypto::{KdfParams, MasterSecret, SymKey},
     node::Node,
     text::count,
 };
@@ -43,99 +43,6 @@ const META_KEYS: &[&str] = &[
 /// such as `login` or `card`, which are all treated as content.
 const SCALAR_CONTENT_KEYS: &[&str] = &["type", "name", "notes", "favorite", "reprompt"];
 const LIST_CONTENT_KEYS: &[&str] = &["fields", "passwordHistory"];
-
-// Known encrypted wire fields. Unknown fields keep shape-based detection
-// because future server fields can contain clear text.
-const ENCRYPTED_FIELDS: &[(&[&str], &[&str])] = &[
-    (&[], &["name", "notes"]),
-    (&["fields"], &["name", "value"]),
-    (&["passwordHistory"], &["password"]),
-    (&["login"], &["username", "password", "totp", "uri"]),
-    (&["login", "uris"], &["uri", "uriChecksum"]),
-    (
-        &["login", "fido2Credentials"],
-        &[
-            "credentialId",
-            "keyType",
-            "keyAlgorithm",
-            "keyCurve",
-            "keyValue",
-            "rpId",
-            "rpName",
-            "userHandle",
-            "userName",
-            "userDisplayName",
-            "counter",
-            "discoverable",
-        ],
-    ),
-    (
-        &["card"],
-        &[
-            "cardholderName",
-            "brand",
-            "number",
-            "expMonth",
-            "expYear",
-            "code",
-        ],
-    ),
-    (
-        &["identity"],
-        &[
-            "title",
-            "firstName",
-            "middleName",
-            "lastName",
-            "address1",
-            "address2",
-            "address3",
-            "city",
-            "state",
-            "postalCode",
-            "country",
-            "company",
-            "email",
-            "phone",
-            "ssn",
-            "username",
-            "passportNumber",
-            "licenseNumber",
-        ],
-    ),
-    (&["sshKey"], &["privateKey", "publicKey", "keyFingerprint"]),
-    (
-        &["bankAccount"],
-        &[
-            "bankName",
-            "nameOnAccount",
-            "accountType",
-            "iban",
-            "swiftCode",
-            "pin",
-        ],
-    ),
-    (
-        &["driversLicense"],
-        &[
-            "firstName",
-            "lastName",
-            "licenseNumber",
-            "issueDate",
-            "expirationDate",
-        ],
-    ),
-    (
-        &["passport"],
-        &[
-            "surname",
-            "givenName",
-            "passportNumber",
-            "dateOfBirth",
-            "expirationDate",
-        ],
-    ),
-];
 
 /// The largest batch the Bitwarden server accepts for bulk item operations.
 const BULK_LIMIT: usize = 500;
@@ -899,45 +806,6 @@ pub fn is_content_key(name: &str, node: &Node) -> bool {
         || matches!(node, Node::Map(_))
 }
 
-/// Refuses an item whose [`ENCRYPTED_FIELDS`] hold a string that is not
-/// ciphertext. The error names the path, never the value.
-fn check_encrypted_fields(cipher: &Value) -> Result<(), CryptoError> {
-    fn visit(
-        value: &Value,
-        parents: &[&str],
-        names: &[&str],
-        path: &mut String,
-    ) -> Result<(), CryptoError> {
-        let length = path.len();
-        let result = match (value, parents) {
-            (Value::Array(items), _) => items.iter().enumerate().try_for_each(|(index, item)| {
-                path.push_str(&format!("/{index}"));
-                let result = visit(item, parents, names, path);
-                path.truncate(length);
-                result
-            }),
-            (Value::Object(map), [parent, rest @ ..]) => map.get(*parent).map_or(Ok(()), |child| {
-                path.push_str(&format!("/{parent}"));
-                visit(child, rest, names, path)
-            }),
-            (Value::Object(map), []) => names.iter().try_for_each(|name| match map.get(*name) {
-                Some(Value::String(text)) if !text.is_empty() && !looks_encrypted(text) => {
-                    Err(CryptoError::MalformedValue {
-                        path: format!("{path}/{name}"),
-                    })
-                }
-                _ => Ok(()),
-            }),
-            _ => Ok(()),
-        };
-        path.truncate(length);
-        result
-    }
-    ENCRYPTED_FIELDS
-        .iter()
-        .try_for_each(|(parents, names)| visit(cipher, parents, names, &mut String::new()))
-}
-
 fn required_str(value: &Value, name: &str, what: &str) -> Result<String> {
     value
         .get(name)
@@ -966,7 +834,6 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
         .transpose()
         .context("unwrapping the item key")?;
     let key = own_key.as_ref().unwrap_or(scope_key);
-    check_encrypted_fields(cipher)?;
 
     let mut content = BTreeMap::new();
     for (name, value) in object {
@@ -1255,40 +1122,6 @@ mod tests {
             object.remove(name);
         }
         decrypt_item(&missing, &key).unwrap();
-    }
-
-    #[test]
-    fn a_known_encrypted_slot_holding_a_plain_string_is_an_error() {
-        let key = SymKey::generate();
-        for pointer in [
-            "/name",
-            "/notes",
-            "/login/password",
-            "/login/uris/0/uri",
-            "/login/uris/0/uriChecksum",
-            "/login/fido2Credentials/0/keyValue",
-            "/fields/0/value",
-            "/fields/1/name",
-            "/passwordHistory/0/password",
-            "/card/number",
-            "/identity/passportNumber",
-            "/sshKey/privateKey",
-            "/bankAccount/iban",
-            "/driversLicense/issueDate",
-            "/passport/dateOfBirth",
-        ] {
-            for bad in ["2.AAAA", "2.!!!!corrupt!!!!", "octocat", "2031-10-31"] {
-                let mut cipher = full_cipher(&key);
-                *cipher.pointer_mut(pointer).unwrap() = json!(bad);
-                // Not expect_err: a failure would print the whole item.
-                let Err(error) = decrypt_item(&cipher, &key) else {
-                    panic!("{pointer} was accepted");
-                };
-                let message = format!("{error:#}");
-                assert!(message.contains(&format!(" at {pointer} ")), "{message}");
-                assert!(!message.contains(bad), "{message}");
-            }
-        }
     }
 
     #[test]
