@@ -164,7 +164,7 @@ async fn a_backup_restores_into_an_identical_vault() -> Result<()> {
 }
 
 #[tokio::test]
-async fn later_backups_fetch_only_new_attachments_and_skip_unchanged_vaults() -> Result<()> {
+async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
@@ -195,11 +195,10 @@ async fn later_backups_fetch_only_new_attachments_and_skip_unchanged_vaults() ->
         .await?;
     let third = backup(&source, &PERSONAL, &store, &options(true), &quiet).await?;
     assert!(third.snapshot.is_some());
-    assert_eq!(third.attachments_downloaded, 1);
+    assert_eq!(third.attachments_downloaded, 5);
     assert_eq!(store.list()?.len(), 2);
 
-    // Deleting the item makes its attachment unreferenced once the older
-    // snapshots are gone.
+    // Pruning removes both older independent attachment sets.
     source
         .delete_items(&[by_name(&vault, "Visa").id.clone()])
         .await?;
@@ -213,7 +212,7 @@ async fn later_backups_fetch_only_new_attachments_and_skip_unchanged_vaults() ->
     };
     let fourth = backup(&source, &PERSONAL, &store, &later, &quiet).await?;
     assert_eq!(fourth.pruned.snapshots_removed, 2);
-    assert_eq!(fourth.pruned.attachments_removed, 1);
+    assert_eq!(fourth.pruned.attachments_removed, 9);
     assert_eq!(store.list()?.len(), 1);
     Ok(())
 }

@@ -66,8 +66,9 @@ Nothing has been changed yet. The "Would" line is the plan.
 
 The two files:
 
-- `vault-mirror.env` holds every setting, secrets included, and only you can read
-  it. [Configuration](configuration.md) describes each setting.
+- `vault-mirror.env` holds every setting, secrets included. On Unix, only its
+  owner can read it. On Windows, restrict the directory and check the file's
+  access permissions. [Configuration](configuration.md) describes each setting.
 - `compose.yaml` runs vault-mirror on your schedule, keeps backups in `./backups`,
   and restarts it after a reboot.
 
@@ -90,7 +91,7 @@ A first run prints:
 
 ```text
   Backing up the source vault
-   Backed up 3 new attachments
+   Backed up 3 attachments
        Saved snapshot vault-20261014T030000Z.json.age with 152 items
   Backing up the destination vault
        Saved snapshot vault-20261014T030000Z.json.age with 0 items

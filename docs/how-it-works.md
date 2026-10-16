@@ -17,9 +17,10 @@ flowchart LR
     mirror -- "4. change, 5. verify" --> dest
 ```
 
-1. **Back up the source.** It saves an encrypted **snapshot** of the source,
-   plus any attachments it hasn't stored yet. If nothing changed since the last
-   snapshot, it skips the snapshot.
+1. **Back up the source.** It saves an encrypted **snapshot** of the source
+   with its own attachment files. With a local decryption key, it can skip an
+   unchanged vault after authenticating the earlier recovery point. Public
+   recipient backups save a point every run.
 2. **Back up the destination**, the same way. Anything the run removes later is
    in this backup.
 3. **Compare.** It works out what to create, update and delete, prints that
@@ -29,20 +30,20 @@ flowchart LR
    - create folders or collections,
    - create and update items,
    - copy new or changed attachments,
-   - delete copies whose source item is gone.
+   - move copies whose source item is gone to the trash.
 5. **Verify.** It reads the destination back and compares it with the source.
-   Each copied attachment was already downloaded again and checked by its
-   SHA-256 hash.
+   Each copied attachment is downloaded again and checked by its SHA-256 hash
+   when `VERIFY_ATTACHMENTS` is enabled. Replacements are always checked before
+   the old files are removed.
 6. **Report.** It writes the result to `last-run.json` and sends it to your
    notification URL, if you set one.
 
 A failed backup stops the run before the destination changes. Without backups,
 steps 1 and 2 are skipped. Without a destination, the run stops after step 1.
 
-Because item deletions come last, a run that fails while writing hasn't deleted
-any items. Changed attachments are the exception: the old file is removed before
-the new one is uploaded. Either way, the backup from step 2 has the earlier
-state.
+Item removals come last. Replacement attachments are uploaded and checked
+before the captured old files are removed. A failed upload keeps those old
+files. The backup from step 2 holds the earlier state.
 
 ## How copies are recognized
 
@@ -76,7 +77,15 @@ vault-mirror also compares the content itself, so:
 ### After an outage
 
 The destination is there for when the source is down. If you add or change
-items in it meanwhile, bring them back once the source is up again:
+items in it meanwhile, stop the daemon before making those fallback edits:
+
+```sh
+docker compose stop vault-mirror
+```
+
+Pause any other scheduler too. Otherwise an ordinary run can overwrite your
+edits as soon as the source returns. Bring them back with one explicit pull
+before restarting scheduling:
 
 ```sh
 docker compose run --rm vault-mirror run --pull
@@ -90,13 +99,34 @@ the destination since vault-mirror wrote it:
 - an item you added in the destination is added to the source, in a folder or
   collections of the same name. So is any other item there that vault-mirror
   didn't make, such as one that was in the destination before the first run.
-  With a filter, only items it selects are added.
+  With a filter, only selected items and collection memberships are added.
 
-Then it mirrors as usual. A pull deletes nothing: an item you deleted in the
+The complete pull is checked before either vault changes. An edited tracked
+copy stops it if its original is absent or trashed, its current or proposed
+placement is outside the filter, or the source cannot preserve the recovered
+data. Required uploads into a personal source need Premium. A warning and skip
+is safe only for untouched untracked additions that the mirror leaves alone.
+
+Export the destination before resolving a refused recovery. To preserve a copy
+independently, remove its marker deliberately. A run without `--pull` still
+lets the source win. After source writes, the pull verifies its intended
+content and placement before the forward mirror can use it. If the source drops
+a new item's folder or collection membership, a resumed pull retries that
+placement. An interrupted pull with pending files must be completed with
+`--pull` before ordinary mirroring resumes, even when a later run's filter
+excludes the unfinished item.
+
+Then it mirrors as usual. A pull removes no items: an item you deleted in the
 destination is still in the source, and the mirror copies it back, so delete it
-in the source if you meant it. The source is left without `vault-mirror`
-fields. With `--dry-run`, the run only counts what it would copy into the
-source.
+in the source if you meant it. Recovered source items have their completed
+pull markers removed. Excluded items are left alone. With `--dry-run`, the run
+only counts what it would copy into the source. After verifying the actual
+run's result, resume with
+`docker compose up -d`.
+
+Marker cleanup is verified too. An interrupted or failed cleanup leaves
+`pull-cleanup-hold.json`, which pauses mirroring until you
+[reconcile the recovered items](backups.md#resume-after-interrupted-pull-cleanup).
 
 ### Switching the source and destination
 
@@ -140,8 +170,10 @@ docker compose run --rm vault-mirror run --allow-mass-delete
 ```
 
 > [!WARNING]
-> Deleted copies don't go to the trash. After an override, only your backups can
-> bring them back.
+> Removed copies go to the server's trash. Its recovery window depends on the
+> server. Keep encrypted backups too. The final read and removal are separate
+> requests, so a concurrent late edit can still be moved to the trash. It is
+> recoverable there, but the operation is not atomic.
 
 ### Why there's no default deletion limit
 

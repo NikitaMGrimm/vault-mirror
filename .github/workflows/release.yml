@@ -31,10 +31,15 @@ concurrency:
 jobs:
   version:
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.tag.outputs.tag }}
       publish: ${{ steps.version.outputs.publish }}
+      commit: ${{ steps.version.outputs.commit }}
     steps:
       - id: tag
         env:
@@ -56,16 +61,23 @@ jobs:
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          crate=$(git show "${TAG:-HEAD}:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -n1)
+          ref=HEAD
+          if [[ -n "$TAG" ]]; then ref="refs/tags/$TAG"; fi
+          crate=$(git show "$ref:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -n1)
           if [[ -z "$TAG" ]]; then
-            echo "version=$crate-dev.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-            echo "publish=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "version=$crate-dev.${GITHUB_SHA::7}"
+              echo "publish=false"
+              echo "commit=$GITHUB_SHA"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [[ "$TAG" != "v$crate" ]]; then
             echo "::error::Tag $TAG does not match the crate version $crate"
             exit 1
           fi
+          commit=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
           # The release notes are the changelog section for the version,
           # headed `## [X.Y.Z]` or `## X.Y.Z`, checked here so that nothing
           # is published without them.
@@ -84,6 +96,23 @@ jobs:
           fi
           echo "version=$crate" >> "$GITHUB_OUTPUT"
           echo "publish=true" >> "$GITHUB_OUTPUT"
+      - name: Verify CI for the release commit
+        if: steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ steps.version.outputs.commit }}
+        run: |
+          while :; do
+            state=$(gh run list --workflow ci.yml --event push --branch main --commit "$RELEASE_SHA" \
+              --limit 1 --json headSha,status,conclusion \
+              --jq '.[] | select(.headSha == env.RELEASE_SHA) | "\(.status) \(.conclusion)"')
+            case "$state" in
+              "completed success") exit 0 ;;
+              completed*) echo "::error::CI ended with ${state#completed } on $RELEASE_SHA"; exit 1 ;;
+            esac
+            sleep 60
+          done
       - if: steps.version.outputs.publish == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -114,7 +143,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.version.outputs.tag || github.sha }}
+          ref: ${{ needs.version.outputs.commit }}
           persist-credentials: false
       - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/vault-mirror" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -192,7 +221,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.version.outputs.tag || github.sha }}
+          ref: ${{ needs.version.outputs.commit }}
           persist-credentials: false
       - name: Install Rust
         run: |
@@ -248,7 +277,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.version.outputs.tag || github.sha }}
+          ref: ${{ needs.version.outputs.commit }}
           persist-credentials: false
       - name: Install Rust
         run: |

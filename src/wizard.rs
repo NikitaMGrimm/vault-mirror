@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     fs,
     io::{IsTerminal, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
@@ -55,6 +55,7 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
             bail!("{} already exists; move it away first", path.display());
         }
     }
+    let ca_cert = ca_cert_file(std::env::var("CA_CERT_FILE").ok())?;
     println!(
         "This writes {ENV_FILE} and {COMPOSE_FILE} to {}.\n\
          Each account needs a personal API key: in the web vault, open\n\
@@ -72,10 +73,12 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
         ("BACKUPS_DIR".into(), backups.display().to_string()),
         ("BACKUP_PASSPHRASE".into(), "placeholder".into()),
     ]);
-    if let Ok(path) = std::env::var("CA_CERT_FILE") {
-        env.insert("CA_CERT_FILE".into(), path);
-    }
     let mut written: Vec<(&str, String)> = Vec::new();
+    if let Some(path) = &ca_cert {
+        let path = path.display().to_string();
+        env.insert("CA_CERT_FILE".into(), path.clone());
+        written.push(("CA_CERT_FILE", path));
+    }
 
     let source = ask_vault(&theme, &mut env, "SOURCE", "the source").await?;
     written.extend(source);
@@ -129,8 +132,20 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
     written.push(("BACKUP_PASSPHRASE", passphrase));
 
     write_new(&env_path, &env_file(&written), true)?;
-    Console::status("Created", &format!("{ENV_FILE}, readable only by you"));
-    write_new(&compose_path, &compose_file(&backups)?, false)?;
+    if readable_only_by_owner(&env_path) {
+        Console::status("Created", &format!("{ENV_FILE}, readable only by you"));
+    } else {
+        Console::status("Created", ENV_FILE);
+        Console::warning(&format!(
+            "{ENV_FILE} holds your passwords and API keys, and other accounts on this \
+             computer may be able to read it; make it readable only by you"
+        ));
+    }
+    write_new(
+        &compose_path,
+        &compose_file(dir, ca_cert.as_deref())?,
+        false,
+    )?;
     Console::status("Created", COMPOSE_FILE);
     Console::note(
         "keep a copy of BACKUP_PASSPHRASE outside the backups and the vault; \
@@ -254,7 +269,8 @@ async fn log_in(env: &HashMap<String, String>, prefix: &str, role: &str) -> Resu
         Console::warning(&warning);
     }
     let http = app::http_client(&config)?;
-    let account = app::open_account(&config, &http, vault, &prefix.to_lowercase()).await?;
+    let account =
+        app::open_account(&config.backups_dir, &http, vault, &prefix.to_lowercase()).await?;
     let loaded = account.load(&app::scope_of(vault)).await?;
     Console::status(
         "Logged in",
@@ -286,15 +302,33 @@ fn env_file(settings: &[(&str, String)]) -> String {
     text
 }
 
-fn compose_file(backups: &Path) -> Result<String> {
+fn compose_file(dir: &Path, ca_cert: Option<&Path>) -> Result<String> {
     let version = env!("CARGO_PKG_VERSION");
     let tag = version
         .rsplit_once('.')
         .map_or(version, |(major_minor, _)| major_minor);
     // A directory Docker creates for a bind mount belongs to root, and the
     // image runs unprivileged, so the container runs as the directory's owner.
-    let user = owner(backups)?
+    let user = owner(&dir.join("backups"))?
         .map(|(uid, gid)| format!("    user: \"{uid}:{gid}\"\n"))
+        .unwrap_or_default();
+    // The settings file names the certificate where runs without Docker find
+    // it; in the container it is mounted at one fixed path instead.
+    let (environment, certificate) = ca_cert
+        .map(|path| {
+            (
+                "    environment:\n      CA_CERT_FILE: /ca.pem\n".to_string(),
+                format!(
+                    "      - type: bind\n        \
+                             source: {}\n        \
+                             target: /ca.pem\n        \
+                             read_only: true\n        \
+                             bind:\n          \
+                               create_host_path: false\n",
+                    compose_source(dir, path)
+                ),
+            )
+        })
         .unwrap_or_default();
     Ok(format!(
         "services:\n  \
@@ -304,13 +338,31 @@ fn compose_file(backups: &Path) -> Result<String> {
          {user}    \
              env_file:\n      \
                - path: {ENV_FILE}\n        \
-                 format: raw\n    \
+                 format: raw\n\
+         {environment}    \
              volumes:\n      \
-               - ./backups:/data\n    \
+               - ./backups:/data\n\
+         {certificate}    \
              restart: unless-stopped\n    \
-             # Lets a run in progress finish when the container is stopped.\n    \
+             # Gives a run in progress up to 5 minutes to finish when the container stops.\n    \
              stop_grace_period: 5m\n"
     ))
+}
+
+/// `path` as a quoted YAML string for compose.yaml: relative to `dir` when
+/// it is inside, so that it also works when `init` ran in a container with
+/// `dir` mounted.
+fn compose_source(dir: &Path, path: &Path) -> String {
+    let source = match path.strip_prefix(dir) {
+        Ok(inside) => {
+            let parts: Vec<_> = inside.iter().map(|part| part.to_string_lossy()).collect();
+            format!("./{}", parts.join("/"))
+        }
+        Err(_) => path.display().to_string(),
+    };
+    // JSON's quoting is valid YAML, and `$$` keeps Compose from reading `$`
+    // as the start of a variable.
+    serde_json::Value::from(source.replace('$', "$$")).to_string()
 }
 
 #[cfg(unix)]
@@ -325,6 +377,35 @@ fn owner(path: &Path) -> Result<Option<(u32, u32)>> {
 fn owner(path: &Path) -> Result<Option<(u32, u32)>> {
     fs::create_dir_all(path)?;
     Ok(None)
+}
+
+/// `CA_CERT_FILE` as an absolute path, so that runs started in another
+/// directory find it.
+fn ca_cert_file(value: Option<String>) -> Result<Option<PathBuf>> {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        None => Ok(None),
+        Some(path) => fs::canonicalize(path)
+            .map(Some)
+            .map_err(|error| anyhow!("CA_CERT_FILE {path}: {error}")),
+    }
+}
+
+#[cfg(unix)]
+fn readable_only_by_owner(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    // Some file systems, such as a Windows drive mounted in WSL, ignore the
+    // mode a file is created with.
+    fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o077 == 0)
+}
+
+/// Windows access lists are not checked, so the file is never called private.
+#[cfg(not(unix))]
+fn readable_only_by_owner(_: &Path) -> bool {
+    false
 }
 
 /// Writes a file that must not exist yet, readable only by its owner if
@@ -396,7 +477,7 @@ mod tests {
     #[test]
     fn the_compose_file_lets_a_run_finish_on_stop() {
         let dir = tempfile::tempdir().unwrap();
-        let compose = compose_file(&dir.path().join("backups")).unwrap();
+        let compose = compose_file(dir.path(), None).unwrap();
         assert!(compose.contains("\n    command: daemon\n"), "{compose}");
         assert!(
             compose.contains("\n    stop_grace_period: 5m\n"),
@@ -416,5 +497,67 @@ mod tests {
         let parsed = crate::parse_env_file(&text).unwrap();
         assert_eq!(parsed["SOURCE_PASSWORD"], "it's $HOME \"#x\" ");
         assert_eq!(parsed["SCHEDULE"], "0 3 * * *");
+    }
+
+    #[test]
+    fn the_compose_file_mounts_the_ca_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let inside = compose_file(&dir, Some(&dir.join("certs").join("ca.pem"))).unwrap();
+        assert!(
+            inside.contains("\n    environment:\n      CA_CERT_FILE: /ca.pem\n"),
+            "{inside}"
+        );
+        assert!(
+            inside.contains(
+                "\n      - type: bind\n        source: \"./certs/ca.pem\"\n        \
+                 target: /ca.pem\n        read_only: true\n"
+            ),
+            "{inside}"
+        );
+        assert!(
+            inside.contains("\n        bind:\n          create_host_path: false\n"),
+            "{inside}"
+        );
+        let outside = compose_file(&dir, Some(Path::new(r#"/etc/ssl/a\b "c" $HOME.pem"#))).unwrap();
+        assert!(
+            outside
+                .lines()
+                .any(|line| line == r#"        source: "/etc/ssl/a\\b \"c\" $$HOME.pem""#),
+            "{outside}"
+        );
+        assert!(!compose_file(&dir, None).unwrap().contains("CA_CERT_FILE"));
+    }
+
+    #[test]
+    fn the_ca_certificate_path_is_made_absolute() {
+        let path = ca_cert_file(Some(" Cargo.toml ".into())).unwrap().unwrap();
+        assert!(
+            path.is_absolute() && path.ends_with("Cargo.toml"),
+            "{}",
+            path.display()
+        );
+        assert_eq!(ca_cert_file(Some(" ".into())).unwrap(), None);
+        let missing = ca_cert_file(Some("missing.pem".into())).unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .starts_with("CA_CERT_FILE missing.pem: "),
+            "{missing}"
+        );
+    }
+
+    #[test]
+    fn the_settings_file_is_called_private_only_when_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ENV_FILE);
+        write_new(&path, "", true).unwrap();
+        assert_eq!(readable_only_by_owner(&path), cfg!(unix));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(!readable_only_by_owner(&path));
+        }
     }
 }

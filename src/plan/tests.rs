@@ -382,7 +382,8 @@ fn items_in_the_source_trash_are_not_mirrored() {
         plan.deletes,
         [Delete {
             dest: 1,
-            reason: DeleteReason::Stale
+            reason: DeleteReason::Stale,
+            changed_in_dest: false,
         }]
     );
     assert_converged(
@@ -390,6 +391,86 @@ fn items_in_the_source_trash_are_not_mirrored() {
         &apply(&source, &dest, Mode::Personal),
         Mode::Personal,
     );
+}
+
+#[test]
+fn folders_and_collections_holding_trashed_copies_stay() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.folders = vec![folder("f1", "Old")];
+    source.items[0].folder_id = Some("f1".into());
+    let mut dest = mirrored(&source, Mode::Personal);
+    assert_eq!(
+        plan(&vault(vec![]), &dest, Mode::Personal)
+            .folders_to_delete
+            .len(),
+        1
+    );
+    dest.items[0].in_trash = true;
+    assert!(
+        plan(&vault(vec![]), &dest, Mode::Personal)
+            .folders_to_delete
+            .is_empty()
+    );
+
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.collections = vec![collection("c1", "Team")];
+    source.items[0].collection_ids = vec!["c1".into()];
+    let mut dest = mirrored(&source, Mode::Organization);
+    dest.items[0].in_trash = true;
+    let plan = plan(&vault(vec![]), &dest, Mode::Organization);
+    assert!(plan.collections_to_delete.is_empty());
+}
+
+#[test]
+fn a_copy_changed_after_its_source_item_went_is_told_apart() {
+    let mut source = vault(vec![login("s1", "One", "pw1"), login("s2", "Two", "pw2")]);
+    source.items[1].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let dest = mirrored(&source, Mode::Personal);
+    source.items[1].in_trash = true;
+    let changed = |dest: &Vault| plan(&source, dest, Mode::Personal).deletes[0].changed_in_dest;
+    assert!(!changed(&dest));
+
+    let mut edited = dest.clone();
+    edited.items[1]
+        .content
+        .insert("notes".into(), text("edited"));
+    assert!(changed(&edited));
+    let mut refiled = dest.clone();
+    refiled.items[1].attachments = vec![attachment("a2", "scan.pdf", 100)];
+    assert!(changed(&refiled));
+}
+
+#[test]
+fn a_pull_that_stopped_halfway_is_told_apart_from_an_edited_copy() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let mut dest = mirrored(&source, Mode::Personal);
+    dest.items[0].attachments = vec![attachment("a9", "scan.pdf", 120)];
+    dest.items[0].content.insert("notes".into(), text("edited"));
+    // A run without a pull replaces the edits, as usual.
+    assert_eq!(plan(&source, &dest, Mode::Personal).unfinished_pulls, 0);
+
+    let copy = dest.items[0].clone();
+    let mut halfway = source.clone();
+    halfway.items[0].content = mark_copy(&copy, &copy, None, &[], Mode::Personal, None);
+    assert_eq!(plan(&halfway, &dest, Mode::Personal).unfinished_pulls, 1);
+    // Written, but the server kept only part of it.
+    let mut partly = source.clone();
+    partly.items[0].content = mark_copy(&source.items[0], &copy, None, &[], Mode::Personal, None);
+    assert_eq!(plan(&partly, &dest, Mode::Personal).unfinished_pulls, 1);
+
+    let mut finished = source.clone();
+    finished.items[0].attachments = vec![attachment("a10", "scan.pdf", 120)];
+    let content = mark_copy(
+        &copy,
+        &copy,
+        None,
+        &[],
+        Mode::Personal,
+        Some(&finished.items[0]),
+    );
+    finished.items[0].content = content;
+    assert_eq!(plan(&finished, &dest, Mode::Personal).unfinished_pulls, 0);
 }
 
 #[test]

@@ -209,13 +209,23 @@ pub fn is_plain_http_to_remote(server: &str) -> bool {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApiCredentials {
     pub client_id: String,
     pub client_secret: String,
     /// Stable per installation. A fresh id on every run makes the server
     /// treat each run as a login from a new device.
     pub device_id: String,
+}
+
+impl std::fmt::Debug for ApiCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiCredentials")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[redacted]")
+            .field("device_id", &self.device_id)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +261,8 @@ pub fn build_http_client(options: &ClientOptions) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .user_agent(concat!("vault-mirror/", env!("CARGO_PKG_VERSION")))
         .default_headers(headers)
+        .redirect(reqwest::redirect::Policy::none())
+        .referer(false)
         .timeout(options.timeout)
         .connect_timeout(Duration::from_secs(20));
     for pem in &options.extra_root_certs {
@@ -405,7 +417,7 @@ impl Session {
         };
         let response = self.http.get(url).send().await.map_err(transport)?;
         if !response.status().is_success() {
-            return Err(status_error(context, response, &self.secrets()).await);
+            return Err(storage_error(context, response));
         }
         Ok(response.bytes().await.map_err(transport)?.to_vec())
     }
@@ -449,12 +461,25 @@ impl Session {
         if let Some(version) = version {
             request = request.header("x-ms-version", version);
         }
-        expect_success(request.body(blob), context, &self.secrets()).await
+        let response = request
+            .body(blob)
+            .send()
+            .await
+            .map_err(|source| transport(context, source))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(storage_error(context, response))
+        }
     }
+}
 
-    /// What a server must not get to echo into an error message.
-    fn secrets(&self) -> [&str; 1] {
-        [self.credentials.client_secret.as_str()]
+fn storage_error(context: &str, response: reqwest::Response) -> ApiError {
+    ApiError::Status {
+        context: context.to_string(),
+        status: response.status(),
+        message: "attachment storage request failed".to_string(),
+        retry_after: retry_after(response.headers(), std::time::SystemTime::now()),
     }
 }
 
@@ -532,7 +557,7 @@ fn next_attempt(
 }
 
 fn backoff(attempt: u32) -> Duration {
-    Duration::from_millis(500 * 2u64.pow(attempt.saturating_sub(1)).min(16))
+    Duration::from_millis(500 * 2u64.pow(attempt.saturating_sub(1).min(4)))
 }
 
 async fn send(request: reqwest::RequestBuilder, context: &str, secrets: &[&str]) -> Result<Value> {
@@ -703,8 +728,162 @@ pub async fn prelogin(http: &reqwest::Client, urls: &ServerUrls, email: &str) ->
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_output_redacts_api_secrets() {
+        let credentials = ApiCredentials {
+            client_id: "user.synthetic".into(),
+            client_secret: "synthetic-api-secret".into(),
+            device_id: "synthetic-device".into(),
+        };
+        let diagnostic = format!("{credentials:?}");
+        assert!(!diagnostic.contains(&credentials.client_secret));
+        assert!(diagnostic.contains("[redacted]"));
+    }
+
+    pub(crate) fn http_server(
+        responses: Vec<String>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let task = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for response in responses {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if std::time::Instant::now() >= deadline {
+                                return requests;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                // Windows can inherit the listener's nonblocking mode.
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let size = stream.read(&mut buffer).unwrap();
+                    assert_ne!(size, 0);
+                    request.extend_from_slice(&buffer[..size]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        (url, task)
+    }
+
+    pub(crate) fn http_response(status: &str, headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn test_credentials() -> ApiCredentials {
+        ApiCredentials {
+            client_id: "user.test".into(),
+            client_secret: "synthetic-api-secret".into(),
+            device_id: "test-device".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_does_not_forward_credentials_through_a_redirect() {
+        let (target, received) = http_server(vec![http_response(
+            "200 OK",
+            "",
+            r#"{"access_token":"stolen"}"#,
+        )]);
+        let redirect = http_response(
+            "307 Temporary Redirect",
+            &format!("Location: {target}/stolen\r\n"),
+            "",
+        );
+        let (origin, sent) = http_server(vec![redirect]);
+        let http = build_http_client(&ClientOptions::default()).unwrap();
+        let result = Session::login(
+            http,
+            ServerUrls::from_server(&origin).unwrap(),
+            test_credentials(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(sent.join().unwrap()[0].contains("client_secret=synthetic-api-secret"));
+        assert!(received.join().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn attachment_requests_neither_follow_redirects_nor_repeat_storage_errors() {
+        let (target, received) = http_server(vec![http_response("200 OK", "", "unexpected")]);
+        let redirect = http_response("302 Found", &format!("Location: {target}/stolen\r\n"), "");
+        let denied = http_response(
+            "403 Forbidden",
+            "",
+            r#"{"message":"rejected signed-token-value"}"#,
+        );
+        let (origin, sent) = http_server(vec![redirect, denied.clone(), denied]);
+        let http = build_http_client(&ClientOptions::default()).unwrap();
+        let session = Session {
+            http,
+            urls: ServerUrls::from_server(&origin).unwrap(),
+            credentials: test_credentials(),
+            token: RwLock::new("synthetic-access-token".into()),
+            login_kdf: None,
+        };
+        let redirected = session
+            .download(&format!("{origin}/attachment?token=signed-token-value"))
+            .await;
+        assert!(redirected.is_err());
+        let downloaded = session
+            .download(&format!("{origin}/attachment?token=signed-token-value"))
+            .await
+            .unwrap_err();
+        let uploaded = session
+            .upload_azure(&format!("{origin}/blob?sig=signed-token-value"), vec![1])
+            .await
+            .unwrap_err();
+        for error in [downloaded, uploaded] {
+            assert!(!error.to_string().contains("signed-token-value"));
+            assert_eq!(error.status(), Some(StatusCode::FORBIDDEN));
+        }
+        assert_eq!(sent.join().unwrap().len(), 3);
+        assert!(received.join().unwrap().is_empty());
+    }
+
+    #[test]
+    fn backoff_stays_capped_after_many_rate_limits() {
+        for attempt in [5, 64, 65, 100, u32::MAX] {
+            assert_eq!(backoff(attempt), Duration::from_secs(8));
+        }
+    }
 
     #[test]
     fn self_hosted_servers_use_path_prefixes() {

@@ -202,7 +202,9 @@ async fn source_changes_are_carried_over_in_place() -> Result<()> {
         attachment_bytes(&dest, &after, "Sichere Notiz — 日本語 🔐", "empty.txt").await?,
         b""
     );
-    assert!(after.items.iter().all(|item| item.name() != "Visa"));
+    // A deleted copy goes to the trash, which the server empties on its own.
+    let visa: Vec<_> = after.items.iter().filter(|i| i.name() == "Visa").collect();
+    assert!(matches!(visa.as_slice(), [copy] if copy.in_trash));
     assert_eq!(
         folder_of(&after, by_name(&after, "Identity")).as_deref(),
         Some("Brand new")
@@ -505,7 +507,8 @@ async fn an_emptied_source_does_not_empty_the_mirror() -> Result<()> {
         ..options()
     };
     run(&source, &dest, &confirmed).await?;
-    assert!(dest.load(&PERSONAL).await?.items.is_empty());
+    let after = dest.load(&PERSONAL).await?;
+    assert!(after.items.iter().all(|item| item.in_trash));
     Ok(())
 }
 
@@ -714,11 +717,11 @@ async fn a_folder_filter_mirrors_part_of_the_vault() -> Result<()> {
     assert_eq!(folders(&mirrored), ["Empty", "Work", "Work/Infra"]);
     assert!(!run(&source, &dest, &not_private).await?.changed);
 
+    // Folder names are vault content, so the warning names the setting.
     let typo = run(&source, &dest, &filtered(&[], &["Persönlich ✈", "Wrok"])).await?;
-    assert!(
-        typo.warnings.iter().any(|w| w.contains("\"Wrok\"")),
-        "{:?}",
-        typo.warnings
+    assert_eq!(
+        typo.warnings,
+        ["1 name in EXCLUDE_FOLDERS matches no folder in the source. Check the spelling."]
     );
     Ok(())
 }
@@ -965,7 +968,7 @@ async fn a_copy_edited_after_the_backup_is_not_deleted() -> Result<()> {
     // The next run plans from the edited copy, so it may delete it.
     run(&source, &dest, &options()).await?;
     let after = dest.load(&PERSONAL).await?;
-    assert!(after.items.iter().all(|item| item.name() != "Identity"));
+    assert!((after.items.iter()).all(|item| item.in_trash || item.name() != "Identity"));
     Ok(())
 }
 

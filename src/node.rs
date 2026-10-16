@@ -5,14 +5,14 @@
 //! item back encrypts exactly the secrets again. A new item type or field that
 //! a server introduces is therefore mirrored without a code change.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde_json::{Map, Number, Value};
 use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 use crate::crypto::{CryptoError, SymKey, looks_encrypted};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Node {
     Null,
     Bool(bool),
@@ -23,6 +23,20 @@ pub enum Node {
     Secret(String),
     List(Vec<Node>),
     Map(BTreeMap<String, Node>),
+}
+
+impl fmt::Debug for Node {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => f.write_str("Null"),
+            Self::Bool(value) => f.debug_tuple("Bool").field(value).finish(),
+            Self::Number(value) => f.debug_tuple("Number").field(value).finish(),
+            Self::Text(value) => f.debug_tuple("Text").field(value).finish(),
+            Self::Secret(_) => f.debug_tuple("Secret").field(&"[redacted]").finish(),
+            Self::List(values) => f.debug_tuple("List").field(values).finish(),
+            Self::Map(values) => f.debug_tuple("Map").field(values).finish(),
+        }
+    }
 }
 
 impl Node {
@@ -272,6 +286,22 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn diagnostic_output_redacts_nested_secrets() {
+        let secret = "synthetic-vault-secret";
+        let tree = Node::Map(BTreeMap::from([(
+            "login".into(),
+            Node::List(vec![
+                Node::secret(secret),
+                Node::Text("visible date".into()),
+            ]),
+        )]));
+        let diagnostic = format!("{tree:?}");
+        assert!(!diagnostic.contains(secret));
+        assert!(diagnostic.contains("[redacted]"));
+        assert!(diagnostic.contains("visible date"));
+    }
 
     fn map(entries: Vec<(&str, Node)>) -> Node {
         Node::Map(

@@ -1,5 +1,7 @@
 /target
 /.env
+# The settings file `init` writes holds passwords, wherever it is.
+vault-mirror.env
 /backups
 /sandbox/tls
 *.age

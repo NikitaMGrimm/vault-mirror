@@ -110,8 +110,8 @@ same pull request and give the reason.
 ### Safety checks
 
 - Change and delete only copies. An item without a marker belongs to the
-  user, and so does the folder or collection it is in. Never write to the
-  source, except in `restore --to source`.
+  user, and so does the folder or collection it is in. Write to the source
+  only in `restore --to source` or an explicitly requested `run --pull`.
 - Refuse only a state that is almost never intended: swapped vaults, one
   vault twice, or a run that deletes every earlier copy.
 - Do not add a default percentage or count limit. A number like that is
@@ -169,7 +169,18 @@ same pull request and give the reason.
 with the next version and its changelog. The maintainer rewrites the
 changelog there for users, and merges it with the ruleset bypass: pull
 requests that release-plz opens don't start CI, and CI runs on `main` after
-the merge. That publishes the crate to crates.io, tags the
+the merge. Release-plz waits for that commit's push CI run to succeed before
+publishing. Manual CI runs and pull request runs do not satisfy the gate.
+The gate waits up to two hours. If CI fails and then passes on a rerun,
+rerun Release-plz's failed jobs too. Release pull requests must be squash-merged
+so the commit being published is the one that passed CI.
+
+Pushed tags and manual releases with a tag use the same push-to-main CI gate
+for the commit the tag resolves to. All release builds use that resolved
+commit, even when the manual workflow started from another commit. Manual
+builds without a tag do not publish and do not wait for this gate.
+
+The verified release publishes the crate to crates.io, tags the
 version, and runs the release workflow, which builds static binaries for
 x86-64 and arm64 Linux and native binaries for both macOS architectures,
 publishes the container image, and attaches build provenance to all of them.

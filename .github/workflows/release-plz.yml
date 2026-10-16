@@ -5,6 +5,10 @@ name: Release-plz
 # crates.io through trusted publishing, tags the version, creates the GitHub
 # release and runs the release workflow for binaries and the image.
 #
+# The release waits until CI has passed on the merged commit. It can't start
+# when CI finishes instead, because crates.io refuses trusted publishing from
+# a workflow that a `workflow_run` event started.
+#
 # Off until the repository variable RELEASE_PLZ is `true`: crates.io trusted
 # publishing can only be set up after the first version is published by hand.
 on:
@@ -14,8 +18,33 @@ on:
 permissions: {}
 
 jobs:
-  release:
+  # Passes once CI's run for this push has passed. A manual run of CI or a
+  # pull request's run doesn't count.
+  tested:
     if: vars.RELEASE_PLZ == 'true'
+    runs-on: ubuntu-24.04
+    # CI's slowest job may take an hour.
+    timeout-minutes: 120
+    permissions:
+      actions: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          while :; do
+            state=$(gh run list --workflow ci.yml --event push --branch main --commit "$GITHUB_SHA" \
+              --limit 1 --json headSha,status,conclusion \
+              --jq '.[] | select(.headSha == env.GITHUB_SHA) | "\(.status) \(.conclusion)"')
+            case "$state" in
+              "completed success") exit 0 ;;
+              completed*) echo "::error::CI ended with ${state#completed } on $GITHUB_SHA"; exit 1 ;;
+            esac
+            sleep 60
+          done
+
+  release:
+    needs: tested
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -23,10 +52,24 @@ jobs:
     outputs:
       tag: ${{ steps.release.outputs.releases_created == 'true' && fromJSON(steps.release.outputs.releases)[0].tag || '' }}
     steps:
+      # Without a `ref`, this checks out the pushed commit that CI passed,
+      # even if main has moved on since. release-plz releases it only if it
+      # squashed a release pull request (`release_always`).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify the tested release commit
+        run: |
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "::error::The checkout is not the commit that passed CI"
+            exit 1
+          fi
+          read -r -a parents <<< "$(git show -s --format=%P HEAD)"
+          if (( ${#parents[@]} > 1 )); then
+            echo "::error::Squash-merge release pull requests so release-plz publishes the tested commit"
+            exit 1
+          fi
       - name: Install Rust
         run: |
           toolchain=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
@@ -48,6 +91,7 @@ jobs:
     if: needs.release.outputs.tag != ''
     permissions:
       contents: write
+      actions: read
       packages: write
       id-token: write
       attestations: write

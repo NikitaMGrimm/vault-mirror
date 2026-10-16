@@ -640,13 +640,16 @@ impl Account {
         Ok(data)
     }
 
+    /// Adds a file to `item` and returns the new attachment's id. A failed
+    /// upload leaves the attachment the server registered for it in place,
+    /// since the file may have arrived all the same.
     pub async fn upload_attachment(
         &self,
         scope: &Scope,
         item: &Item,
         file_name: &str,
         data: &[u8],
-    ) -> Result<()> {
+    ) -> Result<String> {
         let item_key = self.item_key(scope, item)?;
         let attachment_key = SymKey::generate();
         let blob = attachment_key.encrypt_blob(data)?;
@@ -663,7 +666,15 @@ impl Account {
             .send_once(Method::POST, &path, Some(&body))
             .await?;
         let attachment_id = required_str(&slot, "attachmentId", "attachment upload")?;
-        let uploaded = match slot.get("fileUploadType").and_then(Value::as_u64) {
+        // An upload there would overwrite that file, and a caller replacing
+        // the item's files would then delete the new one with the old.
+        if item.attachments.iter().any(|a| a.id == attachment_id) {
+            bail!(
+                "the server gave the new file of item {} the id {attachment_id} of a file the item already has",
+                item.id
+            );
+        }
+        match slot.get("fileUploadType").and_then(Value::as_u64) {
             Some(1) => {
                 let url = required_str(&slot, "url", "attachment upload")?;
                 self.session.upload_azure(&url, blob).await
@@ -674,13 +685,11 @@ impl Account {
                     .upload_direct(&path, &encrypted_name, blob)
                     .await
             }
-        };
-        if let Err(error) = uploaded {
-            // Do not leave a registered attachment without a file behind.
-            let _ = self.delete_attachment(&item.id, &attachment_id).await;
-            return Err(error.into());
-        }
-        Ok(())
+        }.with_context(|| format!(
+            "uploading attachment {attachment_id} of item {}; its registration was kept because the file may have arrived. If a later backup cannot read it, stop scheduling and inspect that attachment before retrying",
+            item.id
+        ))?;
+        Ok(attachment_id)
     }
 
     pub async fn delete_attachment(&self, item_id: &str, attachment_id: &str) -> Result<()> {

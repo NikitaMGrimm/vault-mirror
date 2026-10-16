@@ -54,21 +54,40 @@ vault-mirror only makes backups. See [Backups and restoring](backups.md).
 
 ## Do backups pile up?
 
-No. A run saves a snapshot only when the vault changed. Old snapshots thin out
-to one a day and are deleted after `RETENTION_DAYS`. Each attachment is stored
-once, however many snapshots use it. See [How long backups are
-kept](backups.md#how-long-backups-are-kept).
+Current snapshots thin out to one a day and expire after `RETENTION_DAYS`,
+subject to `MIN_FILES`. New snapshots each hold their own attachments. An
+unchanged vault can be skipped when the runner can authenticate its earlier
+backup. Public-recipient backups save a point every run. Legacy snapshots and
+inactive encryption groups are preserved. See
+[How long backups are kept](backups.md#how-long-backups-are-kept).
 
 ## Where are my master passwords stored?
 
-In the settings file, `vault-mirror.env`. `init` writes it readable only by you.
-To keep secrets out of it, put each one in its own file and point to it with
-`NAME_FILE`. See [Secrets in files](configuration.md#secrets-in-files).
+In the settings file, `vault-mirror.env`. On Unix, `init` makes it readable only
+by its owner. On Windows, create it in a directory restricted to your account
+and check the file's access permissions. To keep secrets out of it, put each one
+in its own file and point to it with `NAME_FILE`. See
+[Secrets in files](configuration.md#secrets-in-files).
 
 ## Does it work with two-step login?
 
 Yes. vault-mirror logs in with each account's API key, which Bitwarden doesn't
 ask a second step for. It still needs the master password to decrypt the vault.
+
+## Does storing my master passwords make the vault less secure?
+
+It adds a machine that can unlock both vaults without you present. Anyone who
+can read its settings or control the running process can obtain your vault
+content. Two-step login does not protect the stored API keys.
+
+Use a trusted host, protect both accounts, and restrict access to the settings
+and secret files. `NAME_FILE` keeps secrets out of the environment, but the
+process still has to read them. Public-recipient backups let you keep their
+private decryption key off the runner. They cannot protect a vault from a
+compromised process that is currently decrypting it.
+
+Read [How automation changes your vault's security](../SECURITY.md#how-automation-changes-your-vaults-security)
+before choosing where to run it.
 
 ## Can I mirror more than one vault?
 
@@ -78,10 +97,10 @@ and run vault-mirror once for each.
 
 ## How do I know it's working?
 
-- `vault-mirror healthcheck` fails when the last run failed or is too old. The
+- `vault-mirror healthcheck` fails when the last actual run failed or is too old. The
   container image uses it as its health check.
 - `NOTIFY_FAILURE_URL` gets a message when a run fails.
 - `last-run.json` in the backup directory has the time, result and counts of the
-  last run.
+  last actual run. Dry runs leave it unchanged.
 
 See [Commands and scheduling](running.md).
