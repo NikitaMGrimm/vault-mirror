@@ -24,7 +24,7 @@ use vault_mirror::{
     mirror::Endpoint,
     node::Node,
     restore::{RestoreOptions, RestoreReport, restore},
-    snapshot::{self, AttachmentStorage, Restorable, SnapshotAttachment},
+    snapshot::{self, AttachmentStorage, Restorable, RestorableItem, SnapshotAttachment},
     store::{Keys, Protection, Store, VaultOrigin},
     vault::{Account, Draft, Scope},
 };
@@ -45,6 +45,7 @@ struct Faults {
     bitwarden: bool,
     /// Has no premium subscription, so attachments are refused.
     free: bool,
+    reset_reprompt: bool,
 }
 
 struct State {
@@ -218,6 +219,12 @@ fn respond(
         }
         ("POST", ["api", "ciphers"]) => {
             let mut cipher = json();
+            let content = cipher.as_object_mut().unwrap();
+            content.entry("reprompt").or_insert(json!(0));
+            content.entry("favorite").or_insert(json!(false));
+            if state.faults.reset_reprompt {
+                cipher["reprompt"] = json!(0);
+            }
             cipher["id"] = json!(next_id(&mut state, "item"));
             cipher["revisionDate"] = json!("2026-10-16T12:00:00.000Z");
             cipher["creationDate"] = json!("2026-10-16T12:00:00.000Z");
@@ -415,6 +422,78 @@ async fn run(
         concurrency: 2,
     };
     restore(&target, snapshot, store, &options, capture).await
+}
+
+#[tokio::test]
+async fn a_restore_handles_omitted_client_flags_and_preserves_explicit_values() {
+    for reprompt in [None, Some(0), Some(1)] {
+        let mut content = [
+            ("type".to_string(), Node::Number(2.into())),
+            ("name".to_string(), Node::secret("Restored note")),
+            (
+                "secureNote".to_string(),
+                Node::Map([("type".to_string(), Node::Number(0.into()))].into()),
+            ),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+        if let Some(value) = reprompt {
+            content.insert("reprompt".into(), Node::Number(value.into()));
+            content.insert("favorite".into(), Node::Bool(value != 0));
+        }
+        let snapshot = Restorable {
+            items: vec![RestorableItem {
+                id: "saved-item".into(),
+                folder_id: None,
+                collection_ids: Vec::new(),
+                archived: false,
+                content,
+                attachments: Vec::new(),
+            }],
+            ..Restorable::default()
+        };
+        let server = Server::start(Faults::default());
+        let report = run(&server, &snapshot, None, &Capture::default())
+            .await
+            .unwrap();
+        assert_eq!(report.items, 1);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.ciphers[0]["reprompt"], json!(reprompt.unwrap_or(0)));
+        assert_eq!(state.ciphers[0]["favorite"], json!(reprompt == Some(1)));
+    }
+}
+
+#[tokio::test]
+async fn a_restore_refuses_a_lost_master_password_reprompt() {
+    let snapshot = Restorable {
+        items: vec![RestorableItem {
+            id: "saved-item".into(),
+            folder_id: None,
+            collection_ids: Vec::new(),
+            archived: false,
+            content: [
+                ("type".to_string(), Node::Number(2.into())),
+                ("name".to_string(), Node::secret("Restored note")),
+                ("reprompt".to_string(), Node::Number(1.into())),
+                ("favorite".to_string(), Node::Bool(true)),
+            ]
+            .into(),
+            attachments: Vec::new(),
+        }],
+        ..Restorable::default()
+    };
+    let server = Server::start(Faults {
+        reset_reprompt: true,
+        ..Faults::default()
+    });
+    let error = run(&server, &snapshot, None, &Capture::default())
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("content.reprompt"),
+        "{error:#}"
+    );
+    assert_eq!(server.state.lock().unwrap().ciphers.len(), 1);
 }
 
 #[tokio::test]

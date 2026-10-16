@@ -121,6 +121,10 @@ the created items, their placement, and uploaded attachment bytes. Missing or
 corrupt promised files stop preparation. Intentionally omitted attachments and
 [unsupported features](limitations.md) are reported separately.
 
+Restore fills omitted client flags with their standard defaults. Saved
+master-password reprompt values and personal-vault favorites are preserved and
+verified.
+
 Restore and export stage private encrypted copies of the promised attachment
 files. Allow that much free space in the system temporary directory. Files are
 decrypted in memory as needed.

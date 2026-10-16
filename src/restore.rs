@@ -350,15 +350,28 @@ impl PreparedRestore<'_> {
 
         let drafts: Vec<Draft> = items
             .iter()
-            .map(|(item, _)| Draft {
-                content: item.content.clone(),
-                folder_id: (item.folder_id.as_deref())
-                    .and_then(|id| folder_ids.get(id))
-                    .cloned(),
-                collection_ids: (item.collection_ids.iter())
-                    .filter_map(|id| collection_ids.get(id.as_str()))
-                    .cloned()
-                    .collect(),
+            .map(|(item, _)| {
+                let mut content = item.content.clone();
+                // Servers materialize these defaults. Sending them keeps
+                // verification strict for every explicitly saved value.
+                content
+                    .entry("reprompt".into())
+                    .or_insert(Node::Number(0.into()));
+                if *scope == Scope::Personal {
+                    content
+                        .entry("favorite".into())
+                        .or_insert(Node::Bool(false));
+                }
+                Draft {
+                    content,
+                    folder_id: (item.folder_id.as_deref())
+                        .and_then(|id| folder_ids.get(id))
+                        .cloned(),
+                    collection_ids: (item.collection_ids.iter())
+                        .filter_map(|id| collection_ids.get(id.as_str()))
+                        .cloned()
+                        .collect(),
+                }
             })
             .collect();
         let folder_names: HashMap<String, String> = snapshot
