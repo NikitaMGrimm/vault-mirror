@@ -257,12 +257,32 @@ pub struct RestorableItem {
     pub attachments: Vec<SnapshotAttachment>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+/// A backup read by [`parse`], the only way to make one, so everything it
+/// holds has passed the checks there.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Restorable {
-    pub organization: bool,
-    pub folders: Vec<Folder>,
-    pub collections: Vec<Collection>,
-    pub items: Vec<RestorableItem>,
+    organization: bool,
+    folders: Vec<Folder>,
+    collections: Vec<Collection>,
+    items: Vec<RestorableItem>,
+}
+
+impl Restorable {
+    pub fn organization(&self) -> bool {
+        self.organization
+    }
+
+    pub fn folders(&self) -> &[Folder] {
+        &self.folders
+    }
+
+    pub fn collections(&self) -> &[Collection] {
+        &self.collections
+    }
+
+    pub fn items(&self) -> &[RestorableItem] {
+        &self.items
+    }
 }
 
 /// The bookkeeping block of a document vault-mirror wrote.
@@ -438,10 +458,8 @@ pub fn parse(document: &Value) -> Result<Restorable> {
         None => root.contains_key("collections"),
     };
 
-    let mut restorable = Restorable {
-        organization,
-        ..Restorable::default()
-    };
+    let mut folders = Vec::new();
+    let mut collections = Vec::new();
     // Servers accept empty folder and collection names, and items refer to
     // them by id, so they are kept.
     let name = |value: &Value| {
@@ -457,9 +475,7 @@ pub fn parse(document: &Value) -> Result<Restorable> {
                 name: name(folder).ok_or_else(|| anyhow!("it has no name"))?,
             })
         };
-        restorable
-            .folders
-            .push(read().with_context(|| format!("folder {index} of the backup"))?);
+        folders.push(read().with_context(|| format!("folder {index} of the backup"))?);
     }
     for (index, collection) in optional_list(root, "collections")?.iter().enumerate() {
         let read = || -> Result<Collection> {
@@ -469,12 +485,10 @@ pub fn parse(document: &Value) -> Result<Restorable> {
                 external_id: optional_text(collection, "externalId")?,
             })
         };
-        restorable
-            .collections
-            .push(read().with_context(|| format!("collection {index} of the backup"))?);
+        collections.push(read().with_context(|| format!("collection {index} of the backup"))?);
     }
-    let folder_ids = unique(restorable.folders.iter().map(|f| &f.id), "folder")?;
-    let collection_ids = unique(restorable.collections.iter().map(|c| &c.id), "collection")?;
+    let folder_ids = unique(folders.iter().map(|f| &f.id), "folder")?;
+    let collection_ids = unique(collections.iter().map(|c| &c.id), "collection")?;
 
     let mut ids = HashSet::new();
     let mut live = Vec::new();
@@ -605,8 +619,12 @@ pub fn parse(document: &Value) -> Result<Restorable> {
             item.attachments = attachments.remove(&item.id).unwrap_or_default();
         }
     }
-    restorable.items = live;
-    Ok(restorable)
+    Ok(Restorable {
+        organization,
+        folders,
+        collections,
+        items: live,
+    })
 }
 
 fn unique<'a>(ids: impl Iterator<Item = &'a String>, what: &str) -> Result<HashSet<&'a String>> {

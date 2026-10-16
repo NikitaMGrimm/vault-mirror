@@ -2,13 +2,14 @@ mod common;
 
 use anyhow::Result;
 use common::*;
+use serde_json::json;
 use vault_mirror::{
     crypto::KdfParams,
     mirror::{Endpoint, MirrorOptions, pull},
     node::Node,
     restore::{RestoreOptions, restore},
-    snapshot::{Restorable, RestorableItem},
-    vault::{Account, Collection, Draft, Scope, Vault},
+    snapshot,
+    vault::{Account, Draft, Scope, Vault},
 };
 
 async fn organization(sandbox: &Sandbox, server: &str) -> Result<(Account, Scope, String)> {
@@ -491,35 +492,14 @@ async fn a_restore_leaves_out_items_the_target_would_hide() -> Result<()> {
         return Ok(());
     };
     let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
-    let note = |id: &str, name: &str, collection_ids: Vec<String>| RestorableItem {
-        id: id.to_string(),
-        folder_id: None,
-        collection_ids,
-        archived: false,
-        content: [
-            ("type".to_string(), Node::Number(2.into())),
-            ("name".to_string(), Node::secret(name)),
-            (
-                "secureNote".to_string(),
-                Node::Map([("type".to_string(), Node::Number(0.into()))].into()),
-            ),
-        ]
-        .into(),
-        attachments: vec![],
+    let note = |id: &str, name: &str, collection_ids: &[&str]| {
+        json!({"id": id, "type": 2, "name": name, "secureNote": {"type": 0},
+            "collectionIds": collection_ids})
     };
-    let snapshot = Restorable {
-        organization: true,
-        collections: vec![Collection {
-            id: "c1".to_string(),
-            name: "Shared".to_string(),
-            external_id: None,
-        }],
-        items: vec![
-            note("i1", "Loose note", vec![]),
-            note("i2", "Shared note", vec!["c1".to_string()]),
-        ],
-        ..Restorable::default()
-    };
+    let snapshot = snapshot::parse(&json!({
+        "collections": [{"id": "c1", "name": "Shared"}],
+        "items": [note("i1", "Loose note", &[]), note("i2", "Shared note", &["c1"])],
+    }))?;
     let capture = Capture::default();
     let report = restore(
         &Endpoint {

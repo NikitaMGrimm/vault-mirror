@@ -1329,8 +1329,7 @@ async fn marker_cleanup_checks_membership_from_the_full_organization_read() {
 async fn restore_checks_requested_container_metadata_even_when_creation_echoes_altered_values() {
     use vault_mirror::{
         restore::{RestoreOptions, restore},
-        snapshot::Restorable,
-        vault::{Collection, Folder},
+        snapshot,
     };
     for kind in ["folder-name", "collection-name", "collection-external-id"] {
         let fake = Fake::start();
@@ -1359,25 +1358,17 @@ async fn restore_checks_requested_container_metadata_even_when_creation_echoes_a
                 side.altered_container_name = Some(name);
             }
         });
-        let snapshot = if organization {
-            Restorable {
-                organization: true,
-                collections: vec![Collection {
-                    id: "old-collection".into(),
-                    name: "Requested".into(),
-                    external_id: Some("requested-id".into()),
-                }],
-                ..Restorable::default()
-            }
+        let snapshot = snapshot::parse(&if organization {
+            json!({
+                "collections": [
+                    {"id": "old-collection", "name": "Requested", "externalId": "requested-id"},
+                ],
+                "items": [],
+            })
         } else {
-            Restorable {
-                folders: vec![Folder {
-                    id: "old-folder".into(),
-                    name: "Requested".into(),
-                }],
-                ..Restorable::default()
-            }
-        };
+            json!({"folders": [{"id": "old-folder", "name": "Requested"}], "items": []})
+        })
+        .unwrap();
         let target = Endpoint {
             account: &account,
             scope: if organization {
