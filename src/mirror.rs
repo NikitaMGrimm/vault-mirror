@@ -341,19 +341,12 @@ pub async fn pull(
     .filter(|(n, _)| *n > 0)
     .map(|(n, noun)| count(n, noun))
     .collect();
-    match (parts.is_empty(), options.dry_run) {
-        (true, _) => reporter.status("Found", "nothing to pull from the destination"),
-        (false, true) => reporter.status(
-            "Would pull",
-            &format!("{} into the source", parts.join(" and ")),
-        ),
-        (false, false) => reporter.status(
+    match parts.is_empty() {
+        true => reporter.status("Found", "nothing to pull from the destination"),
+        false => reporter.status(
             "Pulling",
             &format!("{} into the source", parts.join(" and ")),
         ),
-    }
-    if options.dry_run {
-        return Ok(pulled);
     }
 
     let mut puller = Puller {

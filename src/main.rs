@@ -43,9 +43,6 @@ struct Cli {
 
 #[derive(Args, Clone, Copy)]
 struct RunArgs {
-    /// Back up and report what would change, without changing the destination.
-    #[arg(long)]
-    dry_run: bool,
     /// Let this run delete every earlier copy, or more than MAX_DELETE_PERCENT.
     #[arg(long)]
     allow_mass_delete: bool,
@@ -213,7 +210,6 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
 
 fn flags(args: RunArgs) -> RunFlags {
     RunFlags {
-        dry_run: args.dry_run,
         allow_mass_delete: args.allow_mass_delete,
         reverse: args.reverse,
         pull: args.pull,
@@ -239,10 +235,6 @@ async fn run_and_report(config: &Config, flags: RunFlags) -> bool {
 fn finished(status: &app::Status) -> String {
     let seconds = status.duration_seconds;
     match &status.mirror {
-        _ if status.dry_run && status.pulled.is_some() => {
-            format!("dry run in {seconds:.1}s; neither vault was changed")
-        }
-        _ if status.dry_run => format!("dry run in {seconds:.1}s; the destination is unchanged"),
         Some(app::SummaryRecord {
             summary: mirror, ..
         }) => {

@@ -91,10 +91,10 @@ and run vault-mirror once for each.
 
 ## How do I know it's working?
 
-- `vault-mirror healthcheck` fails when the last actual run failed or is too old. The
+- `vault-mirror healthcheck` fails when the last run failed or is too old. The
   container image uses it as its health check.
 - `NOTIFY_FAILURE_URL` gets a message when a run fails.
 - `last-run.json` in the backup directory has the time, result and counts of the
-  last actual run. Dry runs leave it unchanged.
+  last run.
 
 See [Commands and scheduling](running.md).

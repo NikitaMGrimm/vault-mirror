@@ -164,7 +164,7 @@ fn healthcheck_reads_the_backup_directory_from_the_settings_file() {
     fs::write(
         backups.join("last-run.json"),
         format!(
-            r#"{{"status":"success","dry_run":false,"started_at":"{finished}","finished_at":"{finished}","duration_seconds":1.0,"version":"test"}}"#
+            r#"{{"status":"success","started_at":"{finished}","finished_at":"{finished}","duration_seconds":1.0,"version":"test"}}"#
         ),
     )
     .unwrap();

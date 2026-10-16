@@ -7,20 +7,16 @@
 | Command | What it does |
 | --- | --- |
 | `vault-mirror init [--dir DIR]` | Asks for the accounts, checks the logins, writes `vault-mirror.env` and `compose.yaml`, and shows what the first run would do. |
-| `vault-mirror run` | Does one run. Add `--dry-run` to back up and show the plan without changing the destination. `--allow-mass-delete` and `--reverse` get past a [safety check](how-it-works.md#safety-checks) for this run. `--pull` first copies changes made in the destination back into the source, [after an outage](how-it-works.md#after-an-outage). |
+| `vault-mirror run` | Does one run. `--allow-mass-delete` and `--reverse` get past a [safety check](how-it-works.md#safety-checks) for this run. `--pull` first copies changes made in the destination back into the source, [after an outage](how-it-works.md#after-an-outage). |
 | `vault-mirror daemon` | Keeps running on `SCHEDULE` or every `INTERVAL`. On `SIGTERM` it waits for a run in progress, then stops. |
 | `vault-mirror check` | Logs in, counts what's in each vault, and shows what a run would do. It never changes either vault. |
 | `vault-mirror snapshots` | Lists the backup snapshots. |
 | `vault-mirror export --output DIR` | Decrypts a snapshot and its attachments into a new directory. |
 | `vault-mirror restore --to source\|dest` | Writes a snapshot into one of the configured vaults. See [Restore with vault-mirror](backups.md#restore-with-vault-mirror). |
-| `vault-mirror healthcheck [--max-age-hours 26]` | Exits successfully only if the last actual run succeeded within that many hours. The container image uses it as its health check. |
+| `vault-mirror healthcheck [--max-age-hours 26]` | Exits successfully only if the last run succeeded within that many hours. The container image uses it as its health check. |
 
 Every command takes `--env-file PATH` to read a [settings
 file](configuration.md#the-settings-file), and `--help` to describe its options.
-
-Dry runs leave `last-run.json` unchanged and send no monitoring notifications.
-An older status file that records a dry run does not count as healthy. Complete
-a real run to replace it.
 
 Status-file and notification failures are warnings. A successful vault operation
 does not prove that either monitoring channel worked. Monitor the process exit

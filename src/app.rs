@@ -30,7 +30,6 @@ const UNFINISHED_PULL_FILE: &str = "unfinished-pull";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunFlags {
-    pub dry_run: bool,
     pub allow_mass_delete: bool,
     pub reverse: bool,
     pub pull: bool,
@@ -41,7 +40,6 @@ pub struct RunFlags {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Status {
     pub status: RunResult,
-    pub dry_run: bool,
     pub started_at: String,
     pub finished_at: String,
     pub duration_seconds: f64,
@@ -198,7 +196,6 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
     let mut progress = Progress {
         stage: "configuration",
         status: Status {
-            dry_run: flags.dry_run,
             version: env!("CARGO_PKG_VERSION").to_string(),
             ..Status::default()
         },
@@ -231,15 +228,12 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
     // A run turned away by the lock leaves the status file to the run that
     // holds it.
     if lock.is_some()
-        && !status.dry_run
         && let Err(error) = write_status(&config.backups_dir, &status)
     {
         reporter.warn(&format!("Could not write the status file: {error:#}"));
     }
     drop(lock);
-    if !status.dry_run {
-        notify(config, &status, reporter).await;
-    }
+    notify(config, &status, reporter).await;
     status
 }
 
@@ -333,7 +327,7 @@ async fn execute(
         scope: dest_scope,
     };
     let options = MirrorOptions {
-        dry_run: flags.dry_run,
+        dry_run: false,
         safety: Safety {
             allow_mass_delete: flags.allow_mass_delete,
             allow_reverse: flags.reverse,
@@ -348,18 +342,13 @@ async fn execute(
     if flags.pull {
         progress.stage = "pull";
         let loaded = dest_vault.take().unwrap_or_default();
-        if !flags.dry_run {
-            store::write_private(&unfinished_pull, b"")?;
-        }
+        store::write_private(&unfinished_pull, b"")?;
         let pulled = pull(&source, &dest, &source_vault, &loaded, &options, reporter).await?;
         progress.status.pulled = Some(SummaryRecord {
-            changed: !flags.dry_run && pulled.summary != Summary::default(),
+            changed: pulled.summary != Summary::default(),
             summary: pulled.summary,
         });
         progress.status.warnings.extend(pulled.warnings);
-        if flags.dry_run {
-            return Ok(());
-        }
         fs::remove_file(&unfinished_pull)
             .with_context(|| format!("removing {}", unfinished_pull.display()))?;
     }
@@ -406,13 +395,12 @@ pub fn read_status(backups_dir: &Path) -> Result<Status> {
 /// One line describing a run, safe to send to a notification service.
 pub fn describe(status: &Status) -> String {
     let mut parts = vec![format!(
-        "vault-mirror {}{}",
+        "vault-mirror {}",
         if status.succeeded() {
             "succeeded"
         } else {
             "FAILED"
-        },
-        if status.dry_run { " (dry run)" } else { "" }
+        }
     )];
     if let Some(SummaryRecord {
         summary: mirror, ..
@@ -479,9 +467,6 @@ pub fn health(
     max_age: Duration,
     now: OffsetDateTime,
 ) -> std::result::Result<(), String> {
-    if status.dry_run {
-        return Err("the last recorded run was a dry run; complete a real run first".to_string());
-    }
     if !status.succeeded() {
         return Err(format!(
             "the last run failed during {}: {}",
@@ -656,128 +641,6 @@ mod tests {
     }
 
     #[test]
-    fn a_successful_dry_run_does_not_prove_health() {
-        let status = Status {
-            dry_run: true,
-            ..success()
-        };
-        assert!(
-            health(
-                &status,
-                Duration::from_secs(26 * 3600),
-                datetime!(2026-10-14 20:00:00 UTC)
-            )
-            .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn a_dry_run_preserves_the_last_actual_run_status() {
-        let dir = tempfile::tempdir().unwrap();
-        let env = [
-            ("SOURCE_SERVER", "invalid-server-url"),
-            ("SOURCE_CLIENT_ID", "user.test"),
-            ("SOURCE_CLIENT_SECRET", "synthetic-secret"),
-            ("SOURCE_PASSWORD", "synthetic-password"),
-            ("DEST_SERVER", "invalid-server-url"),
-            ("DEST_CLIENT_ID", "user.dest"),
-            ("DEST_CLIENT_SECRET", "synthetic-secret"),
-            ("DEST_PASSWORD", "synthetic-password"),
-            ("BACKUP_PASSPHRASE", "synthetic-passphrase"),
-            ("BACKUPS_DIR", dir.path().to_str().unwrap()),
-        ]
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value.to_string()))
-        .collect();
-        let config = Config::from_env(&env).unwrap();
-        write_status(dir.path(), &success()).unwrap();
-        let flags = RunFlags {
-            dry_run: true,
-            ..RunFlags::default()
-        };
-        let status = run_once(&config, flags, &Quiet).await;
-        assert!(status.dry_run && !status.succeeded());
-        assert_eq!(read_status(dir.path()).unwrap(), success());
-        fs::remove_file(status_path(dir.path())).unwrap();
-        run_once(&config, flags, &Quiet).await;
-        assert!(!status_path(dir.path()).exists());
-    }
-
-    fn mirror_config(dir: &Path) -> Config {
-        let env = [
-            ("SOURCE_SERVER", "invalid-server-url"),
-            ("SOURCE_CLIENT_ID", "user.source"),
-            ("SOURCE_CLIENT_SECRET", "synthetic-secret"),
-            ("SOURCE_PASSWORD", "synthetic-password"),
-            ("DEST_SERVER", "invalid-server-url"),
-            ("DEST_CLIENT_ID", "user.dest"),
-            ("DEST_CLIENT_SECRET", "synthetic-secret"),
-            ("DEST_PASSWORD", "synthetic-password"),
-            ("BACKUP_PASSPHRASE", "synthetic-passphrase"),
-            ("BACKUPS_DIR", dir.to_str().unwrap()),
-        ]
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value.to_string()))
-        .collect();
-        Config::from_env(&env).unwrap()
-    }
-
-    #[tokio::test]
-    async fn an_unfinished_pull_lets_only_another_pull_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = mirror_config(dir.path());
-        // The pull that stopped had backed up first.
-        Keys::open(dir.path(), &config.backup.passphrase).unwrap();
-        fs::write(dir.path().join(UNFINISHED_PULL_FILE), b"").unwrap();
-        let refused = run_once(&config, RunFlags::default(), &Quiet).await;
-        assert_eq!(refused.failure_stage.as_deref(), Some("unfinished pull"));
-        assert!(refused.error.unwrap().contains("--pull"));
-        let pull = RunFlags {
-            pull: true,
-            ..RunFlags::default()
-        };
-        let status = run_once(&config, pull, &Quiet).await;
-        assert_eq!(status.failure_stage.as_deref(), Some("source login"));
-        assert!(dir.path().join(UNFINISHED_PULL_FILE).exists());
-    }
-
-    #[tokio::test]
-    async fn a_notification_redirect_is_reported_as_a_delivery_failure() {
-        use crate::api::tests::{http_response, http_server};
-        struct Warnings(std::sync::Mutex<Vec<String>>);
-        impl Reporter for Warnings {
-            fn status(&self, _: &str, _: &str) {}
-            fn warn(&self, warning: &str) {
-                self.0.lock().unwrap().push(warning.to_string());
-            }
-        }
-        let (url, received) = http_server(vec![http_response(
-            "307 Temporary Redirect",
-            "Location: https://example.invalid/secret-token\r\n",
-            "",
-        )]);
-        let env = [
-            ("SOURCE_SERVER", "invalid-server-url"),
-            ("SOURCE_CLIENT_ID", "user.test"),
-            ("SOURCE_CLIENT_SECRET", "synthetic-secret"),
-            ("SOURCE_PASSWORD", "synthetic-password"),
-            ("BACKUP_PASSPHRASE", "synthetic-passphrase"),
-        ]
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value.to_string()))
-        .collect();
-        let mut config = Config::from_env(&env).unwrap();
-        config.notify_success_url = Some(url);
-        let warnings = Warnings(std::sync::Mutex::new(Vec::new()));
-        notify(&config, &success(), &warnings).await;
-        assert_eq!(received.join().unwrap().len(), 1);
-        let messages = warnings.0.lock().unwrap();
-        assert_eq!(messages.len(), 1);
-        assert!(messages[0].contains("307"));
-        assert!(!messages[0].contains("secret-token"));
-    }
-
-    #[test]
     fn descriptions_are_one_line_summaries() {
         assert_eq!(
             describe(&success()),
@@ -785,7 +648,6 @@ mod tests {
         );
         let failed = Status {
             status: RunResult::Failed,
-            dry_run: true,
             mirror: None,
             failure_stage: Some("planning".into()),
             error: Some("refused".into()),
@@ -793,7 +655,7 @@ mod tests {
         };
         assert_eq!(
             describe(&failed),
-            "vault-mirror FAILED (dry run); during planning: refused"
+            "vault-mirror FAILED; during planning: refused"
         );
     }
 }

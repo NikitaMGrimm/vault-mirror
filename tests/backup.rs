@@ -373,31 +373,6 @@ async fn a_pull_brings_back_what_changed_in_the_destination() -> Result<()> {
     )
     .await?;
 
-    let dry = Capture::default();
-    let previewed = app::run_once(
-        &config,
-        RunFlags {
-            pull: true,
-            dry_run: true,
-            ..RunFlags::default()
-        },
-        &dry,
-    )
-    .await;
-    assert!(previewed.succeeded(), "{previewed:?}");
-    assert!(
-        dry.0.lock().unwrap().contains(
-            &"info: Would pull 1 new item and 1 changed item into the source".to_string()
-        )
-    );
-    assert!(
-        !dry.0
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|line| line.contains("Pulling"))
-    );
-
     let pulled = run(RunFlags {
         pull: true,
         ..RunFlags::default()
@@ -604,23 +579,20 @@ async fn a_pull_the_mirror_would_refuse_stops_before_changing_the_source() -> Re
         ),
     ];
     for config in &configs {
-        for dry_run in [true, false] {
-            let flags = RunFlags {
-                pull: true,
-                dry_run,
-                ..RunFlags::default()
-            };
-            let refused = app::run_once(config, flags, &Capture::default()).await;
-            assert!(!refused.succeeded(), "{refused:?}");
-            assert_eq!(refused.failure_stage.as_deref(), Some("pull"));
-            assert!(
-                refused
-                    .error
-                    .as_deref()
-                    .unwrap()
-                    .contains("--allow-mass-delete")
-            );
-        }
+        let flags = RunFlags {
+            pull: true,
+            ..RunFlags::default()
+        };
+        let refused = app::run_once(config, flags, &Capture::default()).await;
+        assert!(!refused.succeeded(), "{refused:?}");
+        assert_eq!(refused.failure_stage.as_deref(), Some("pull"));
+        assert!(
+            refused
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("--allow-mass-delete")
+        );
     }
     let other = sandbox.open(&other_account).await?;
     assert!(other.load(&PERSONAL).await?.items.is_empty());

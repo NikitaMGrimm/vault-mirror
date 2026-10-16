@@ -55,7 +55,7 @@ but a compromised running process can still capture the vault it decrypts.
 | `key.age` | The backup key. | Encrypted with your passphrase, using scrypt. |
 | `*/<snapshot>/vault.json.age` | Complete vault exports, secrets included. | Encrypted with age. |
 | `*/<snapshot>/attachments/*.age` | Attachment content. | Encrypted with age. |
-| `last-run.json` | Time, result and counts of the last actual run. | None. No vault content. |
+| `last-run.json` | Time, result and counts of the last run. | None. No vault content. |
 | `state.json` | The device ids vault-mirror logs in with. | None. |
 | `run.lock` | Nothing. It's locked while a run or restore is using the directory. | None. |
 | `unfinished-pull` | Nothing. It's there while a pull has not finished. | None. |
