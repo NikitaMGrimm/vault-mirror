@@ -16,7 +16,7 @@ backups/
 ├── state.json                       # login device ids
 ├── run.lock                         # serializes access
 ├── restore-hold.json                # present after native restore
-├── pull-cleanup-hold.json            # retained if a pull fails or cannot be verified
+├── unfinished-pull                  # present while a pull has not finished
 ├── source/
 │   ├── snapshots/
 │   │   ├── vault-20261014T030000Z.json.age
@@ -170,46 +170,6 @@ installation using a different directory.
 
 Do not clear the hold just to bypass a failure. Use `export` while investigating.
 Backup-only setups can continue to make backups under a hold.
-
-### Resume after an interrupted pull
-
-Before an actual `--pull` writes to the source, vault-mirror creates
-`pull-cleanup-hold.json`. It keeps the hold through the pull, the mirror after
-it, and marker cleanup. Cleanup checks the source's content, placement, archive
-state, and attachment bytes. It also refuses source edits made after the
-forward mirror read them. The run removes its own hold only when all of this
-succeeds. `--dry-run` takes no hold.
-
-A failure or interruption leaves the hold and pauses later mirroring, even with
-`--allow-mass-delete` or `--reverse`. That includes a pull refused before its
-first write and an upload that failed. vault-mirror cannot tell those from a
-source that kept only part of a write. A pull also stops and holds at a source
-item still waiting for its files when no hold covers it. An older version, or
-another program using the library, left that item.
-
-Keep scheduling stopped. Preserve both vaults and their backups, and read the
-run's error for the cause and the items involved.
-
-1. Fix the server failure.
-2. Compare the source items the pull touched with their destination copies and
-   the saved snapshots. The destination may hold content the source lost.
-   Bypassing the hold and retrying can mistake missing data for a source edit.
-3. Make the source hold what it should. A source item the pull added and left
-   unfinished can hold edits made in the source since. Copy those into its
-   destination item first. Then permanently delete the source item if its
-   destination item has no `vault-mirror` field. Moving it to trash keeps its
-   unfinished marker and still blocks recovery. The next pull adds it again.
-   For any other item the pull touched, correct its content and files in the source.
-   Then remove the source item's `vault-mirror` field.
-4. After checking the reconciled items and files, remove only
-   `backups/pull-cleanup-hold.json`. Inspect a dry run before an actual run, and
-   restart scheduling only after verification.
-
-A separate `restore-hold.json` still requires its own reconciliation. The hold
-protects only runs that use this backup directory. Another installation, a
-different `BACKUPS_DIR`, or a program that calls the library's pull itself does
-not see it. Damage that an older version already copied into the destination
-cannot be detected afterwards.
 
 ## Restore without vault-mirror
 

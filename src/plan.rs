@@ -61,23 +61,6 @@ impl Marker {
         valid.then_some(marker)
     }
 
-    /// The attachments were still being copied when the marker was written.
-    pub fn files_pending(&self) -> bool {
-        self.source_files == UNKNOWN || self.dest_files == UNKNOWN
-    }
-
-    /// `item`, in a folder or collections with these names, is as it was
-    /// when the marker was written.
-    pub fn content_matches(
-        &self,
-        item: &Item,
-        folder: Option<&str>,
-        collections: &[String],
-        mode: Mode,
-    ) -> bool {
-        self.content == content_hash(item, folder, collections, mode)
-    }
-
     fn render(&self) -> String {
         format!(
             "{} {} {} {}",

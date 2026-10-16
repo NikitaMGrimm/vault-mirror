@@ -468,7 +468,6 @@ async fn a_pull_leaves_out_items_in_no_collection_that_the_source_refuses() -> R
         &source_vault,
         &dest_vault,
         &MirrorOptions::default(),
-        true,
         &Capture::default(),
     )
     .await?;

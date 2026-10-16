@@ -61,7 +61,7 @@ but a compromised running process can still capture the vault it decrypts.
 | `state.json` | The device ids vault-mirror logs in with. | None. |
 | `run.lock` | Nothing. It's locked while a run or restore is using the directory. | None. |
 | `restore-hold.json` | A local hold that stops mirroring after a native restore. | None. |
-| `pull-cleanup-hold.json` | A local hold retained when a pull is interrupted or cannot be verified. | None. |
+| `unfinished-pull` | Nothing. It's there while a pull has not finished. | None. |
 
 On Unix, backup and state files are readable only by their owner. With
 `BACKUP_PASSPHRASE`, snapshots and attachments are encrypted to the backup key in

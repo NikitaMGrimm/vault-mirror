@@ -77,55 +77,33 @@ vault-mirror also compares the content itself, so:
 ### After an outage
 
 The destination is there for when the source is down. If you add or change
-items in it meanwhile, stop the daemon before making those fallback edits:
+items in it meanwhile, stop the daemon first, so that no run overwrites your
+changes as soon as the source is back:
 
 ```sh
 docker compose stop vault-mirror
 ```
 
-Pause any other scheduler too. Otherwise an ordinary run can overwrite your
-edits as soon as the source returns. Bring them back with one explicit pull
-before restarting scheduling:
+Once the source is back, bring your changes over with one pull, and start the
+daemon again:
 
 ```sh
 docker compose run --rm vault-mirror run --pull
+docker compose up -d
 ```
 
-After backing up both vaults, the run copies into the source what changed in
-the destination since vault-mirror wrote it:
+After backing up both vaults, the pull copies into the source:
 
-- a copy you edited replaces its original, with a warning if the original
-  changed too. Its folder comes along; changes to its collections don't;
-- an item you added in the destination is added to the source, in a folder or
-  collections of the same name. So is any other item there that vault-mirror
-  didn't make, such as one that was in the destination before the first run.
-  With a filter, only selected items and collection memberships are added.
+- every copy you changed, over its source item, with a warning if that
+  changed too. Its folder comes along; its collections don't. A copy whose
+  source item is gone is added back.
+- every item vault-mirror didn't make, in a folder or collections of the same
+  name.
 
-The complete pull is checked before either vault changes. An edited tracked
-copy stops it if its original is absent or trashed, its current or proposed
-placement is outside the filter, or the source cannot preserve the recovered
-data. Required uploads into a personal source need Premium. A warning and skip
-is safe only for untouched untracked additions that the mirror leaves alone.
-
-Export the destination before resolving a refused recovery. To preserve a copy
-independently, remove its marker deliberately. A run without `--pull` still
-lets the source win. After source writes, the pull verifies its intended
-content and placement before the forward mirror can use it. A run without
-`--pull` stops at a source item the pull did not finish, even when its filter
-excludes that item.
-
-Then it mirrors as usual. A pull removes no items: an item you deleted in the
-destination is still in the source, and the mirror copies it back, so delete it
-in the source if you meant it. Recovered source items have their completed
-pull markers removed. Excluded items are left alone. With `--dry-run`, the run
-only counts what it would copy into the source. After verifying the actual
-run's result, resume with
-`docker compose up -d`.
-
-Marker cleanup is verified too. An actual pull takes `pull-cleanup-hold.json`
-before it writes, and keeps it unless the pull, the mirror and the cleanup all
-succeed. A failed run leaves it, which pauses mirroring until you
-[reconcile the recovered items](backups.md#resume-after-an-interrupted-pull).
+Then it mirrors as usual. A pull deletes nothing, so an item you deleted in
+the destination comes back from the source. With a filter, only what the
+filter selects is pulled. If a pull stops partway, runs without `--pull`
+refuse to start until one finishes.
 
 ### Switching the source and destination
 

@@ -16,8 +16,8 @@ use crate::{
     api::{self, ApiCredentials, ClientOptions, ServerUrls, build_http_client},
     backup::{BackupOptions, BackupReport, backup_loaded},
     config::{Config, VaultConfig},
-    mirror::{Endpoint, MirrorOptions, Reporter, mirror_after_pull, mirror_onto, pull, unmark},
-    plan::{Safety, Summary, marker_of},
+    mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto, pull},
+    plan::{Safety, Summary},
     store::{self, Keys, Store},
     text::count,
     vault::{Account, Scope},
@@ -27,7 +27,8 @@ pub const STATUS_FILE: &str = "last-run.json";
 const STATE_FILE: &str = "state.json";
 const LOCK_FILE: &str = "run.lock";
 const RESTORE_HOLD_FILE: &str = "restore-hold.json";
-const PULL_HOLD_FILE: &str = "pull-cleanup-hold.json";
+/// Present while a `run --pull` has not finished its pull.
+const UNFINISHED_PULL_FILE: &str = "unfinished-pull";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunFlags {
@@ -193,28 +194,15 @@ pub fn hold_after_restore(backups_dir: &Path) -> Result<()> {
 }
 
 fn check_recovery_holds(backups_dir: &Path) -> Result<()> {
-    for (file, reason) in [
-        (RESTORE_HOLD_FILE, "restored items are independent"),
-        (
-            PULL_HOLD_FILE,
-            "a pull was interrupted or could not be verified",
-        ),
-    ] {
-        let path = backups_dir.join(file);
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("checking {}", path.display()));
-            }
-            Ok(_) => {
-                return Err(anyhow!(
-                    "mirroring is paused by {}; {reason}. Stop scheduling and follow the recovery reconciliation steps in docs/backups.md before removing this hold",
-                    path.display()
-                ));
-            }
-        }
+    let path = backups_dir.join(RESTORE_HOLD_FILE);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("checking {}", path.display())),
+        Ok(_) => Err(anyhow!(
+            "mirroring is paused by {}; restored items are independent. Stop scheduling and follow the recovery reconciliation steps in docs/backups.md before removing this hold",
+            path.display()
+        )),
     }
-    Ok(())
 }
 
 pub fn http_client(config: &Config) -> Result<reqwest::Client> {
@@ -334,9 +322,18 @@ async fn execute(
     progress: &mut Progress,
     now: OffsetDateTime,
 ) -> Result<()> {
+    let unfinished_pull = config.backups_dir.join(UNFINISHED_PULL_FILE);
     if config.dest.is_some() {
         progress.stage = "recovery hold";
         check_recovery_holds(&config.backups_dir)?;
+        // Destination items the pull didn't get to still hold changes that a
+        // run without it would overwrite.
+        if !flags.pull && unfinished_pull.exists() {
+            bail!(
+                "the last run --pull stopped before it finished, and this run would overwrite \
+                 what it had still to bring back. Run with --pull again"
+            );
+        }
     }
     progress.stage = "backup metadata";
     store::migrate_metadata(&config.backups_dir)?;
@@ -416,7 +413,7 @@ async fn execute(
         dry_run: flags.dry_run,
         safety: Safety {
             allow_mass_delete: flags.allow_mass_delete,
-            allow_reverse: flags.reverse || flags.pull,
+            allow_reverse: flags.reverse,
             ..config.safety.clone()
         },
         concurrency: config.concurrency,
@@ -425,87 +422,41 @@ async fn execute(
         dest_backed_up: dest_vault.is_some(),
     };
 
-    let mut cleanup_source_ids = Default::default();
-    let pull_hold = config.backups_dir.join(PULL_HOLD_FILE);
     if flags.pull {
         progress.stage = "pull";
-        let backed_up = source_vault.is_some();
         let source_vault = match source_vault {
             Some(vault) => vault,
             None => source.account.load(&source.scope).await?,
         };
-        let dest_vault = match &dest_vault {
-            Some(vault) => vault.clone(),
+        let loaded = match dest_vault.take() {
+            Some(vault) => vault,
             None => dest.account.load(&dest.scope).await?,
         };
-        // A pull that fails after a source write can leave the source holding
-        // only part of an item. The next pull would take that for an edit made
-        // in the source and copy the loss into the destination, so the hold
-        // is taken before the first write and kept until the whole run has
-        // been verified.
         if !flags.dry_run {
-            store::write_private_new(&pull_hold, b"{\"format\":1}\n")
-                .with_context(|| format!("persisting {} before the pull", pull_hold.display()))?;
-            // A pending marker no hold covers was left by an older version or
-            // by a direct caller of `pull`.
-            if let Some(item) = source_vault.items.iter().find(|item| {
-                !item.in_trash && marker_of(item).is_some_and(|marker| marker.files_pending())
-            }) {
-                bail!(
-                    "source item {} was left unfinished by a pull that no hold covers; mirroring is paused by {}. Reconcile the vaults using docs/backups.md before removing this hold",
-                    item.id,
-                    pull_hold.display()
-                );
-            }
+            store::write_private(&unfinished_pull, b"")?;
         }
-        let pulled = pull(
-            &source,
-            &dest,
-            &source_vault,
-            &dest_vault,
-            &options,
-            backed_up,
-            reporter,
-        )
-        .await;
-        let pulled = match flags.dry_run {
-            true => pulled?,
-            false => pulled.with_context(|| format!("mirroring is paused by {}; reconcile the vaults using docs/backups.md before removing this hold", pull_hold.display()))?,
-        };
+        let pulled = pull(&source, &dest, &source_vault, &loaded, &options, reporter).await?;
         progress.status.pulled = Some(SummaryRecord {
             changed: !flags.dry_run && pulled.summary != Summary::default(),
             summary: pulled.summary,
         });
         progress.status.warnings.extend(pulled.warnings);
-        cleanup_source_ids = pulled.cleanup_source_ids;
         if flags.dry_run {
             return Ok(());
         }
+        fs::remove_file(&unfinished_pull)
+            .with_context(|| format!("removing {}", unfinished_pull.display()))?;
     }
 
     progress.stage = "mirror";
-    let outcome = if flags.pull {
-        mirror_after_pull(
-            &source,
-            &dest,
-            dest_vault,
-            &options,
-            reporter,
-            &cleanup_source_ids,
-        )
-        .await
-    } else {
-        mirror_onto(&source, &dest, dest_vault, &options, reporter).await
-    };
-    let cleanup_source_items;
-    match outcome {
+    match mirror_onto(&source, &dest, dest_vault, &options, reporter).await {
         Ok(outcome) => {
-            cleanup_source_items = outcome.cleanup_source_items;
             progress.status.mirror = Some(SummaryRecord {
                 changed: outcome.changed,
                 summary: outcome.summary,
             });
             progress.status.warnings.extend(outcome.warnings);
+            Ok(())
         }
         Err(error) => {
             progress.stage = error.stage;
@@ -513,23 +464,9 @@ async fn execute(
                 changed: false,
                 summary,
             });
-            return Err(error.source);
+            Err(error.source)
         }
     }
-
-    if flags.pull && !cleanup_source_items.is_empty() {
-        progress.stage = "removing markers from the source";
-        let unmarked = unmark(&source, &dest, &cleanup_source_items, config.concurrency).await
-            .with_context(|| format!("mirroring remains paused by {}; reconcile the vaults using docs/backups.md before removing this hold", pull_hold.display()))?;
-        if unmarked > 0 {
-            reporter.status("Unmarked", &count(unmarked, "source item"));
-        }
-    }
-    if flags.pull {
-        fs::remove_file(&pull_hold).with_context(|| format!("removing {}", pull_hold.display()))?;
-        store::sync_dir(&config.backups_dir)?;
-    }
-    Ok(())
 }
 
 pub fn status_path(backups_dir: &Path) -> PathBuf {
@@ -850,46 +787,59 @@ mod tests {
         assert!(!status_path(dir.path()).exists());
     }
 
+    fn mirror_config(dir: &Path) -> Config {
+        let env = [
+            ("SOURCE_SERVER", "invalid-server-url"),
+            ("SOURCE_CLIENT_ID", "user.source"),
+            ("SOURCE_CLIENT_SECRET", "synthetic-secret"),
+            ("SOURCE_PASSWORD", "synthetic-password"),
+            ("DEST_SERVER", "invalid-server-url"),
+            ("DEST_CLIENT_ID", "user.dest"),
+            ("DEST_CLIENT_SECRET", "synthetic-secret"),
+            ("DEST_PASSWORD", "synthetic-password"),
+            ("BACKUP_ENABLED", "false"),
+            ("BACKUPS_DIR", dir.to_str().unwrap()),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        Config::from_env(&env).unwrap()
+    }
+
     #[tokio::test]
-    async fn recovery_holds_stop_mirroring_before_login_even_with_overrides() {
-        for name in [RESTORE_HOLD_FILE, PULL_HOLD_FILE] {
-            let dir = tempfile::tempdir().unwrap();
-            fs::write(dir.path().join(name), b"{}").unwrap();
-            let env = [
-                ("SOURCE_SERVER", "invalid-server-url"),
-                ("SOURCE_CLIENT_ID", "user.source"),
-                ("SOURCE_CLIENT_SECRET", "synthetic-secret"),
-                ("SOURCE_PASSWORD", "synthetic-password"),
-                ("DEST_SERVER", "invalid-server-url"),
-                ("DEST_CLIENT_ID", "user.dest"),
-                ("DEST_CLIENT_SECRET", "synthetic-secret"),
-                ("DEST_PASSWORD", "synthetic-password"),
-                ("BACKUP_ENABLED", "false"),
-                ("BACKUPS_DIR", dir.path().to_str().unwrap()),
-            ]
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect();
-            let mut config = Config::from_env(&env).unwrap();
-            let status = run_once(
-                &config,
-                RunFlags {
-                    allow_mass_delete: true,
-                    reverse: true,
-                    pull: true,
-                    ..RunFlags::default()
-                },
-                &Quiet,
-            )
-            .await;
-            assert_eq!(status.failure_stage.as_deref(), Some("recovery hold"));
-            assert!(status.error.unwrap().contains(name));
-            assert!(!dir.path().join("key.age").exists());
-            config.dest = None;
-            let status = run_once(&config, RunFlags::default(), &Quiet).await;
-            assert_eq!(status.failure_stage.as_deref(), Some("source login"));
-            assert!(dir.path().join(name).is_file());
-        }
+    async fn a_restore_hold_stops_mirroring_before_login_even_with_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(RESTORE_HOLD_FILE), b"{}").unwrap();
+        let mut config = mirror_config(dir.path());
+        let flags = RunFlags {
+            allow_mass_delete: true,
+            reverse: true,
+            pull: true,
+            ..RunFlags::default()
+        };
+        let status = run_once(&config, flags, &Quiet).await;
+        assert_eq!(status.failure_stage.as_deref(), Some("recovery hold"));
+        assert!(status.error.unwrap().contains(RESTORE_HOLD_FILE));
+        config.dest = None;
+        let status = run_once(&config, RunFlags::default(), &Quiet).await;
+        assert_eq!(status.failure_stage.as_deref(), Some("source login"));
+    }
+
+    #[tokio::test]
+    async fn an_unfinished_pull_lets_only_another_pull_run() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(UNFINISHED_PULL_FILE), b"").unwrap();
+        let config = mirror_config(dir.path());
+        let refused = run_once(&config, RunFlags::default(), &Quiet).await;
+        assert_eq!(refused.failure_stage.as_deref(), Some("recovery hold"));
+        assert!(refused.error.unwrap().contains("--pull"));
+        let pull = RunFlags {
+            pull: true,
+            ..RunFlags::default()
+        };
+        let status = run_once(&config, pull, &Quiet).await;
+        assert_eq!(status.failure_stage.as_deref(), Some("source login"));
+        assert!(dir.path().join(UNFINISHED_PULL_FILE).exists());
     }
 
     #[test]

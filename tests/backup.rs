@@ -11,7 +11,7 @@ use vault_mirror::{
     config::Config,
     mirror::Endpoint,
     node::Node,
-    plan::{Mode, mark_copy, marker_of},
+    plan::marker_of,
     restore::{RestoreOptions, restore},
     snapshot,
     store::{Keys, Protection, Retention, Store},
@@ -573,10 +573,10 @@ async fn a_pull_leaves_out_items_the_source_would_not_show() -> Result<()> {
     Ok(())
 }
 
-/// An older interrupted pull can leave source edits beside a pending marker.
-/// Recovery holds preserve them until the operator reconciles both vaults.
+/// A copy edited in the destination whose source item is gone goes back into
+/// the source as a new item, instead of being deleted by the mirror.
 #[tokio::test]
-async fn an_unfinished_pull_holds_until_source_edits_are_reconciled() -> Result<()> {
+async fn a_pull_brings_back_an_edited_copy_whose_source_item_is_gone() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
@@ -591,95 +591,38 @@ async fn an_unfinished_pull_holds_until_source_edits_are_reconciled() -> Result<
     let run = |flags| app::run_once(&config, flags, &capture);
     assert!(run(RunFlags::default()).await.succeeded());
 
-    let mut content = fixtures::named("Bare login without folder").content;
-    content.insert("name".into(), Node::secret("Added during the outage"));
-    let added = dest
-        .create_item(
-            &PERSONAL,
-            &Draft {
-                content,
-                folder_id: None,
-                collection_ids: vec![],
-            },
-        )
-        .await?;
-    dest.upload_attachment(&PERSONAL, &added, "outage.txt", b"made during the outage")
-        .await?;
-    // What the stopped pull left: the item, marked as still waiting for its
-    // files, and edited in the source since.
-    let mut edited = added.clone();
+    let vault = dest.load(&PERSONAL).await?;
+    let copy = by_name(&vault, "Visa");
+    let mut edited = Draft {
+        content: copy.content.clone(),
+        folder_id: copy.folder_id.clone(),
+        collection_ids: vec![],
+    };
     edited
         .content
-        .insert("notes".into(), Node::secret("edited in the source"));
-    let unfinished = source
-        .create_item(
-            &PERSONAL,
-            &Draft {
-                content: mark_copy(&edited, &added, None, &[], Mode::Personal, None),
-                folder_id: None,
-                collection_ids: vec![],
-            },
-        )
+        .insert("notes".into(), Node::secret("edited during the outage"));
+    dest.update_item(&PERSONAL, copy, &edited).await?;
+    let originals = source.load(&PERSONAL).await?;
+    source
+        .delete_items(&[by_name(&originals, "Visa").id.clone()])
         .await?;
 
-    let before_source = source.load(&PERSONAL).await?;
-    let before_dest = dest.load(&PERSONAL).await?;
-    let flags = RunFlags {
+    let pulled = run(RunFlags {
         pull: true,
         ..RunFlags::default()
-    };
-    let refused = run(flags).await;
-    assert!(!refused.succeeded(), "{refused:?}");
-    assert_eq!(refused.failure_stage.as_deref(), Some("pull"));
-    let hold = dir.path().join("pull-cleanup-hold.json");
-    assert!(hold.is_file());
-    assert!(source.load(&PERSONAL).await?.items == before_source.items);
-    assert!(dest.load(&PERSONAL).await?.items == before_dest.items);
-
-    let copy = by_name(&before_dest, "Added during the outage");
-    let mut reconciled = copy.content.clone();
-    reconciled.insert("notes".into(), unfinished.content["notes"].clone());
-    dest.update_item(
-        &PERSONAL,
-        copy,
-        &Draft {
-            content: reconciled,
-            folder_id: copy.folder_id.clone(),
-            collection_ids: copy.collection_ids.clone(),
-        },
-    )
-    .await?;
-    source.delete_items(&[unfinished.id]).await?;
-    std::fs::remove_file(&hold)?;
-    let pulled = run(flags).await;
+    })
+    .await;
     assert!(pulled.succeeded(), "{pulled:?}");
-    assert!(!hold.exists());
     assert_eq!(pulled.pulled.as_ref().unwrap().summary.items_created, 1);
-    for (account, vault) in [
-        (&source, source.load(&PERSONAL).await?),
-        (&dest, dest.load(&PERSONAL).await?),
-    ] {
-        let named: Vec<_> = (vault.items.iter())
-            .filter(|item| item.name() == "Added during the outage")
-            .collect();
-        assert_eq!(named.len(), 1);
-        assert!(
-            named[0].content["notes"].as_str() == Some("edited in the source"),
-            "reconciliation lost the surviving source edit"
-        );
-        let [attachment] = named[0].attachments.as_slice() else {
-            panic!("expected one attachment");
-        };
-        let data = account
-            .download_attachment(&PERSONAL, named[0], attachment)
-            .await?;
-        assert!(
-            data == b"made during the outage",
-            "reconciliation changed the file"
+    assert!(!dir.path().join("unfinished-pull").exists());
+    for vault in [source.load(&PERSONAL).await?, dest.load(&PERSONAL).await?] {
+        assert_eq!(
+            by_name(&vault, "Visa").content["notes"].as_str(),
+            Some("edited during the outage")
         );
     }
-    let back = source.load(&PERSONAL).await?;
-    assert!(back.items.iter().all(|item| marker_of(item).is_none()));
+    let again = run(RunFlags::default()).await;
+    assert!(!again.mirror.as_ref().unwrap().changed, "{again:?}");
     Ok(())
 }
 
