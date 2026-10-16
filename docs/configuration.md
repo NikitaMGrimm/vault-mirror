@@ -79,11 +79,8 @@ file.
 | `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After each run, `POST` a one-line summary here. Works with [ntfy](https://ntfy.sh), [healthchecks.io](https://healthchecks.io), Gotify and anything else that accepts a plain-text `POST`. The summary has counts and error messages, never vault content. A delivery failure is a warning. |
 | `CA_CERT_FILE` | | A PEM file of extra certificate authorities to trust, for a server with a private CA. |
 
-When `CA_CERT_FILE` is set during `init`, the settings file keeps its absolute
-path for native runs. Generated Compose settings mount it read-only at
-`/ca.pem` and override the path inside the container. If you run `init` in
-Docker, keep the certificate inside the mounted working directory. For example,
-pass `-e CA_CERT_FILE=/work/ca.pem` when that directory is mounted at `/work`.
+In Docker, mount the certificate into the container and set `CA_CERT_FILE` to
+its path there.
 
 ## Setting up by hand
 
