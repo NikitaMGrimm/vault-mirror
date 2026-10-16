@@ -4,6 +4,12 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.6.1](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.6.0...v0.6.1) - 2026-10-16
+
+### Fixed
+
+- protect vault data during pull recovery
+
 ## [0.6.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.5.3...v0.6.0) - 2026-10-16
 
 ### Fixed
