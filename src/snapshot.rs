@@ -263,7 +263,7 @@ pub fn parse(document: &Value) -> Result<Restorable> {
                     bail!("its list of clear text names a value it does not have");
                 }
             }
-            let Node::Map(tree) = Node::from_plain(value, Some(paths)) else {
+            let Node::Map(tree) = Node::from_plain(value, paths) else {
                 unreachable!("an object reads as a map")
             };
             // In an organization's document the folder is the account's
