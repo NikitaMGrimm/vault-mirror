@@ -24,8 +24,6 @@ pub struct BackupReport {
 }
 
 pub struct BackupOptions<'a> {
-    /// Store attachment content, not only a record of each attachment.
-    pub attachments: bool,
     pub retention: Option<&'a Retention>,
     pub now: OffsetDateTime,
 }
@@ -61,9 +59,7 @@ pub async fn backup_loaded(
     let mut files = Vec::new();
     for item in &live {
         for attachment in &item.attachments {
-            if options.attachments {
-                files.push((records.len(), *item, attachment));
-            }
+            files.push((records.len(), *item, attachment));
             records.push(SnapshotAttachment {
                 item_id: item.id.clone(),
                 attachment_id: attachment.id.clone(),
@@ -76,7 +72,7 @@ pub async fn backup_loaded(
     // An attachment's content never changes under one id, so the records
     // tell whether the newest snapshot holds this vault before any download.
     let planned = snapshot::build(vault, scope, &records)?;
-    let (snapshot, downloaded) = match store.unchanged(&origin, &planned, options.attachments)? {
+    let (snapshot, downloaded) = match store.unchanged(&origin, &planned)? {
         Some(_) => {
             reporter.status(
                 "Skipped",

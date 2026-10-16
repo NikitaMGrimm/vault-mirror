@@ -67,14 +67,8 @@ pub struct MirrorOptions {
     pub safety: Safety,
     /// How many item writes run at once.
     pub concurrency: usize,
-    /// Download every copied attachment from the destination again and
-    /// compare it with what was read from the source.
-    pub verify_attachments: bool,
     /// The folders, or in an organization the collections, to mirror.
     pub filter: Filter,
-    /// A backup of the destination was saved before this mirror, so it holds
-    /// whatever the mirror replaces.
-    pub dest_backed_up: bool,
 }
 
 /// Names of folders, or of collections in an organization, that select what
@@ -151,9 +145,7 @@ impl Default for MirrorOptions {
             dry_run: false,
             safety: Safety::default(),
             concurrency: 4,
-            verify_attachments: true,
             filter: Filter::default(),
-            dest_backed_up: false,
         }
     }
 }
@@ -464,7 +456,7 @@ impl Puller<'_> {
         let (stored, copied) = match files {
             true => {
                 let old: Vec<String> = written.attachments.iter().map(|a| a.id.clone()).collect();
-                copy_attachments((dest, copy), (source, &written), &old, true, mode).await?
+                copy_attachments((dest, copy), (source, &written), &old, mode).await?
             }
             false => (reread(source, &written, mode).await?, 0),
         };
@@ -529,14 +521,13 @@ async fn source_folder(
 }
 
 /// Replaces the attachments `old` of `to`'s item, as this run last wrote it,
-/// with copies of `from`'s. The copies are uploaded and checked before `old`
+/// with copies of `from`'s. The copies are uploaded and read back before `old`
 /// is deleted, so a failed upload leaves the files it was replacing. Returns
 /// the item as the server then holds it, and how many files it copied.
 async fn copy_attachments(
     (from, from_item): (&Endpoint<'_>, &Item),
     (to, to_item): (&Endpoint<'_>, &Item),
     old: &[String],
-    verify: bool,
     mode: Mode,
 ) -> Result<(Item, usize)> {
     let mut copied = Vec::new();
@@ -563,20 +554,16 @@ async fn copy_attachments(
         ));
     }
     if !copied.is_empty() {
-        // Checked whatever `verify` says before the files they replace go.
-        let read = !old.is_empty() || verify;
         let uploaded = reread(to, to_item, mode).await?;
         for (id, name, digest) in &copied {
             let found = uploaded.attachments.iter().find(|a| a.id == *id);
             let matches = match found {
                 Some(attachment) if attachment.file_name == *name => {
-                    !read || {
-                        let data = to
-                            .account
-                            .download_attachment(&to.scope, &uploaded, attachment)
-                            .await?;
-                        <[u8; 32]>::from(Sha256::digest(&data)) == *digest
-                    }
+                    let data = to
+                        .account
+                        .download_attachment(&to.scope, &uploaded, attachment)
+                        .await?;
+                    <[u8; 32]>::from(Sha256::digest(&data)) == *digest
                 }
                 _ => false,
             };
@@ -882,13 +869,10 @@ impl Run<'_> {
         let changed = plan.updates.iter().filter(|u| u.changed_in_dest()).count();
         if changed > 0 {
             let them = if changed == 1 { "it" } else { "them" };
-            let kept = match self.options.dest_backed_up {
-                true => " Your changes are in the destination backup from the start of this run.",
-                false => "",
-            };
             self.warn(format!(
                 "{} changed in the destination since vault-mirror wrote {them}. A run replaces \
-                 {them} with the source version, so make lasting changes in the source.{kept}",
+                 {them} with the source version, so make lasting changes in the source. Your \
+                 changes are in the destination backup from the start of this run.",
                 count(changed, "copy")
             ));
         }
@@ -1033,7 +1017,6 @@ impl Run<'_> {
                 transfers.push((update.entry, item, old_attachment_ids));
             }
         }
-        let verify_attachments = self.options.verify_attachments;
         let uploads = Tally::new(
             self.reporter,
             "Copying",
@@ -1058,7 +1041,6 @@ impl Run<'_> {
                         (source, source_item),
                         (dest, dest_item),
                         &old_attachment_ids,
-                        verify_attachments,
                         mode,
                     )
                     .await?;

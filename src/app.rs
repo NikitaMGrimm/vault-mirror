@@ -286,15 +286,11 @@ async fn execute(
     progress.stage = "backup metadata";
     store::migrate_metadata(&config.backups_dir)?;
     let http = http_client(config)?;
-    let keys = match &config.backup {
-        Some(backup) => Some(Keys::open(&config.backups_dir, &backup.protection)?),
-        None => None,
-    };
-    let backup_options = config.backup.as_ref().map(|backup| BackupOptions {
-        attachments: backup.attachments,
-        retention: backup.retention.as_ref(),
+    let keys = Keys::open(&config.backups_dir, &config.backup.protection)?;
+    let backup_options = BackupOptions {
+        retention: config.backup.retention.as_ref(),
         now,
-    });
+    };
 
     for warning in config
         .vaults()
@@ -306,23 +302,26 @@ async fn execute(
     progress.stage = "source login";
     let source = open_account(&config.backups_dir, &http, &config.source, "source").await?;
     let source_scope = scope_of(&config.source);
+    progress.stage = "source backup";
+    reporter.status("Backing up", "the source vault");
+    let store = Store::open(&config.backups_dir, "source", &keys)?;
     // A pull writes to the source, and changes only what this backup holds.
-    let mut source_vault = None;
-    if let (Some(keys), Some(options)) = (&keys, &backup_options) {
-        progress.stage = "source backup";
-        reporter.status("Backing up", "the source vault");
-        let store = Store::open(&config.backups_dir, "source", keys)?;
-        let vault = source
-            .load(&source_scope)
-            .await
-            .context("reading the vault")?;
-        progress.status.source_backup = Some(
-            backup_loaded(&source, &source_scope, &vault, &store, options, reporter)
-                .await?
-                .into(),
-        );
-        source_vault = Some(vault);
-    }
+    let source_vault = source
+        .load(&source_scope)
+        .await
+        .context("reading the vault")?;
+    progress.status.source_backup = Some(
+        backup_loaded(
+            &source,
+            &source_scope,
+            &source_vault,
+            &store,
+            &backup_options,
+            reporter,
+        )
+        .await?
+        .into(),
+    );
 
     let Some(dest_config) = &config.dest else {
         return Ok(());
@@ -334,20 +333,23 @@ async fn execute(
     // be the only copy: one the source never had, one changed in the
     // destination, or one in a vault this tool did not fill. The mirror is
     // about to delete or replace such files.
-    let mut dest_vault = None;
-    if let (Some(keys), Some(options)) = (&keys, &backup_options) {
-        progress.stage = "destination backup";
-        reporter.status("Backing up", "the destination vault");
-        let store = Store::open(&config.backups_dir, "dest", keys)?;
-        let vault = dest.load(&dest_scope).await.context("reading the vault")?;
-        progress.status.dest_backup = Some(
-            backup_loaded(&dest, &dest_scope, &vault, &store, options, reporter)
-                .await?
-                .into(),
-        );
-        // The mirror changes only what this backup holds.
-        dest_vault = Some(vault);
-    }
+    progress.stage = "destination backup";
+    reporter.status("Backing up", "the destination vault");
+    let store = Store::open(&config.backups_dir, "dest", &keys)?;
+    // The mirror changes only what this backup holds.
+    let dest_vault = dest.load(&dest_scope).await.context("reading the vault")?;
+    progress.status.dest_backup = Some(
+        backup_loaded(
+            &dest,
+            &dest_scope,
+            &dest_vault,
+            &store,
+            &backup_options,
+            reporter,
+        )
+        .await?
+        .into(),
+    );
 
     let source = Endpoint {
         account: &source,
@@ -365,21 +367,14 @@ async fn execute(
             ..config.safety.clone()
         },
         concurrency: config.concurrency,
-        verify_attachments: config.verify_attachments,
         filter: config.filter.clone(),
-        dest_backed_up: dest_vault.is_some(),
     };
 
+    // After a pull, the mirror reads the destination again.
+    let mut dest_vault = Some(dest_vault);
     if flags.pull {
         progress.stage = "pull";
-        let source_vault = match source_vault {
-            Some(vault) => vault,
-            None => source.account.load(&source.scope).await?,
-        };
-        let loaded = match dest_vault.take() {
-            Some(vault) => vault,
-            None => dest.account.load(&dest.scope).await?,
-        };
+        let loaded = dest_vault.take().unwrap_or_default();
         if !flags.dry_run {
             store::write_private(&unfinished_pull, b"")?;
         }
@@ -715,7 +710,7 @@ mod tests {
             ("DEST_CLIENT_ID", "user.dest"),
             ("DEST_CLIENT_SECRET", "synthetic-secret"),
             ("DEST_PASSWORD", "synthetic-password"),
-            ("BACKUP_ENABLED", "false"),
+            ("BACKUP_PASSPHRASE", "synthetic-passphrase"),
             ("BACKUPS_DIR", dir.path().to_str().unwrap()),
         ]
         .into_iter()
@@ -745,7 +740,7 @@ mod tests {
             ("DEST_CLIENT_ID", "user.dest"),
             ("DEST_CLIENT_SECRET", "synthetic-secret"),
             ("DEST_PASSWORD", "synthetic-password"),
-            ("BACKUP_ENABLED", "false"),
+            ("BACKUP_PASSPHRASE", "synthetic-passphrase"),
             ("BACKUPS_DIR", dir.to_str().unwrap()),
         ]
         .into_iter()
@@ -757,8 +752,10 @@ mod tests {
     #[tokio::test]
     async fn an_unfinished_pull_lets_only_another_pull_run() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(UNFINISHED_PULL_FILE), b"").unwrap();
         let config = mirror_config(dir.path());
+        // The pull that stopped had backed up first.
+        Keys::open(dir.path(), &config.backup.protection).unwrap();
+        fs::write(dir.path().join(UNFINISHED_PULL_FILE), b"").unwrap();
         let refused = run_once(&config, RunFlags::default(), &Quiet).await;
         assert_eq!(refused.failure_stage.as_deref(), Some("unfinished pull"));
         assert!(refused.error.unwrap().contains("--pull"));

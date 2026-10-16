@@ -2,7 +2,7 @@
 
 [← Documentation](README.md)
 
-Backups are on by default. Every run backs up the whole source and destination
+Every run backs up the whole source and destination
 scope before changing either vault. Folder and collection filters limit copying,
 not backups. The encrypted files use the standard [age](https://age-encryption.org)
 format, so recovery does not require vault-mirror or either server.
@@ -135,7 +135,7 @@ leaves what it created; retrying with `--allow-non-empty` can create duplicates.
 `snapshots` needs only `BACKUPS_DIR`. `export` additionally needs the existing
 backup passphrase or `--identity`. Restore additionally needs only the chosen
 target account and transport settings. Unavailable credentials for the other
-vault do not block recovery. `BACKUP_ENABLED=false` does not prevent reading.
+vault do not block recovery.
 
 Without Docker, replace `docker compose run --rm vault-mirror` with
 `vault-mirror --env-file vault-mirror.env`. Mount an identity file read-only

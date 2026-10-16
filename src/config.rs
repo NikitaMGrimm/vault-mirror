@@ -27,7 +27,6 @@ pub struct VaultConfig {
 #[derive(Clone)]
 pub struct BackupConfig {
     pub protection: Protection,
-    pub attachments: bool,
     /// `None` when pruning is switched off.
     pub retention: Option<Retention>,
 }
@@ -45,11 +44,9 @@ pub struct Config {
     /// Absent for a backup-only setup.
     pub dest: Option<VaultConfig>,
     pub backups_dir: PathBuf,
-    /// `None` when backups are switched off.
-    pub backup: Option<BackupConfig>,
+    pub backup: BackupConfig,
     pub safety: Safety,
     pub concurrency: usize,
-    pub verify_attachments: bool,
     pub filter: Filter,
     pub client_version: String,
     pub ca_cert_file: Option<PathBuf>,
@@ -185,7 +182,7 @@ impl Env<'_> {
             (Some(passphrase), true) => Ok(Protection::Passphrase(passphrase)),
             (None, false) => Ok(Protection::Recipients(recipients)),
             (None, true) => Err(ConfigError(
-                "backups need BACKUP_PASSPHRASE or BACKUP_RECIPIENTS; set BACKUP_ENABLED=false to run without backups".into(),
+                "backups need BACKUP_PASSPHRASE or BACKUP_RECIPIENTS".into(),
             )),
         }
     }
@@ -219,30 +216,17 @@ impl Config {
                 ));
         }
 
-        let backup = if env.flag("BACKUP_ENABLED", true)? {
-            let protection = env.protection()?;
-            let retention = if env.flag("ENABLE_PRUNING", true)? {
+        let backup = BackupConfig {
+            protection: env.protection()?,
+            retention: if env.flag("ENABLE_PRUNING", true)? {
                 Some(Retention {
                     days: env.parse("RETENTION_DAYS", 30)?,
                     keep_at_least: env.parse("MIN_FILES", 10)?,
                 })
             } else {
                 None
-            };
-            Some(BackupConfig {
-                protection,
-                attachments: env.flag("BACKUP_ATTACHMENTS", true)?,
-                retention,
-            })
-        } else {
-            None
+            },
         };
-        if dest.is_none() && backup.is_none() {
-            return Err(ConfigError(
-                "nothing to do: no destination vault is configured and backups are switched off"
-                    .into(),
-            ));
-        }
 
         let max_delete_percent: Option<u32> = env
             .get("MAX_DELETE_PERCENT")
@@ -298,7 +282,6 @@ impl Config {
                 ..Safety::default()
             },
             concurrency,
-            verify_attachments: env.flag("VERIFY_ATTACHMENTS", true)?,
             filter,
             client_version: env
                 .get("BITWARDEN_CLIENT_VERSION")
@@ -424,13 +407,11 @@ mod tests {
         assert_eq!(config.source.server, "https://vault.bitwarden.com");
         assert_eq!(config.source.password, " source password ");
         assert_eq!(config.dest.as_ref().unwrap().client_id, "user.dest");
-        let backup = config.backup.unwrap();
         assert!(
-            matches!(backup.protection, Protection::Passphrase(ref p) if p == "backup passphrase")
+            matches!(config.backup.protection, Protection::Passphrase(ref p) if p == "backup passphrase")
         );
-        assert!(backup.attachments);
         assert_eq!(
-            backup.retention,
+            config.backup.retention,
             Some(Retention {
                 days: 30,
                 keep_at_least: 10
@@ -452,14 +433,6 @@ mod tests {
         ]))
         .unwrap();
         assert!(config.dest.is_none());
-        let mut nothing = without(&[
-            "DEST_SERVER",
-            "DEST_CLIENT_ID",
-            "DEST_CLIENT_SECRET",
-            "DEST_PASSWORD",
-        ]);
-        nothing.insert("BACKUP_ENABLED".into(), "false".into());
-        assert!(error(nothing).contains("nothing to do"));
     }
 
     #[test]
@@ -553,7 +526,7 @@ mod tests {
             Some("https://ntfy.example.com/topic")
         );
         assert!(
-            matches!(config.backup.unwrap().protection, Protection::Passphrase(ref p) if p == " backup passphrase\t")
+            matches!(config.backup.protection, Protection::Passphrase(ref p) if p == " backup passphrase\t")
         );
         assert!(error(with(&[("DEST_PASSWORD", "")])).contains("DEST_PASSWORD is not set"));
     }
@@ -570,12 +543,8 @@ mod tests {
         recipients.insert("BACKUP_RECIPIENTS".into(), "age1abc, age1def".into());
         let config = Config::from_env(&recipients).unwrap();
         assert!(
-            matches!(config.backup.unwrap().protection, Protection::Recipients(ref r) if r == &["age1abc", "age1def"])
+            matches!(config.backup.protection, Protection::Recipients(ref r) if r == &["age1abc", "age1def"])
         );
-
-        let mut disabled = without(&["BACKUP_PASSPHRASE"]);
-        disabled.insert("BACKUP_ENABLED".into(), "false".into());
-        assert!(Config::from_env(&disabled).unwrap().backup.is_none());
     }
 
     #[test]
@@ -609,15 +578,11 @@ mod tests {
             ("ENABLE_PRUNING", "false"),
             ("MAX_DELETE_PERCENT", "20"),
             ("CONCURRENCY", "8"),
-            ("VERIFY_ATTACHMENTS", "no"),
-            ("BACKUP_ATTACHMENTS", "0"),
         ]))
         .unwrap();
-        let backup = config.backup.unwrap();
-        assert!(backup.retention.is_none() && !backup.attachments);
+        assert!(config.backup.retention.is_none());
         assert_eq!(config.safety.max_delete_percent, Some(20));
         assert_eq!(config.concurrency, 8);
-        assert!(!config.verify_attachments);
 
         assert!(error(with(&[("MAX_DELETE_PERCENT", "101")])).contains("between 0 and 100"));
         assert!(error(with(&[("CONCURRENCY", "0")])).contains("between 1 and 32"));

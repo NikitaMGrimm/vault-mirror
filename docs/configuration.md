@@ -68,8 +68,6 @@ file.
 | --- | --- | --- |
 | `BACKUP_PASSPHRASE` | | The passphrase that protects the backup key. Backups need this or `BACKUP_RECIPIENTS`. |
 | `BACKUP_RECIPIENTS` | | age public keys (`age1…`), separated by commas or spaces. Backups are encrypted to these keys, so the machine running vault-mirror can't read them back. Restoring then needs `--identity`. |
-| `BACKUP_ENABLED` | `true` | Set to `false` to mirror without backups. |
-| `BACKUP_ATTACHMENTS` | `true` | Store attachment content in the backups, not only their names. |
 | `ENABLE_PRUNING` | `true` | Delete old snapshots. |
 | `RETENTION_DAYS` | `30` | Delete current-group snapshots older than this. Past the last 24 hours, keep the newest of each UTC day. Legacy and inactive encryption groups are preserved. |
 | `MIN_FILES` | `10` | Always keep at least this many newest snapshots of the active vault and encryption group. Identical recipient-only points count separately. |
@@ -84,7 +82,6 @@ file.
 | `TZ` | UTC | The time zone `SCHEDULE` is read in, such as `Europe/Berlin`. |
 | `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After each actual run, `POST` a one-line summary here. Dry runs send no notification. Works with [ntfy](https://ntfy.sh), [healthchecks.io](https://healthchecks.io), Gotify and anything else that accepts a plain-text `POST`. The summary has counts and error messages, never vault content. A delivery failure is a warning. |
 | `CONCURRENCY` | `4` | How many items are written at once, from 1 to 32. |
-| `VERIFY_ATTACHMENTS` | `true` | Download newly copied attachments again and compare their SHA-256 hashes. Replacements are always checked before old files are removed. Pull and restore always verify uploaded bytes. |
 | `CA_CERT_FILE` | | A PEM file of extra certificate authorities to trust, for a server with a private CA. |
 | `BITWARDEN_CLIENT_VERSION` | a recent version | The client version reported to servers. Only change this if a server rejects the default. |
 

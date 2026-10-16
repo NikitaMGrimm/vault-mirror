@@ -144,8 +144,7 @@ pub async fn restore(
     }
     if report.attachments_missing > 0 {
         reporter.warn(&format!(
-            "The backup lacks the content of {} listed in the snapshot, because it was made \
-             with BACKUP_ATTACHMENTS=false.",
+            "The backup lacks the content of {} listed in the snapshot.",
             count(report.attachments_missing, "attachment")
         ));
     }

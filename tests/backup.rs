@@ -28,9 +28,8 @@ fn keys(dir: &Path) -> Keys {
     .unwrap()
 }
 
-fn options(attachments: bool) -> BackupOptions<'static> {
+fn options() -> BackupOptions<'static> {
     BackupOptions {
-        attachments,
         retention: None,
         now: OffsetDateTime::now_utc(),
     }
@@ -105,14 +104,7 @@ async fn a_backup_restores_into_an_identical_vault() -> Result<()> {
     let keys = keys(dir.path());
     let store = Store::open(dir.path(), "source", &keys)?;
 
-    let report = backup(
-        &source,
-        &PERSONAL,
-        &store,
-        &options(true),
-        &Capture::default(),
-    )
-    .await?;
+    let report = backup(&source, &PERSONAL, &store, &options(), &Capture::default()).await?;
     assert_eq!(report.items, fixtures::samples().len() + 12);
     assert_eq!(report.attachments_downloaded, 4);
     assert!(report.snapshot.is_some());
@@ -177,8 +169,8 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
     let store = Store::open(dir.path(), "source", &keys)?;
     let quiet = Capture::default();
 
-    backup(&source, &PERSONAL, &store, &options(true), &quiet).await?;
-    let unchanged = backup(&source, &PERSONAL, &store, &options(true), &quiet).await?;
+    backup(&source, &PERSONAL, &store, &options(), &quiet).await?;
+    let unchanged = backup(&source, &PERSONAL, &store, &options(), &quiet).await?;
     assert_eq!(
         (unchanged.snapshot, unchanged.attachments_downloaded),
         (None, 0)
@@ -193,7 +185,7 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
             b"front and back",
         )
         .await?;
-    let third = backup(&source, &PERSONAL, &store, &options(true), &quiet).await?;
+    let third = backup(&source, &PERSONAL, &store, &options(), &quiet).await?;
     assert!(third.snapshot.is_some());
     assert_eq!(third.attachments_downloaded, 5);
     assert_eq!(store.list()?.len(), 2);
@@ -203,7 +195,6 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
         .delete_items(&[by_name(&vault, "Visa").id.clone()])
         .await?;
     let later = BackupOptions {
-        attachments: true,
         retention: Some(&Retention {
             days: 30,
             keep_at_least: 1,
@@ -214,60 +205,6 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
     assert_eq!(fourth.pruned.snapshots_removed, 2);
     assert_eq!(fourth.pruned.attachments_removed, 9);
     assert_eq!(store.list()?.len(), 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_backup_without_attachment_content_restores_the_items_and_says_what_is_missing()
--> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let source = sandbox
-        .open(&sandbox.register(&sandbox.source_url).await?)
-        .await?;
-    fixtures::seed(&source).await?;
-    let dir = tempfile::tempdir()?;
-    let keys = keys(dir.path());
-    let store = Store::open(dir.path(), "source", &keys)?;
-    let report = backup(
-        &source,
-        &PERSONAL,
-        &store,
-        &options(false),
-        &Capture::default(),
-    )
-    .await?;
-    assert_eq!(report.attachments_downloaded, 0);
-
-    let target = sandbox
-        .open(&sandbox.register(&sandbox.dest_url).await?)
-        .await?;
-    let latest = store.list()?.pop().unwrap();
-    let restorable = snapshot::parse(&store.read_snapshot(&latest.path)?)?;
-    let endpoint = Endpoint {
-        account: &target,
-        scope: PERSONAL,
-    };
-    let capture = Capture::default();
-    let options = RestoreOptions {
-        allow_non_empty: false,
-        concurrency: 4,
-    };
-    let report = restore(&endpoint, &restorable, Some(&store), &options, &capture).await?;
-    assert_eq!(report.items, fixtures::samples().len());
-    assert_eq!(
-        (report.attachments_restored, report.attachments_missing),
-        (0, 4)
-    );
-    assert!(
-        capture
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|line| line.starts_with("warn:") && line.contains("4 attachment"))
-    );
     Ok(())
 }
 
@@ -922,14 +859,7 @@ async fn the_official_cli_imports_a_snapshot() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let keys = keys(dir.path());
     let store = Store::open(dir.path(), "source", &keys)?;
-    backup(
-        &source,
-        &PERSONAL,
-        &store,
-        &options(true),
-        &Capture::default(),
-    )
-    .await?;
+    backup(&source, &PERSONAL, &store, &options(), &Capture::default()).await?;
     let document = store.read_snapshot(&store.list()?.pop().unwrap().path)?;
     let export = dir.path().join("export.json");
     std::fs::write(&export, serde_json::to_vec(&document)?)?;

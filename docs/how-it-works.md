@@ -32,14 +32,13 @@ flowchart LR
    - copy new or changed attachments,
    - move copies whose source item is gone to the trash.
 5. **Verify.** It reads the destination back and compares it with the source.
-   Each copied attachment is downloaded again and checked by its SHA-256 hash
-   when `VERIFY_ATTACHMENTS` is enabled. Replacements are always checked before
-   the old files are removed.
+   Each copied attachment is downloaded again and compared before any file it
+   replaces is removed.
 6. **Report.** It writes the result to `last-run.json` and sends it to your
    notification URL, if you set one.
 
-A failed backup stops the run before the destination changes. Without backups,
-steps 1 and 2 are skipped. Without a destination, the run stops after step 1.
+A failed backup stops the run before the destination changes. Without a
+destination, the run stops after step 1.
 
 Item removals come last. Replacement attachments are uploaded and checked
 before the captured old files are removed. A failed upload keeps those old

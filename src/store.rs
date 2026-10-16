@@ -906,17 +906,11 @@ impl<'a> Store<'a> {
     /// The newest snapshot, when it already holds `document` and every
     /// attachment file it promises opens, so that a run needs no new one.
     /// `document` is what the run would write, with every attachment record
-    /// [`AttachmentStorage::Omitted`]; `attachments` says whether it would
-    /// store their content.
+    /// [`AttachmentStorage::Omitted`].
     ///
     /// Anything uncertain gives `None`: a needless snapshot costs only space.
     /// So do keys that can't read what they write, since they can't check.
-    pub fn unchanged(
-        &self,
-        origin: &VaultOrigin,
-        document: &Value,
-        attachments: bool,
-    ) -> Result<Option<PathBuf>> {
+    pub fn unchanged(&self, origin: &VaultOrigin, document: &Value) -> Result<Option<PathBuf>> {
         if !self.keys.reads_own() {
             return Ok(None);
         }
@@ -930,13 +924,13 @@ impl<'a> Store<'a> {
         }
         let mut expected = document.clone();
         self.add_provenance(&mut expected, origin)?;
-        let holds = self.holds(&latest.path, &expected, attachments);
+        let holds = self.holds(&latest.path, &expected);
         Ok(holds.unwrap_or(false).then_some(latest.path))
     }
 
     /// Whether the snapshot at `path` is `expected`, apart from what differs
     /// between two snapshots of one vault, with every attachment file intact.
-    fn holds(&self, path: &Path, expected: &Value, attachments: bool) -> Result<bool> {
+    fn holds(&self, path: &Path, expected: &Value) -> Result<bool> {
         let stored = self.read_snapshot(path)?;
         if logical(&stored) != logical(expected) {
             return Ok(false);
@@ -948,13 +942,10 @@ impl<'a> Store<'a> {
             .flat_map(|item| &item.attachments)
         {
             let intact = match &attachment.storage {
-                AttachmentStorage::Omitted => !attachments,
                 AttachmentStorage::Snapshot { snapshot_id, .. } => {
-                    attachments
-                        && snapshot_id == id
-                        && self.read_snapshot_attachment(attachment).is_ok()
+                    snapshot_id == id && self.read_snapshot_attachment(attachment).is_ok()
                 }
-                AttachmentStorage::Legacy => false,
+                AttachmentStorage::Omitted | AttachmentStorage::Legacy => false,
             };
             if !intact {
                 return Ok(false);
@@ -2044,7 +2035,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .unchanged(&origin("user"), &planned(Some("a"), &[]), true)
+                .unchanged(&origin("user"), &planned(Some("a"), &[]))
                 .unwrap(),
             Some(complete)
         );
@@ -2140,46 +2131,28 @@ mod tests {
         let latest = write(&store, &user, t0, "a", &[("att-1", b"x")]);
         let same = planned(Some("a"), &["att-1"]);
 
-        assert_eq!(
-            store.unchanged(&user, &same, true).unwrap(),
-            Some(latest.clone())
-        );
-        let changed = [
-            (planned(Some("b"), &["att-1"]), true),
-            (planned(Some("a"), &[]), true),
-            // A run that would leave attachment content out.
-            (same.clone(), false),
-        ];
-        for (document, attachments) in &changed {
-            assert_eq!(
-                store.unchanged(&user, document, *attachments).unwrap(),
-                None
-            );
+        assert_eq!(store.unchanged(&user, &same).unwrap(), Some(latest.clone()));
+        for document in [planned(Some("b"), &["att-1"]), planned(Some("a"), &[])] {
+            assert_eq!(store.unchanged(&user, &document).unwrap(), None);
         }
         // Another vault, even an identical one.
-        assert_eq!(
-            store.unchanged(&origin("other"), &same, true).unwrap(),
-            None
-        );
+        assert_eq!(store.unchanged(&origin("other"), &same).unwrap(), None);
 
         // A damaged attachment file, or a damaged document, is no backup.
         let file = directory_of(&store, &latest).join("att-1.age");
         let original = fs::read(&file).unwrap();
         fs::write(&file, b"damaged").unwrap();
-        assert_eq!(store.unchanged(&user, &same, true).unwrap(), None);
+        assert_eq!(store.unchanged(&user, &same).unwrap(), None);
         fs::write(&file, &original).unwrap();
-        assert_eq!(
-            store.unchanged(&user, &same, true).unwrap(),
-            Some(latest.clone())
-        );
+        assert_eq!(store.unchanged(&user, &same).unwrap(), Some(latest.clone()));
         let document = fs::read(&latest).unwrap();
         fs::write(&latest, b"damaged").unwrap();
-        assert_eq!(store.unchanged(&user, &same, true).unwrap(), None);
+        assert_eq!(store.unchanged(&user, &same).unwrap(), None);
         fs::write(&latest, &document).unwrap();
 
         // Nor does a newer snapshot of another vault let an older one count.
         write(&store, &origin("other"), t0 + Duration::hours(1), "a", &[]);
-        assert_eq!(store.unchanged(&user, &same, true).unwrap(), None);
+        assert_eq!(store.unchanged(&user, &same).unwrap(), None);
     }
 
     #[test]
@@ -2193,13 +2166,13 @@ mod tests {
         let first = writer.finish(planned(None, &[])).unwrap();
         assert_eq!(
             store
-                .unchanged(&origin("first"), &planned(None, &[]), true)
+                .unchanged(&origin("first"), &planned(None, &[]))
                 .unwrap(),
             Some(first)
         );
         assert_eq!(
             store
-                .unchanged(&origin("second"), &planned(None, &[]), true)
+                .unchanged(&origin("second"), &planned(None, &[]))
                 .unwrap(),
             None
         );
@@ -2221,7 +2194,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .unchanged(&origin("user"), &planned(Some("a"), &["att-1"]), true)
+                .unchanged(&origin("user"), &planned(Some("a"), &["att-1"]))
                 .unwrap(),
             None
         );

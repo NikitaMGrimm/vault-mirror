@@ -47,10 +47,9 @@ source catches up.
 
 ## Are backups optional?
 
-They're on by default, and every run backs up both vaults before it changes
-anything. They need `BACKUP_PASSPHRASE` or `BACKUP_RECIPIENTS`. Set
-`BACKUP_ENABLED=false` to mirror without them. Without a destination,
-vault-mirror only makes backups. See [Backups and restoring](backups.md).
+No. Every run backs up both vaults before it changes anything. Without a
+destination, vault-mirror only makes backups. See
+[Backups and restoring](backups.md).
 
 ## Do backups pile up?
 
