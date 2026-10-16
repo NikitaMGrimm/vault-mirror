@@ -465,7 +465,12 @@ impl Puller<'_> {
         };
         let (stored, copied) = match files {
             true => {
-                let old: Vec<String> = written.attachments.iter().map(|a| a.id.clone()).collect();
+                // Only files the backup holds may go: the write's response can
+                // list one added to the source since.
+                let old: Vec<String> = (original.iter())
+                    .flat_map(|original| &original.attachments)
+                    .map(|a| a.id.clone())
+                    .collect();
                 copy_attachments((dest, copy), (source, &written), &old, mode).await?
             }
             false => (reread(source, &written, mode).await?, 0),

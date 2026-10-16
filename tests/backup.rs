@@ -4,6 +4,7 @@ use std::{collections::HashMap, path::Path, process::Command};
 
 use anyhow::Result;
 use common::{provision::TestAccount, *};
+use futures_util::future::BoxFuture;
 use time::OffsetDateTime;
 use vault_mirror::{
     app::{self, RunFlags},
@@ -942,22 +943,14 @@ async fn a_pull_leaves_edits_outside_the_filter_out_of_the_source() -> Result<()
     Ok(())
 }
 
-/// Edits a destination copy as the pull starts, as someone still using the
-/// destination might.
-struct EditDuringPull<'a> {
-    dest: &'a Account,
-    copy: Item,
-    edited: Draft,
-}
+/// Changes a vault as the pull starts, as someone still using it might.
+struct DuringPull<'a>(Box<dyn Fn() -> BoxFuture<'a, Result<()>> + Sync + 'a>);
 
-impl Reporter for EditDuringPull<'_> {
+impl Reporter for DuringPull<'_> {
     fn status(&self, verb: &str, _: &str) {
         if verb == "Pulling" {
-            tokio::task::block_in_place(|| {
-                let edit = self.dest.update_item(&PERSONAL, &self.copy, &self.edited);
-                tokio::runtime::Handle::current().block_on(edit)
-            })
-            .unwrap();
+            tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on((self.0)()))
+                .unwrap();
         }
     }
 
@@ -991,11 +984,12 @@ async fn the_mirror_after_a_pull_replaces_only_what_a_backup_holds() -> Result<(
         collection_ids: vec![],
     };
     (edited.content).insert("notes".into(), Node::secret("edited during the pull"));
-    let reporter = EditDuringPull {
-        dest: &dest,
-        copy,
-        edited,
-    };
+    let reporter = DuringPull(Box::new(|| {
+        Box::pin(async {
+            dest.update_item(&PERSONAL, &copy, &edited).await?;
+            Ok(())
+        })
+    }));
     let flags = RunFlags {
         pull: true,
         ..RunFlags::default()
@@ -1010,6 +1004,55 @@ async fn the_mirror_after_a_pull_replaces_only_what_a_backup_holds() -> Result<(
         document.to_string().contains("edited during the pull")
     });
     assert!(backed_up, "no destination snapshot holds the edit");
+    Ok(())
+}
+
+/// A file added to the source while a pull replaces that item's files is
+/// in no backup, so the pull leaves it in place.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pull_keeps_a_file_added_to_the_source_during_it() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    let original = item_with_file(&source, "Files changed on both sides", b"first").await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    let first = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
+    assert!(first.succeeded(), "{first:?}");
+    write_notes(
+        &dest,
+        "Files changed on both sides",
+        "edited in the destination",
+    )
+    .await?;
+    replace_file(
+        &dest,
+        "Files changed on both sides",
+        b"from the destination",
+    )
+    .await?;
+
+    let reporter = DuringPull(Box::new(|| {
+        Box::pin(async {
+            let late = source.get_item(&PERSONAL, &original.id).await?;
+            source
+                .upload_attachment(&PERSONAL, &late, "late.txt", b"added during the pull")
+                .await?;
+            Ok(())
+        })
+    }));
+    let flags = RunFlags {
+        pull: true,
+        ..RunFlags::default()
+    };
+    app::run_once(&config, flags, &reporter).await;
+    let vault = source.load(&PERSONAL).await?;
+    let item = by_name(&vault, "Files changed on both sides");
+    assert!(item.attachments.iter().any(|a| a.file_name == "late.txt"));
     Ok(())
 }
 
