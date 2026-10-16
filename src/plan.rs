@@ -890,32 +890,16 @@ fn hash(value: &Value) -> String {
 }
 
 /// Limits that stop a misconfigured run before it destroys a vault.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Safety {
-    /// Refuse to delete more than this share of the copies, if
-    /// set. Off by default: any fixed share is arbitrary, and the backup
-    /// taken before the run holds what it deletes.
+    /// Refuse to delete more than this percentage of the copies.
     pub max_delete_percent: Option<u32>,
-    /// Below this many deletions the percentage is not checked, so small
-    /// vaults can change freely.
-    pub delete_floor: usize,
     /// Permit this run to delete every earlier copy, or more than
     /// `max_delete_percent`.
     pub allow_mass_delete: bool,
     /// Permit this run to pair copies the other way round, after the source
     /// and destination switched roles.
     pub allow_reverse: bool,
-}
-
-impl Default for Safety {
-    fn default() -> Self {
-        Self {
-            max_delete_percent: None,
-            delete_floor: 10,
-            allow_mass_delete: false,
-            allow_reverse: false,
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -948,32 +932,30 @@ pub fn check_safety(plan: &Plan, safety: &Safety) -> Result<(), SafetyViolation>
     if plan.reversed > 0 && !safety.allow_reverse {
         return Err(SafetyViolation::Reversed(plan.reversed));
     }
+    let total = plan.tracked_before;
+    if safety.allow_mass_delete || total == 0 {
+        return Ok(());
+    }
     let stale = plan
         .deletes
         .iter()
         .filter(|delete| delete.reason == DeleteReason::Stale)
         .count();
-    if safety.allow_mass_delete {
-        return Ok(());
-    }
     // Not one earlier copy still has its source item: the source read as
     // empty, or is another vault. A source that changes, however much, keeps
     // at least some of its items.
-    if plan.tracked_before > 0 && stale == plan.tracked_before {
+    if stale == total {
         return Err(SafetyViolation::ReplacesEverything(stale));
     }
-    let (deleting, total) = (stale, plan.tracked_before);
+    let deleting = plan.deletes.len();
     if let Some(limit) = safety.max_delete_percent
-        && total > 0
-        && deleting > safety.delete_floor
         // Compared exactly: 101 of 200 is above a 50% limit.
-        && deleting as u128 * 100 > limit as u128 * total as u128
+        && deleting as u64 * 100 > u64::from(limit) * total as u64
     {
-        let percent = u32::try_from(deleting * 100 / total).unwrap_or(u32::MAX);
         return Err(SafetyViolation::MassDelete {
             deleting,
             total,
-            percent,
+            percent: (deleting * 100 / total) as u32,
             limit,
         });
     }

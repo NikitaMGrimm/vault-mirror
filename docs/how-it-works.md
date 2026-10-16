@@ -158,10 +158,6 @@ run stops and the destination stays as it was.
 | The run would delete every copy | The source is empty, the wrong account, or filtered to nothing. | `run --allow-mass-delete` |
 | The run would delete more than `MAX_DELETE_PERCENT` of the copies | You set a limit. | `run --allow-mass-delete` |
 
-`MAX_DELETE_PERCENT` is off unless you set it. It applies only above 10
-deletions, and only once the destination has copies. Extra copies of the same
-source item are always deleted and don't count towards it.
-
 A flag applies to one run. Later runs are checked as usual. With Docker Compose:
 
 ```sh
@@ -173,14 +169,6 @@ docker compose run --rm vault-mirror run --allow-mass-delete
 > server. Keep encrypted backups too. The final read and removal are separate
 > requests, so a concurrent late edit can still be moved to the trash. It is
 > recoverable there, but the operation is not atomic.
-
-### Why there's no default deletion limit
-
-Any fixed limit would be arbitrary: deleting 40% of a vault by mistake isn't
-safer than deleting 60%. So vault-mirror only stops on the case that's almost
-never intended, losing every copy at once. For smaller mistakes, there's the
-backup from the start of each run. To set a limit anyway, use
-`MAX_DELETE_PERCENT`.
 
 ## Compared with other approaches
 

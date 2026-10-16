@@ -117,9 +117,6 @@ same pull request and give the reason.
   only in `restore --to source` or an explicitly requested `run --pull`.
 - Refuse only a state that is almost never intended: swapped vaults, one
   vault twice, or a run that deletes every earlier copy.
-- Do not add a default percentage or count limit. A number like that is
-  arbitrary, and a smaller mistake is not safer. A limit that the user sets,
-  such as `MAX_DELETE_PERCENT`, is fine.
 - Name the flag that allows a refused run once.
 
 ### Documentation

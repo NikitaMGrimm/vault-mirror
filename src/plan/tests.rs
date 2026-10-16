@@ -1172,7 +1172,7 @@ fn deleting_every_earlier_copy_is_refused() {
 }
 
 #[test]
-fn a_delete_limit_applies_only_when_set() {
+fn a_delete_limit_applies_exactly_as_set() {
     let dest = mirrored(&numbered(40), Mode::Personal);
     let limited = Safety {
         max_delete_percent: Some(50),
@@ -1203,16 +1203,36 @@ fn a_delete_limit_applies_only_when_set() {
         Err(SafetyViolation::MassDelete { deleting: 101, .. })
     ));
 
-    // Half is allowed, and so is anything at or below the floor.
+    // Half is allowed.
     assert_eq!(
         check_safety(&plan(&numbered(20), &dest, Mode::Personal), &limited),
         Ok(())
     );
+    // A small vault gets no exemption.
     let small = mirrored(&numbered(12), Mode::Personal);
-    assert_eq!(
+    assert!(matches!(
         check_safety(&plan(&numbered(2), &small, Mode::Personal), &limited),
-        Ok(())
-    );
+        Err(SafetyViolation::MassDelete { deleting: 10, .. })
+    ));
+    // Leftover second copies count too.
+    let mut doubled = mirrored(&numbered(4), Mode::Personal);
+    for id in ["d1", "d2", "d3"] {
+        let mut duplicate = doubled.items[0].clone();
+        duplicate.id = id.into();
+        doubled.items.push(duplicate);
+    }
+    let strict = Safety {
+        max_delete_percent: Some(40),
+        ..Safety::default()
+    };
+    assert!(matches!(
+        check_safety(&plan(&numbered(4), &doubled, Mode::Personal), &strict),
+        Err(SafetyViolation::MassDelete {
+            deleting: 3,
+            total: 7,
+            ..
+        })
+    ));
 }
 
 #[test]
