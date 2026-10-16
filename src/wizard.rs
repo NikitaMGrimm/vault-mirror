@@ -129,7 +129,15 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
     written.push(("BACKUP_PASSPHRASE", passphrase));
 
     write_new(&env_path, &env_file(&written), true)?;
-    Console::status("Created", &format!("{ENV_FILE}, readable only by you"));
+    if readable_only_by_owner(&env_path) {
+        Console::status("Created", &format!("{ENV_FILE}, readable only by you"));
+    } else {
+        Console::status("Created", ENV_FILE);
+        Console::warning(&format!(
+            "{ENV_FILE} holds your passwords and API keys, and other accounts on this \
+             computer may be able to read it; make it readable only by you"
+        ));
+    }
     write_new(&compose_path, &compose_file(&backups)?, false)?;
     Console::status("Created", COMPOSE_FILE);
     Console::note(
@@ -327,6 +335,20 @@ fn owner(path: &Path) -> Result<Option<(u32, u32)>> {
     Ok(None)
 }
 
+#[cfg(unix)]
+fn readable_only_by_owner(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    // Some file systems, such as a Windows drive mounted in WSL, ignore the
+    // mode a file is created with.
+    fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o077 == 0)
+}
+
+/// Windows access lists are not checked, so the file is never called private.
+#[cfg(not(unix))]
+fn readable_only_by_owner(_: &Path) -> bool {
+    false
+}
+
 /// Writes a file that must not exist yet, readable only by its owner if
 /// `private`.
 fn write_new(path: &Path, content: &str, private: bool) -> Result<()> {
@@ -416,5 +438,19 @@ mod tests {
         let parsed = crate::parse_env_file(&text).unwrap();
         assert_eq!(parsed["SOURCE_PASSWORD"], "it's $HOME \"#x\" ");
         assert_eq!(parsed["SCHEDULE"], "0 3 * * *");
+    }
+
+    #[test]
+    fn the_settings_file_is_called_private_only_when_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ENV_FILE);
+        write_new(&path, "", true).unwrap();
+        assert_eq!(readable_only_by_owner(&path), cfg!(unix));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(!readable_only_by_owner(&path));
+        }
     }
 }
