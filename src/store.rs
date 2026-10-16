@@ -314,16 +314,9 @@ impl<'a> Store<'a> {
                 .all(|attachment| newest.attachment(&attachment.attachment_id).is_ok()))
     }
 
-    /// Starts a snapshot made at `now`. Call with the backup directory
-    /// locked: it removes what earlier runs left unfinished.
+    /// Starts a snapshot made at `now`.
     pub fn begin(&self, now: OffsetDateTime) -> Result<SnapshotWriter<'_>> {
         create_private_dir(&self.directory)?;
-        for entry in fs::read_dir(&self.directory)? {
-            let entry = entry?;
-            if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
-                let _ = fs::remove_dir_all(entry.path());
-            }
-        }
         let temp = tempfile::Builder::new()
             .prefix(TEMP_PREFIX)
             .tempdir_in(&self.directory)
@@ -340,7 +333,16 @@ impl<'a> Store<'a> {
     /// stay; older days keep only their newest, for `retention_days`. The
     /// newest snapshot always stays, since an unchanged vault only makes it
     /// older. Returns how many were removed.
+    ///
+    /// Also removes what a write or prune that stopped part way left. Call
+    /// with the backup directory locked.
     pub fn prune(&self, retention_days: u32, now: OffsetDateTime) -> Result<usize> {
+        for entry in fs::read_dir(&self.directory).into_iter().flatten() {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
         let snapshots = scan(&self.directory)?;
         let recent = now - Duration::days(1);
         let cutoff = now - Duration::days(i64::from(retention_days));
@@ -563,10 +565,11 @@ mod tests {
         assert_eq!(store.list().unwrap(), Vec::<String>::new());
         assert_eq!(fs::read_dir(dir.path().join("source")).unwrap().count(), 0);
 
-        // What a crashed run left is removed by the next.
+        // What a crashed run left is removed by the next, even when the vault
+        // is unchanged and nothing new is written.
         let crashed = store.begin(datetime!(2026-10-14 00:00 UTC)).unwrap();
         let left = crashed.temp.keep();
-        write(&store, datetime!(2026-10-14 01:00 UTC), "a", &[]);
+        store.prune(30, datetime!(2026-10-14 01:00 UTC)).unwrap();
         assert!(!left.exists());
     }
 
