@@ -210,7 +210,8 @@ fn list<T: DeserializeOwned>(document: &Value, name: &str) -> Result<Vec<T>> {
     let list = document
         .get(name)
         .ok_or_else(|| anyhow!("the backup has no {name}"))?;
-    Vec::<T>::deserialize(list).with_context(|| format!("reading the backup's {name}"))
+    // Serde's message would quote the decrypted value it could not read.
+    Vec::<T>::deserialize(list).map_err(|_| anyhow!("the backup's {name} are malformed"))
 }
 
 /// Reads a backup document. Anything malformed is an error: read as empty, a
@@ -221,7 +222,7 @@ pub fn parse(document: &Value) -> Result<Restorable> {
             .get(BLOCK)
             .ok_or_else(|| anyhow!("the backup has no {BLOCK} block"))?,
     )
-    .with_context(|| format!("reading the backup's {BLOCK} block"))?;
+    .map_err(|_| anyhow!("the backup's {BLOCK} block is malformed"))?;
     let organization = block.scope == ScopeName::Organization;
     let (folders, collections) = match organization {
         false => {
@@ -253,7 +254,7 @@ pub fn parse(document: &Value) -> Result<Restorable> {
     let mut items = Vec::new();
     for (index, value) in values.iter().enumerate() {
         let read = || -> Result<RestorableItem> {
-            let record = ItemRecord::deserialize(value)?;
+            let record = ItemRecord::deserialize(value).map_err(|_| anyhow!("it is malformed"))?;
             let paths = (block.plain_strings.get(&record.id))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
@@ -647,6 +648,24 @@ mod tests {
             let mut document = base();
             edit(&mut document);
             assert!(parse(&document).is_err(), "{what}");
+        }
+    }
+
+    #[test]
+    fn errors_about_a_malformed_document_quote_none_of_it() {
+        let base = || build(&vault(), &Scope::Personal).unwrap();
+        let edits: [fn(&mut Value); 5] = [
+            |d| d[BLOCK]["scope"] = json!("hunter2"),
+            |d| d[BLOCK]["attachments"] = json!("hunter2"),
+            |d| d["folders"] = json!("hunter2"),
+            |d| d["items"][0]["type"] = json!("hunter2"),
+            |d| d["items"][0]["id"] = json!(["hunter2"]),
+        ];
+        for edit in edits {
+            let mut document = base();
+            edit(&mut document);
+            let error = format!("{:#}", parse(&document).unwrap_err());
+            assert!(!error.contains("hunter2"), "{error}");
         }
     }
 
