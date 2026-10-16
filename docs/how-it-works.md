@@ -88,8 +88,9 @@ the destination since vault-mirror wrote it:
 - a copy you edited replaces its original, with a warning if the original
   changed too. Its folder comes along; changes to its collections don't;
 - an item you added in the destination is added to the source, in a folder or
-  collections of the same name. With a filter, only items it selects are
-  added.
+  collections of the same name. So is any other item there that vault-mirror
+  didn't make, such as one that was in the destination before the first run.
+  With a filter, only items it selects are added.
 
 Then it mirrors as usual. A pull deletes nothing: an item you deleted in the
 destination is still in the source, and the mirror copies it back, so delete it
