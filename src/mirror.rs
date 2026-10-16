@@ -1418,17 +1418,17 @@ impl Run<'_> {
         self.summary = Some(summary);
         let (verb, plan_text) = describe_plan(&summary, self.options.dry_run);
         self.reporter.status(verb, &plan_text);
-        if plan.reversed > 0 && !plan.untracked.is_empty() {
+        if plan.reversed > 0 && plan.untracked > 0 {
             self.warn(format!(
                 "The destination has {} that no source item was copied from. Runs leave them as \
                  they are, so if you deleted them in the source, delete them here too.",
-                count(plan.untracked.len(), "item")
+                count(plan.untracked, "item")
             ));
-        } else if plan.tracked_before == 0 && !plan.untracked.is_empty() {
+        } else if plan.tracked_before == 0 && plan.untracked > 0 {
             self.warn(format!(
                 "The destination has {} that vault-mirror didn't make. Runs leave them as they \
                  are, so if they are older copies of the source, delete them to avoid duplicates.",
-                count(plan.untracked.len(), "item")
+                count(plan.untracked, "item")
             ));
         }
         if plan.detached > 0 {

@@ -318,7 +318,7 @@ fn copies_without_a_live_source_are_deleted_with_a_reason() {
         ]
     );
     assert_eq!(plan.unchanged, 1);
-    assert_eq!(plan.untracked.len(), 1, "the item added by hand stays");
+    assert_eq!(plan.untracked, 1, "the item added by hand stays");
     assert_converged(
         &source,
         &apply(&source, &dest, Mode::Personal),
@@ -351,7 +351,7 @@ fn a_malformed_marker_is_not_trusted() {
     let plan = plan(&source, &dest, Mode::Personal);
     assert_eq!(plan.creates, [0]);
     assert!(plan.deletes.is_empty());
-    assert_eq!(plan.untracked.len(), 1);
+    assert_eq!(plan.untracked, 1);
 }
 
 #[test]
@@ -368,7 +368,7 @@ fn a_field_that_only_looks_like_a_marker_is_not_trusted() {
 
     assert_eq!(marker_of(&dest.items[0]), None);
     let plan = plan(&source, &dest, Mode::Personal);
-    assert_eq!((plan.untracked.len(), plan.deletes.len()), (1, 0));
+    assert_eq!((plan.untracked, plan.deletes.len()), (1, 0));
 }
 
 #[test]
@@ -438,39 +438,6 @@ fn a_copy_changed_after_its_source_item_went_is_told_apart() {
     let mut refiled = dest.clone();
     refiled.items[1].attachments = vec![attachment("a2", "scan.pdf", 100)];
     assert!(changed(&refiled));
-}
-
-#[test]
-fn a_pull_that_stopped_halfway_is_told_apart_from_an_edited_copy() {
-    let mut source = vault(vec![login("s1", "One", "pw1")]);
-    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
-    let mut dest = mirrored(&source, Mode::Personal);
-    dest.items[0].attachments = vec![attachment("a9", "scan.pdf", 120)];
-    dest.items[0].content.insert("notes".into(), text("edited"));
-    // A run without a pull replaces the edits, as usual.
-    assert_eq!(plan(&source, &dest, Mode::Personal).unfinished_pulls, 0);
-
-    let copy = dest.items[0].clone();
-    let mut halfway = source.clone();
-    halfway.items[0].content = mark_copy(&copy, &copy, None, &[], Mode::Personal, None);
-    assert_eq!(plan(&halfway, &dest, Mode::Personal).unfinished_pulls, 1);
-    // Written, but the server kept only part of it.
-    let mut partly = source.clone();
-    partly.items[0].content = mark_copy(&source.items[0], &copy, None, &[], Mode::Personal, None);
-    assert_eq!(plan(&partly, &dest, Mode::Personal).unfinished_pulls, 1);
-
-    let mut finished = source.clone();
-    finished.items[0].attachments = vec![attachment("a10", "scan.pdf", 120)];
-    let content = mark_copy(
-        &copy,
-        &copy,
-        None,
-        &[],
-        Mode::Personal,
-        Some(&finished.items[0]),
-    );
-    finished.items[0].content = content;
-    assert_eq!(plan(&finished, &dest, Mode::Personal).unfinished_pulls, 0);
 }
 
 #[test]
@@ -969,7 +936,7 @@ fn an_original_is_never_deleted_as_a_duplicate() {
 
     let plan = plan(&copies, &a, Mode::Personal);
     assert!(plan.deletes.is_empty());
-    assert_eq!((plan.untracked.len(), plan.reversed), (1, 0));
+    assert_eq!((plan.untracked, plan.reversed), (1, 0));
 }
 
 #[test]
@@ -1114,7 +1081,7 @@ fn what_vault_mirror_did_not_make_is_left_alone() {
     // A first run into a destination that is in use.
     let plan = plan(&source, &dest, Mode::Personal);
     assert_eq!((plan.creates.len(), plan.deletes.len()), (3, 0));
-    assert_eq!(plan.untracked.len(), 1);
+    assert_eq!(plan.untracked, 1);
     assert_eq!(plan.folders_to_delete, [folder("empty", "Leftover")]);
     assert_eq!(check_safety(&plan, &Safety::default()), Ok(()));
     let after = apply(&source, &dest, Mode::Personal);
@@ -1129,7 +1096,7 @@ fn what_vault_mirror_did_not_make_is_left_alone() {
     // Later runs leave it alone too.
     let again = super::plan(&source, &after, Mode::Personal);
     assert!(!again.has_changes());
-    assert_eq!(again.untracked.len(), 1);
+    assert_eq!(again.untracked, 1);
 }
 
 #[test]

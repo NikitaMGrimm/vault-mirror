@@ -24,7 +24,7 @@ use vault_mirror::{
     mirror::Endpoint,
     node::Node,
     restore::{RestoreOptions, RestoreReport, restore},
-    snapshot::{self, AttachmentStorage, Restorable, RestorableItem, SnapshotAttachment},
+    snapshot::{self, AttachmentStorage, Restorable, SnapshotAttachment},
     store::{Keys, Protection, Store, VaultOrigin},
     vault::{Account, Draft, Scope},
 };
@@ -427,31 +427,17 @@ async fn run(
 #[tokio::test]
 async fn a_restore_handles_omitted_client_flags_and_preserves_explicit_values() {
     for reprompt in [None, Some(0), Some(1)] {
-        let mut content = [
-            ("type".to_string(), Node::Number(2.into())),
-            ("name".to_string(), Node::secret("Restored note")),
-            (
-                "secureNote".to_string(),
-                Node::Map([("type".to_string(), Node::Number(0.into()))].into()),
-            ),
-        ]
-        .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>();
+        let mut item = json!({
+            "id": "saved-item",
+            "type": 2,
+            "name": "Restored note",
+            "secureNote": {"type": 0},
+        });
         if let Some(value) = reprompt {
-            content.insert("reprompt".into(), Node::Number(value.into()));
-            content.insert("favorite".into(), Node::Bool(value != 0));
+            item["reprompt"] = json!(value);
+            item["favorite"] = json!(value != 0);
         }
-        let snapshot = Restorable {
-            items: vec![RestorableItem {
-                id: "saved-item".into(),
-                folder_id: None,
-                collection_ids: Vec::new(),
-                archived: false,
-                content,
-                attachments: Vec::new(),
-            }],
-            ..Restorable::default()
-        };
+        let snapshot = snapshot::parse(&json!({"items": [item]})).unwrap();
         let server = Server::start(Faults::default());
         let report = run(&server, &snapshot, None, &Capture::default())
             .await
@@ -465,23 +451,14 @@ async fn a_restore_handles_omitted_client_flags_and_preserves_explicit_values() 
 
 #[tokio::test]
 async fn a_restore_refuses_a_lost_master_password_reprompt() {
-    let snapshot = Restorable {
-        items: vec![RestorableItem {
-            id: "saved-item".into(),
-            folder_id: None,
-            collection_ids: Vec::new(),
-            archived: false,
-            content: [
-                ("type".to_string(), Node::Number(2.into())),
-                ("name".to_string(), Node::secret("Restored note")),
-                ("reprompt".to_string(), Node::Number(1.into())),
-                ("favorite".to_string(), Node::Bool(true)),
-            ]
-            .into(),
-            attachments: Vec::new(),
-        }],
-        ..Restorable::default()
-    };
+    let snapshot = snapshot::parse(&json!({"items": [{
+        "id": "saved-item",
+        "type": 2,
+        "name": "Restored note",
+        "reprompt": 1,
+        "favorite": true,
+    }]}))
+    .unwrap();
     let server = Server::start(Faults {
         reset_reprompt: true,
         ..Faults::default()

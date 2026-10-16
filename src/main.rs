@@ -510,7 +510,7 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
         "Reading",
         &format!(
             "{} from {}",
-            count(restorable.items.len(), "item"),
+            count(restorable.items().len(), "item"),
             path.display()
         ),
     );
@@ -566,7 +566,7 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
     }
     let mut files = Vec::new();
     let mut missing = 0;
-    for item in &restorable.items {
+    for item in restorable.items() {
         for attachment in &item.attachments {
             if attachment.storage == snapshot::AttachmentStorage::Omitted {
                 missing += 1;
@@ -619,7 +619,7 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
     Console::finished(
         &format!(
             "export of {} and {} to {}",
-            count(restorable.items.len(), "item"),
+            count(restorable.items().len(), "item"),
             count(written, "attachment"),
             output.display()
         ),

@@ -87,10 +87,9 @@ pub async fn prepare<'a>(
     store: Option<&'a Store<'a>>,
     options: &RestoreOptions,
 ) -> Result<PreparedRestore<'a>> {
-    check_input(snapshot)?;
     let account = target.account;
     let scope = &target.scope;
-    match (snapshot.organization, scope) {
+    match (snapshot.organization(), scope) {
         (false, Scope::Personal) | (true, Scope::Organization(_)) => {}
         (true, Scope::Personal) => {
             bail!("this snapshot is of an organization; restore it into an organization")
@@ -113,7 +112,7 @@ pub async fn prepare<'a>(
 
     // Every file the backup promises is read and checked first, whatever
     // the target would take: a damaged backup is not restored at all.
-    let staged = (snapshot.items.iter())
+    let staged = (snapshot.items().iter())
         .map(|item| {
             (item.attachments.iter())
                 .filter(|attachment| attachment.storage != AttachmentStorage::Omitted)
@@ -141,7 +140,7 @@ pub async fn prepare<'a>(
             _ => None,
         };
         kind.is_some_and(|kind| traits.hidden_item_types.contains(&kind))
-            || (snapshot.organization
+            || (snapshot.organization()
                 && traits.items_need_collections
                 && item.collection_ids.is_empty())
     };
@@ -149,7 +148,7 @@ pub async fn prepare<'a>(
     let attachments_allowed = *scope != Scope::Personal || account.premium;
     let mut report = RestoreReport::default();
     let mut prepared = Vec::new();
-    for (item, files) in snapshot.items.iter().zip(staged) {
+    for (item, files) in snapshot.items().iter().zip(staged) {
         if hidden(item) {
             report.items_left_out += 1;
         } else if attachments_allowed {
@@ -194,50 +193,6 @@ pub async fn prepare<'a>(
         warnings,
         concurrency: options.concurrency.max(1),
     })
-}
-
-/// Checks what [`crate::snapshot::parse`] ensures, for a snapshot made some
-/// other way: every id is unique, every item is usable, and everything an
-/// item refers to is in the snapshot.
-fn check_input(snapshot: &Restorable) -> Result<()> {
-    fn unique<'a>(what: &str, ids: impl Iterator<Item = &'a str>) -> Result<HashSet<&'a str>> {
-        let mut seen = HashSet::new();
-        for id in ids {
-            if !seen.insert(id) {
-                bail!("the snapshot holds {what} {id} more than once");
-            }
-        }
-        Ok(seen)
-    }
-    let folders = unique("folder", snapshot.folders.iter().map(|f| f.id.as_str()))?;
-    let collections = unique(
-        "collection",
-        snapshot.collections.iter().map(|c| c.id.as_str()),
-    )?;
-    unique("item", snapshot.items.iter().map(|i| i.id.as_str()))?;
-    let attachments = snapshot.items.iter().flat_map(|item| &item.attachments);
-    unique("attachment", attachments.map(|a| a.attachment_id.as_str()))?;
-    for item in &snapshot.items {
-        let usable = matches!(item.content.get("type"), Some(Node::Number(n)) if n.is_u64())
-            && matches!(
-                item.content.get("name"),
-                Some(Node::Secret(_) | Node::Text(_))
-            );
-        let listed = item
-            .folder_id
-            .iter()
-            .all(|id| folders.contains(id.as_str()))
-            && (item.collection_ids.iter()).all(|id| collections.contains(id.as_str()));
-        let own = item.attachments.iter().all(|a| a.item_id == item.id);
-        if !(usable && listed && own) {
-            bail!(
-                "snapshot item {} has no item type or name, or refers to what the snapshot \
-                 does not hold",
-                item.id
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Copies an attachment file out of the backup and checks that it decrypts.
@@ -303,7 +258,7 @@ impl PreparedRestore<'_> {
                 let mut by_name: HashMap<String, Folder> = (existing.folders.iter())
                     .map(|f| (f.name.clone(), f.clone()))
                     .collect();
-                for folder in &snapshot.folders {
+                for folder in snapshot.folders() {
                     let mapped = match by_name.get(&folder.name) {
                         Some(found) => found.clone(),
                         None => {
@@ -324,7 +279,7 @@ impl PreparedRestore<'_> {
                 let mut by_name: HashMap<String, Collection> = (existing.collections.iter())
                     .map(|c| (c.name.clone(), c.clone()))
                     .collect();
-                for collection in &snapshot.collections {
+                for collection in snapshot.collections() {
                     let mapped = match by_name.get(&collection.name) {
                         Some(found) => found.clone(),
                         None => {
@@ -375,7 +330,7 @@ impl PreparedRestore<'_> {
             })
             .collect();
         let folder_names: HashMap<String, String> = snapshot
-            .folders
+            .folders()
             .iter()
             .filter_map(|folder| {
                 Some((
@@ -875,49 +830,6 @@ mod tests {
             container_differences(&containers, &vault),
             ["folder f: the target vault does not show it"]
         );
-    }
-
-    #[test]
-    fn hand_made_snapshots_are_checked_like_parsed_ones() {
-        let item = |id: &str| RestorableItem {
-            id: id.into(),
-            folder_id: None,
-            collection_ids: Vec::new(),
-            archived: false,
-            content: note(id).content,
-            attachments: Vec::new(),
-        };
-        let valid = Restorable {
-            items: vec![item("a"), item("b")],
-            ..Restorable::default()
-        };
-        assert!(check_input(&valid).is_ok());
-        type Edit = (&'static str, fn(&mut Restorable));
-        let edits: Vec<Edit> = vec![
-            ("same item twice", |s| s.items[1].id = "a".into()),
-            ("folder not listed", |s| {
-                s.items[0].folder_id = Some("f".into())
-            }),
-            ("collection not listed", |s| {
-                s.items[0].collection_ids = vec!["c".into()]
-            }),
-            ("no type", |s| _ = s.items[0].content.remove("type")),
-            ("no name", |s| _ = s.items[0].content.remove("name")),
-            ("another item's attachment", |s| {
-                s.items[0].attachments.push(SnapshotAttachment {
-                    item_id: "b".into(),
-                    attachment_id: "x".into(),
-                    file_name: "f".into(),
-                    size: 1,
-                    storage: AttachmentStorage::Omitted,
-                })
-            }),
-        ];
-        for (what, edit) in edits {
-            let mut snapshot = valid.clone();
-            edit(&mut snapshot);
-            assert!(check_input(&snapshot).is_err(), "{what}");
-        }
     }
 
     #[test]

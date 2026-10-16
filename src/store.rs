@@ -977,7 +977,7 @@ impl<'a> Store<'a> {
         }
         let id = snapshot_id_of(path).unwrap_or_default();
         for attachment in snapshot::parse(&stored)?
-            .items
+            .items()
             .iter()
             .flat_map(|item| &item.attachments)
         {
@@ -1238,7 +1238,7 @@ impl SnapshotWriter<'_> {
             .unwrap_or_else(PoisonError::into_inner);
         let restorable = snapshot::parse(document)?;
         let mut named = BTreeSet::new();
-        for attachment in restorable.items.iter().flat_map(|item| &item.attachments) {
+        for attachment in restorable.items().iter().flat_map(|item| &item.attachments) {
             let id = &attachment.attachment_id;
             let stored_here = match &attachment.storage {
                 AttachmentStorage::Omitted => true,
@@ -1494,8 +1494,8 @@ mod tests {
 
     fn files_of(store: &Store, path: &Path) -> Vec<SnapshotAttachment> {
         let document = store.read_snapshot(path).unwrap();
-        (snapshot::parse(&document).unwrap().items.into_iter())
-            .flat_map(|item| item.attachments)
+        (snapshot::parse(&document).unwrap().items().iter())
+            .flat_map(|item| item.attachments.clone())
             .collect()
     }
 
