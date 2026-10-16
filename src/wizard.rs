@@ -262,9 +262,6 @@ async fn log_in(env: &HashMap<String, String>, prefix: &str, role: &str) -> Resu
     {
         bail!("this is the source account; the destination must be another account");
     }
-    if let Some(warning) = app::plain_http_warning(vault, prefix) {
-        Console::warning(&warning);
-    }
     let http = app::http_client(&config)?;
     let account =
         app::open_account(&config.backups_dir, &http, vault, &prefix.to_lowercase()).await?;
