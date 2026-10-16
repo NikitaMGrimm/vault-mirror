@@ -279,7 +279,7 @@ async fn execute(
     reporter.status("Backing up", "the destination vault");
     let store = Store::new(&config.backups_dir, "dest", &keys);
     // The mirror changes only what this backup holds.
-    let dest_vault = dest.load(&dest_scope).await.context("reading the vault")?;
+    let mut dest_vault = dest.load(&dest_scope).await.context("reading the vault")?;
     progress.status.dest_backup = Some(
         backup_loaded(
             &dest,
@@ -310,13 +310,18 @@ async fn execute(
         filter: config.filter.clone(),
     };
 
-    // After a pull, the mirror reads the destination again.
-    let mut dest_vault = Some(dest_vault);
     if flags.pull {
         progress.stage = "pull";
-        let loaded = dest_vault.take().unwrap_or_default();
         store::write_private(&unfinished_pull, b"")?;
-        let pulled = pull(&source, &dest, &source_vault, &loaded, &options, reporter).await?;
+        let pulled = pull(
+            &source,
+            &dest,
+            &source_vault,
+            &dest_vault,
+            &options,
+            reporter,
+        )
+        .await?;
         progress.status.pulled = Some(SummaryRecord {
             changed: pulled.summary != Summary::default(),
             summary: pulled.summary,
@@ -324,10 +329,27 @@ async fn execute(
         progress.status.warnings.extend(pulled.warnings);
         fs::remove_file(&unfinished_pull)
             .with_context(|| format!("removing {}", unfinished_pull.display()))?;
+        // The pull rewrote the destination, so the mirror needs a new read,
+        // and that read a backup: it can hold edits the first one missed.
+        progress.stage = "destination backup";
+        reporter.status("Backing up", "the destination vault");
+        dest_vault = (dest.account.load(&dest.scope).await).context("reading the vault")?;
+        let again = backup_loaded(
+            dest.account,
+            &dest.scope,
+            &dest_vault,
+            &store,
+            &backup_options,
+            reporter,
+        )
+        .await?;
+        if again.snapshot.is_some() {
+            progress.status.dest_backup = Some(again);
+        }
     }
 
     progress.stage = "mirror";
-    match mirror_onto(&source, &dest, dest_vault, &options, reporter).await {
+    match mirror_onto(&source, &dest, Some(dest_vault), &options, reporter).await {
         Ok(outcome) => {
             progress.status.mirror = Some(SummaryRecord {
                 changed: outcome.changed,

@@ -9,7 +9,7 @@ use vault_mirror::{
     app::{self, RunFlags},
     backup::{BackupOptions, backup},
     config::Config,
-    mirror::Endpoint,
+    mirror::{Endpoint, Reporter},
     node::Node,
     plan::marker_of,
     restore::{RestoreOptions, restore},
@@ -886,6 +886,77 @@ async fn a_pull_takes_only_what_changed_in_the_destination() -> Result<()> {
     let again = run(RunFlags::default()).await;
     assert!(again.succeeded(), "{again:?}");
     assert!(!again.mirror.as_ref().unwrap().changed);
+    Ok(())
+}
+
+/// Edits a destination copy as the pull starts, as someone still using the
+/// destination might.
+struct EditDuringPull<'a> {
+    dest: &'a Account,
+    copy: Item,
+    edited: Draft,
+}
+
+impl Reporter for EditDuringPull<'_> {
+    fn status(&self, verb: &str, _: &str) {
+        if verb == "Pulling" {
+            tokio::task::block_in_place(|| {
+                let edit = self.dest.update_item(&PERSONAL, &self.copy, &self.edited);
+                tokio::runtime::Handle::current().block_on(edit)
+            })
+            .unwrap();
+        }
+    }
+
+    fn warn(&self, _: &str) {}
+}
+
+/// The mirror after a pull replaces destination edits only once a backup
+/// holds them, also edits made after the run's first backup.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mirror_after_a_pull_replaces_only_what_a_backup_holds() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    item_with_file(&source, "Pulled", b"file").await?;
+    item_with_file(&source, "Edited during the pull", b"file").await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    let first = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
+    assert!(first.succeeded(), "{first:?}");
+    write_notes(&dest, "Pulled", "edited before the pull").await?;
+
+    let vault = dest.load(&PERSONAL).await?;
+    let copy = by_name(&vault, "Edited during the pull").clone();
+    let mut edited = Draft {
+        content: copy.content.clone(),
+        folder_id: copy.folder_id.clone(),
+        collection_ids: vec![],
+    };
+    (edited.content).insert("notes".into(), Node::secret("edited during the pull"));
+    let reporter = EditDuringPull {
+        dest: &dest,
+        copy,
+        edited,
+    };
+    let flags = RunFlags {
+        pull: true,
+        ..RunFlags::default()
+    };
+    let pulled = app::run_once(&config, flags, &reporter).await;
+    assert!(pulled.succeeded(), "{pulled:?}");
+
+    let keys = keys(dir.path());
+    let store = Store::new(dir.path(), "dest", &keys);
+    let backed_up = store.list()?.iter().any(|id| {
+        let document = store.snapshot(id).document().unwrap();
+        document.to_string().contains("edited during the pull")
+    });
+    assert!(backed_up, "no destination snapshot holds the edit");
     Ok(())
 }
 
