@@ -30,6 +30,9 @@ schedule.
 
 ## Fidelity
 
+Runs stop if a known encrypted item field contains unreadable data. Check that
+item in a trusted client or recover it from a backup before retrying.
+
 Folders and collections are matched by name. Two source containers with the
 same name can merge into one destination container. An existing collection's
 external ID is kept, even when the source uses another value. Organization

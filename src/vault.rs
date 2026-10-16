@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     api::{self, ApiCredentials, ServerUrls, Session},
-    crypto::{KdfParams, MasterSecret, SymKey},
+    crypto::{CryptoError, KdfParams, MasterSecret, SymKey, looks_encrypted},
     node::Node,
     text::count,
 };
@@ -43,6 +43,99 @@ const META_KEYS: &[&str] = &[
 /// such as `login` or `card`, which are all treated as content.
 const SCALAR_CONTENT_KEYS: &[&str] = &["type", "name", "notes", "favorite", "reprompt"];
 const LIST_CONTENT_KEYS: &[&str] = &["fields", "passwordHistory"];
+
+// Known encrypted wire fields. Unknown fields keep shape-based detection
+// because future server fields can contain clear text.
+const ENCRYPTED_FIELDS: &[(&[&str], &[&str])] = &[
+    (&[], &["name", "notes"]),
+    (&["fields"], &["name", "value"]),
+    (&["passwordHistory"], &["password"]),
+    (&["login"], &["username", "password", "totp", "uri"]),
+    (&["login", "uris"], &["uri", "uriChecksum"]),
+    (
+        &["login", "fido2Credentials"],
+        &[
+            "credentialId",
+            "keyType",
+            "keyAlgorithm",
+            "keyCurve",
+            "keyValue",
+            "rpId",
+            "rpName",
+            "userHandle",
+            "userName",
+            "userDisplayName",
+            "counter",
+            "discoverable",
+        ],
+    ),
+    (
+        &["card"],
+        &[
+            "cardholderName",
+            "brand",
+            "number",
+            "expMonth",
+            "expYear",
+            "code",
+        ],
+    ),
+    (
+        &["identity"],
+        &[
+            "title",
+            "firstName",
+            "middleName",
+            "lastName",
+            "address1",
+            "address2",
+            "address3",
+            "city",
+            "state",
+            "postalCode",
+            "country",
+            "company",
+            "email",
+            "phone",
+            "ssn",
+            "username",
+            "passportNumber",
+            "licenseNumber",
+        ],
+    ),
+    (&["sshKey"], &["privateKey", "publicKey", "keyFingerprint"]),
+    (
+        &["bankAccount"],
+        &[
+            "bankName",
+            "nameOnAccount",
+            "accountType",
+            "iban",
+            "swiftCode",
+            "pin",
+        ],
+    ),
+    (
+        &["driversLicense"],
+        &[
+            "firstName",
+            "lastName",
+            "licenseNumber",
+            "issueDate",
+            "expirationDate",
+        ],
+    ),
+    (
+        &["passport"],
+        &[
+            "surname",
+            "givenName",
+            "passportNumber",
+            "dateOfBirth",
+            "expirationDate",
+        ],
+    ),
+];
 
 /// The largest batch the Bitwarden server accepts for bulk item operations.
 const BULK_LIMIT: usize = 500;
@@ -804,6 +897,45 @@ pub fn is_content_key(name: &str, node: &Node) -> bool {
         || matches!(node, Node::Map(_))
 }
 
+/// Refuses an item whose [`ENCRYPTED_FIELDS`] hold a string that is not
+/// ciphertext. The error names the path, never the value.
+fn check_encrypted_fields(cipher: &Value) -> Result<(), CryptoError> {
+    fn visit(
+        value: &Value,
+        parents: &[&str],
+        names: &[&str],
+        path: &mut String,
+    ) -> Result<(), CryptoError> {
+        let length = path.len();
+        let result = match (value, parents) {
+            (Value::Array(items), _) => items.iter().enumerate().try_for_each(|(index, item)| {
+                path.push_str(&format!("/{index}"));
+                let result = visit(item, parents, names, path);
+                path.truncate(length);
+                result
+            }),
+            (Value::Object(map), [parent, rest @ ..]) => map.get(*parent).map_or(Ok(()), |child| {
+                path.push_str(&format!("/{parent}"));
+                visit(child, rest, names, path)
+            }),
+            (Value::Object(map), []) => names.iter().try_for_each(|name| match map.get(*name) {
+                Some(Value::String(text)) if !text.is_empty() && !looks_encrypted(text) => {
+                    Err(CryptoError::MalformedValue {
+                        path: format!("{path}/{name}"),
+                    })
+                }
+                _ => Ok(()),
+            }),
+            _ => Ok(()),
+        };
+        path.truncate(length);
+        result
+    }
+    ENCRYPTED_FIELDS
+        .iter()
+        .try_for_each(|(parents, names)| visit(cipher, parents, names, &mut String::new()))
+}
+
 fn required_str(value: &Value, name: &str, what: &str) -> Result<String> {
     value
         .get(name)
@@ -832,6 +964,7 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
         .transpose()
         .context("unwrapping the item key")?;
     let key = own_key.as_ref().unwrap_or(scope_key);
+    check_encrypted_fields(cipher)?;
 
     let mut content = BTreeMap::new();
     for (name, value) in object {
@@ -1036,6 +1169,124 @@ mod tests {
                 "type"
             ]
         );
+    }
+
+    fn full_cipher(key: &SymKey) -> Value {
+        let enc = |text: &str| json!(key.encrypt_str(text).unwrap());
+        json!({
+            "id": "item-1",
+            "type": 1,
+            "name": enc("2.AAAA"),
+            "notes": enc("2.5"),
+            "revisionDate": "2026-01-02T03:04:05.000000Z",
+            "futureVersion": "2.5",
+            "futureItemType": {"version": "2.AAAA", "date": "2026-01-02"},
+            "login": {
+                "username": enc("u"), "password": enc("p"), "totp": enc("t"),
+                "uri": enc("https://x"),
+                "passwordRevisionDate": "2026-03-04T05:06:07.000Z",
+                "uris": [{"uri": enc("https://x"), "uriChecksum": enc("c"), "match": null}],
+                "fido2Credentials": [{
+                    "credentialId": enc("id"), "keyType": enc("public-key"),
+                    "keyAlgorithm": enc("ECDSA"), "keyCurve": enc("P-256"),
+                    "keyValue": enc("k"), "rpId": enc("x"), "rpName": enc("X"),
+                    "userHandle": enc("h"), "userName": enc("u"),
+                    "userDisplayName": enc("U"), "counter": enc("0"),
+                    "discoverable": enc("true"),
+                    "creationDate": "2026-02-03T04:05:06.000Z",
+                }],
+            },
+            "card": {
+                "cardholderName": enc("J"), "brand": enc("Visa"), "number": enc("4111"),
+                "expMonth": enc("12"), "expYear": enc("2031"), "code": enc("123"),
+            },
+            "identity": {"firstName": enc("Jane"), "passportNumber": enc("X1"), "ssn": ""},
+            "sshKey": {"privateKey": enc("k"), "publicKey": enc("p"), "keyFingerprint": enc("f")},
+            "bankAccount": {"iban": enc("DE02"), "pin": enc("1234"), "swiftCode": null},
+            "driversLicense": {"licenseNumber": enc("B07"), "issueDate": enc("2015-03-01")},
+            "passport": {"surname": enc("M"), "dateOfBirth": enc("1964-08-12"), "expirationDate": ""},
+            "fields": [
+                {"name": enc("f"), "value": enc("v"), "type": 0, "linkedId": null},
+                {"name": enc("linked"), "value": null, "type": 3, "linkedId": 100},
+            ],
+            "passwordHistory": [{"password": enc("old"), "lastUsedDate": "2025-01-02T03:04:05.000Z"}],
+        })
+    }
+
+    #[test]
+    fn known_encrypted_slots_accept_ciphertext_and_absent_values() {
+        let key = SymKey::generate();
+        let cipher = full_cipher(&key);
+        let item = decrypt_item(&cipher, &key).unwrap();
+        assert_eq!(item.name(), "2.AAAA");
+        assert_eq!(
+            item.revision_date.as_deref(),
+            Some("2026-01-02T03:04:05.000000Z")
+        );
+        assert_eq!(
+            item.content["login"].as_map().unwrap()["passwordRevisionDate"],
+            Node::Text("2026-03-04T05:06:07.000Z".into())
+        );
+        assert_eq!(
+            item.content["futureItemType"].as_map().unwrap()["version"],
+            Node::Text("2.AAAA".into())
+        );
+
+        for (pointer, value) in [
+            ("/notes", Value::Null),
+            ("/login/password", Value::Null),
+            ("/login/totp", json!("")),
+            ("/login/uris/0/uriChecksum", Value::Null),
+            ("/fields/0/value", json!("")),
+            ("/passwordHistory/0/password", Value::Null),
+            ("/card", Value::Null),
+            ("/passwordHistory", Value::Null),
+            ("/login/uris", json!([])),
+        ] {
+            let mut cipher = full_cipher(&key);
+            *cipher.pointer_mut(pointer).unwrap() = value;
+            decrypt_item(&cipher, &key).unwrap_or_else(|error| panic!("{pointer}: {error:#}"));
+        }
+        let mut missing = full_cipher(&key);
+        let object = missing.as_object_mut().unwrap();
+        for name in ["notes", "login", "fields", "passwordHistory"] {
+            object.remove(name);
+        }
+        decrypt_item(&missing, &key).unwrap();
+    }
+
+    #[test]
+    fn a_known_encrypted_slot_holding_a_plain_string_is_an_error() {
+        let key = SymKey::generate();
+        for pointer in [
+            "/name",
+            "/notes",
+            "/login/password",
+            "/login/uris/0/uri",
+            "/login/uris/0/uriChecksum",
+            "/login/fido2Credentials/0/keyValue",
+            "/fields/0/value",
+            "/fields/1/name",
+            "/passwordHistory/0/password",
+            "/card/number",
+            "/identity/passportNumber",
+            "/sshKey/privateKey",
+            "/bankAccount/iban",
+            "/driversLicense/issueDate",
+            "/passport/dateOfBirth",
+        ] {
+            for bad in ["2.AAAA", "2.!!!!corrupt!!!!", "octocat", "2031-10-31"] {
+                let mut cipher = full_cipher(&key);
+                *cipher.pointer_mut(pointer).unwrap() = json!(bad);
+                // Not expect_err: a failure would print the whole item.
+                let Err(error) = decrypt_item(&cipher, &key) else {
+                    panic!("{pointer} was accepted");
+                };
+                let message = format!("{error:#}");
+                assert!(message.contains(&format!(" at {pointer} ")), "{message}");
+                assert!(!message.contains(bad), "{message}");
+            }
+        }
     }
 
     #[test]
