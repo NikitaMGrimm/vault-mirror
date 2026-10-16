@@ -97,7 +97,7 @@ struct SnapshotArgs {
     /// Whose backups to read from.
     #[arg(long, value_enum, default_value_t = Role::Source)]
     from: Role,
-    /// A snapshot file or name, as `snapshots` lists it, or `latest`.
+    /// A snapshot id, as `snapshots` lists it, or `latest`.
     #[arg(long, default_value = "latest")]
     snapshot: String,
 }
