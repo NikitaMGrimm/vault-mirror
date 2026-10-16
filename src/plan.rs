@@ -189,10 +189,9 @@ pub struct Plan {
     pub collection_ids: HashMap<String, String>,
     /// Destination items that carry a marker, before this plan is applied.
     pub tracked_before: usize,
-    /// Destination items without a marker, as indexes. vault-mirror did not
-    /// make them, so it leaves them, and the folders and collections they are
-    /// in, alone.
-    pub untracked: Vec<usize>,
+    /// Destination items without a marker. vault-mirror did not make them, so
+    /// it leaves them, and the folders and collections they are in, alone.
+    pub untracked: usize,
     /// Copies that a source item's own marker names: the source used to be
     /// the destination. Paired for the first time in this plan.
     pub reversed: usize,
@@ -206,10 +205,6 @@ pub struct Plan {
     /// Source attachments the destination lacks and does not get, because it
     /// cannot take attachments.
     pub attachments_withheld: usize,
-    /// Source items a pull stopped writing halfway, whose copies changed in the
-    /// destination. Mirroring them would replace those changes with what the
-    /// pull left; a pull finishes them.
-    pub unfinished_pulls: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -533,7 +528,7 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
                         || (marker.dest_files != UNKNOWN && marker.dest_files != dest_files(item)),
                 }),
                 None => {
-                    plan.untracked.push(index);
+                    plan.untracked += 1;
                     keep_containers(index);
                 }
             },
@@ -578,7 +573,7 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
                 if marker_of(item).is_some() {
                     plan.detached += 1;
                 } else {
-                    plan.untracked.push(index);
+                    plan.untracked += 1;
                 }
                 keep_containers(index);
             }
@@ -590,7 +585,7 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         .filter(|(index, _)| marker_of(&dest.items[*index]).is_none())
         .count();
 
-    for (entry_index, (_, link)) in links.iter().enumerate() {
+    for entry_index in 0..links.len() {
         let source_item = &source.items[plan.entries[entry_index].source];
         let Some((dest_index, own)) = dest_by_entry.get(&entry_index) else {
             if !copy_attachments {
@@ -640,16 +635,6 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         let files_changed_in_dest = copy_attachments && known.files_changed_in_dest;
         let set_archived =
             (dest_item.archived != source_item.archived).then_some(source_item.archived);
-        // The source item names this copy with a pending marker, and the copy
-        // names it back: a pull wrote the source item and stopped before it
-        // finished.
-        let pulled_halfway = own.is_some()
-            && link
-                .as_ref()
-                .is_some_and(|link| link.source_id == dest_item.id && link.files_pending());
-        if pulled_halfway && (content_changed_in_dest || files_changed_in_dest) {
-            plan.unfinished_pulls += 1;
-        }
 
         if write_content || sync_attachments || set_archived.is_some() {
             plan.updates.push(Update {
