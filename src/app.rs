@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -17,7 +17,7 @@ use crate::{
     backup::{BackupOptions, BackupReport, backup_loaded},
     config::{Config, VaultConfig},
     mirror::{Endpoint, MirrorOptions, Reporter, mirror_after_pull, mirror_onto, pull, unmark},
-    plan::{Safety, Summary},
+    plan::{Safety, Summary, marker_of},
     store::{self, Keys, Store},
     text::count,
     vault::{Account, Scope},
@@ -197,7 +197,7 @@ fn check_recovery_holds(backups_dir: &Path) -> Result<()> {
         (RESTORE_HOLD_FILE, "restored items are independent"),
         (
             PULL_HOLD_FILE,
-            "pull marker cleanup was interrupted or could not be verified",
+            "a pull was interrupted or could not be verified",
         ),
     ] {
         let path = backups_dir.join(file);
@@ -426,6 +426,7 @@ async fn execute(
     };
 
     let mut cleanup_source_ids = Default::default();
+    let pull_hold = config.backups_dir.join(PULL_HOLD_FILE);
     if flags.pull {
         progress.stage = "pull";
         let backed_up = source_vault.is_some();
@@ -437,6 +438,26 @@ async fn execute(
             Some(vault) => vault.clone(),
             None => dest.account.load(&dest.scope).await?,
         };
+        // A pull that fails after a source write can leave the source holding
+        // only part of an item. The next pull would take that for an edit made
+        // in the source and copy the loss into the destination, so the hold
+        // is taken before the first write and kept until the whole run has
+        // been verified.
+        if !flags.dry_run {
+            store::write_private_new(&pull_hold, b"{\"format\":1}\n")
+                .with_context(|| format!("persisting {} before the pull", pull_hold.display()))?;
+            // A pending marker no hold covers was left by an older version or
+            // by a direct caller of `pull`.
+            if let Some(item) = source_vault.items.iter().find(|item| {
+                !item.in_trash && marker_of(item).is_some_and(|marker| marker.files_pending())
+            }) {
+                bail!(
+                    "source item {} was left unfinished by a pull that no hold covers; mirroring is paused by {}. Reconcile the vaults using docs/backups.md before removing this hold",
+                    item.id,
+                    pull_hold.display()
+                );
+            }
+        }
         let pulled = pull(
             &source,
             &dest,
@@ -446,7 +467,11 @@ async fn execute(
             backed_up,
             reporter,
         )
-        .await?;
+        .await;
+        let pulled = match flags.dry_run {
+            true => pulled?,
+            false => pulled.with_context(|| format!("mirroring is paused by {}; reconcile the vaults using docs/backups.md before removing this hold", pull_hold.display()))?,
+        };
         progress.status.pulled = Some(SummaryRecord {
             changed: !flags.dry_run && pulled.summary != Summary::default(),
             summary: pulled.summary,
@@ -494,16 +519,15 @@ async fn execute(
 
     if flags.pull && !cleanup_source_items.is_empty() {
         progress.stage = "removing markers from the source";
-        let hold = config.backups_dir.join(PULL_HOLD_FILE);
-        store::write_private_new(&hold, b"{\"format\":1}\n")
-            .with_context(|| format!("persisting {} before marker cleanup", hold.display()))?;
         let unmarked = unmark(&source, &dest, &cleanup_source_items, config.concurrency).await
-            .with_context(|| format!("mirroring remains paused by {}; reconcile the vaults using docs/backups.md before removing this hold", hold.display()))?;
-        fs::remove_file(&hold).with_context(|| format!("removing {}", hold.display()))?;
-        store::sync_dir(&config.backups_dir)?;
+            .with_context(|| format!("mirroring remains paused by {}; reconcile the vaults using docs/backups.md before removing this hold", pull_hold.display()))?;
         if unmarked > 0 {
             reporter.status("Unmarked", &count(unmarked, "source item"));
         }
+    }
+    if flags.pull {
+        fs::remove_file(&pull_hold).with_context(|| format!("removing {}", pull_hold.display()))?;
+        store::sync_dir(&config.backups_dir)?;
     }
     Ok(())
 }
@@ -940,6 +964,44 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert!(messages[0].contains("307"));
         assert!(!messages[0].contains("secret-token"));
+    }
+
+    #[tokio::test]
+    async fn a_private_key_given_as_a_recipient_is_not_repeated() {
+        use age::secrecy::ExposeSecret;
+
+        use crate::api::tests::{http_response, http_server};
+        let dir = tempfile::tempdir().unwrap();
+        let private = age::x25519::Identity::generate()
+            .to_string()
+            .expose_secret()
+            .to_owned();
+        let (url, received) = http_server(vec![http_response("204 No Content", "", "")]);
+        let env = [
+            ("SOURCE_SERVER", "http://127.0.0.1:9"),
+            ("SOURCE_CLIENT_ID", "user.test"),
+            ("SOURCE_CLIENT_SECRET", "synthetic-secret"),
+            ("SOURCE_PASSWORD", "synthetic-password"),
+            ("BACKUPS_DIR", dir.path().to_str().unwrap()),
+            ("BACKUP_RECIPIENTS", &private),
+            ("NOTIFY_FAILURE_URL", &url),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        let config = Config::from_env(&env).unwrap();
+
+        let status = run_once(&config, RunFlags::default(), &Quiet).await;
+        assert!(!status.succeeded());
+        let error = status.error.unwrap();
+        // A failure message here would repeat the key, so none is printed.
+        assert!(!error.contains(&private));
+        assert!(error.contains("BACKUP_RECIPIENTS"));
+        let written = fs::read_to_string(status_path(dir.path())).unwrap();
+        assert!(!written.contains(&private));
+        let requests = received.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].contains(&private));
     }
 
     #[test]

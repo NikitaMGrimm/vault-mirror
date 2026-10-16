@@ -60,6 +60,12 @@ struct Side {
     trashing_writes: bool,
     dropping_files_after_upload: bool,
     drop_files_on_next_update: bool,
+    /// Store this many more item updates, then answer each with a server
+    /// error.
+    refusing_updates_after: Option<usize>,
+    /// Write a file here on the next sync, as another program might while a
+    /// run reads the vaults.
+    file_on_next_sync: Option<std::path::PathBuf>,
     /// Every request that can change the vault, as "METHOD /path".
     writes: Vec<String>,
 }
@@ -115,6 +121,8 @@ impl Fake {
                 trashing_writes: false,
                 dropping_files_after_upload: false,
                 drop_files_on_next_update: false,
+                refusing_updates_after: None,
+                file_on_next_sync: None,
                 writes: Vec::new(),
             };
             state.sides.insert(name.to_string(), side);
@@ -340,6 +348,9 @@ fn respond(state: &Mutex<State>, port: u16, request: &Request) -> Result<Answer,
         }
         ("GET", ["api", "config"]) => json!({ "server": { "name": "Vaultwarden" } }),
         ("GET", ["api", "sync"]) => {
+            if let Some(path) = side.file_on_next_sync.take() {
+                std::fs::write(path, b"{}").unwrap();
+            }
             let hidden = |cipher: &&Value| {
                 side.hiding_new_types && [6, 7, 8].contains(&cipher["type"].as_u64().unwrap_or(0))
             };
@@ -432,6 +443,12 @@ fn respond(state: &Mutex<State>, port: u16, request: &Request) -> Result<Answer,
         }
         ("GET", ["api", "ciphers", item]) => cipher(side, item)?.clone(),
         ("PUT", ["api", "ciphers", item]) => {
+            if let Some(left) = side.refusing_updates_after.as_mut() {
+                if *left == 0 {
+                    return Err((500, "the update failed".into()));
+                }
+                *left -= 1;
+            }
             let updated = store(side, body.clone());
             let drop_files = std::mem::take(&mut side.drop_files_on_next_update);
             let trashing = side.trashing_writes;
@@ -1246,6 +1263,219 @@ async fn verified_marker_cleanup_releases_its_hold() {
             .await
             .succeeded()
     );
+}
+
+const PULL: vault_mirror::app::RunFlags = vault_mirror::app::RunFlags {
+    pull: true,
+    dry_run: false,
+    allow_mass_delete: false,
+    reverse: false,
+};
+
+/// A failed pull keeps the hold it took before its first write, and every
+/// later run stops before login, whatever its flags. Retrying would take what
+/// the source kept for an edit made there and copy the loss into the
+/// destination. A refusal before any write, or an upload that failed, holds
+/// too: telling those apart from a partial write takes an operator.
+#[tokio::test]
+async fn a_failed_pull_holds_until_reconciled_and_keeps_the_destination() {
+    use vault_mirror::app::{RunFlags, run_once};
+    type Fault = fn(&mut Side);
+    let cases: [(&str, bool, Fault); 8] = [
+        ("notes dropped", false, |side| side.dropping_notes = true),
+        ("files dropped", true, |side| {
+            side.drop_files_on_next_update = true
+        }),
+        ("files dropped by the final write", false, |side| {
+            side.dropping_files_after_upload = true
+        }),
+        ("final write refused", false, |side| {
+            side.refusing_updates_after = Some(1)
+        }),
+        ("unfinished marker refused", false, |side| {
+            side.dropping_notes = true;
+            side.refusing_updates_after = Some(1);
+        }),
+        ("upload refused", false, |side| side.failing_uploads = true),
+        ("upload answer lost", false, |side| {
+            side.unanswered_uploads = true
+        }),
+        ("refused before writing", false, |side| side.premium = false),
+    ];
+    for (case, edits_notes, fault) in cases {
+        let vaults = mirrored().await;
+        match edits_notes {
+            true => {
+                edit(&vaults.dest, "Work note", set_notes("destination edit")).await;
+            }
+            false => replace_file(&vaults.dest, "Work note", b"destination replacement").await,
+        }
+        let backups = tempfile::tempdir().unwrap();
+        let hold = backups.path().join("pull-cleanup-hold.json");
+        let config = app_config(&vaults, backups.path());
+        let before = vaults.dest.load(&PERSONAL).await.unwrap();
+        vaults.fake.side("source", fault);
+        let preview = RunFlags {
+            dry_run: true,
+            ..PULL
+        };
+        run_once(&config, preview, &Capture::default()).await;
+        assert!(!hold.exists(), "{case}: a dry run took a hold");
+
+        let status = run_once(&config, PULL, &Capture::default()).await;
+        assert!(!status.succeeded(), "{case}: {status:?}");
+        assert_eq!(status.failure_stage.as_deref(), Some("pull"), "{case}");
+        assert!(hold.is_file(), "{case}: the failed pull left no hold");
+        vaults.fake.side("source", |side| {
+            side.premium = true;
+            side.dropping_notes = false;
+            side.dropping_files_after_upload = false;
+            side.refusing_updates_after = None;
+            side.failing_uploads = false;
+            side.unanswered_uploads = false;
+        });
+        let overrides = RunFlags {
+            allow_mass_delete: true,
+            reverse: true,
+            ..PULL
+        };
+        for flags in [overrides, overrides, RunFlags::default()] {
+            vaults.fake.forget_writes();
+            let status = run_once(&config, flags, &Capture::default()).await;
+            assert_eq!(
+                status.failure_stage.as_deref(),
+                Some("recovery hold"),
+                "{case}: {status:?}"
+            );
+            assert_eq!(vaults.fake.writes("source"), no_writes(), "{case}");
+            assert_eq!(vaults.fake.writes("dest"), no_writes(), "{case}");
+        }
+        let after = vaults.dest.load(&PERSONAL).await.unwrap();
+        assert!(
+            after.items == before.items,
+            "{case}: the destination changed"
+        );
+        let work = by_name(&after, "Work note");
+        match edits_notes {
+            true => {
+                assert!(notes(work) == Some("destination edit"), "{case}: notes");
+                let kept = files(&vaults.dest, "Work note").await;
+                assert!(kept == [b"first"], "{case}: files");
+            }
+            false => {
+                assert!(notes(work) == Some("Work note as written"), "{case}: notes");
+                let kept = files(&vaults.dest, "Work note").await;
+                assert!(kept == [b"destination replacement"], "{case}: files");
+            }
+        }
+    }
+}
+
+/// A pending marker that no hold covers was left by an older version, or by a
+/// direct caller of `mirror::pull`. What the source kept of the item cannot be
+/// told apart from an edit made there, so a pull stops at it before writing,
+/// and holds. A dry run still previews it.
+#[tokio::test]
+async fn a_pull_stops_at_an_unfinished_item_no_hold_covers() {
+    use vault_mirror::app::{RunFlags, run_once};
+    let vaults = mirrored().await;
+    let draft = Draft {
+        content: note("Added during the outage"),
+        folder_id: None,
+        collection_ids: Vec::new(),
+    };
+    let added = vaults.dest.create_item(&PERSONAL, &draft).await.unwrap();
+    vaults
+        .dest
+        .upload_attachment(&PERSONAL, &added, "outage.txt", b"made during the outage")
+        .await
+        .unwrap();
+    let draft = Draft {
+        content: mark_copy(&added, &added, None, &[], Mode::Personal, None),
+        ..draft
+    };
+    let left = vaults.source.create_item(&PERSONAL, &draft).await.unwrap();
+    let backups = tempfile::tempdir().unwrap();
+    let hold = backups.path().join("pull-cleanup-hold.json");
+    let config = app_config(&vaults, backups.path());
+    vaults.fake.forget_writes();
+    let preview = RunFlags {
+        dry_run: true,
+        ..PULL
+    };
+    let status = run_once(&config, preview, &Capture::default()).await;
+    assert!(status.succeeded(), "{status:?}");
+    assert!(!hold.exists());
+
+    let status = run_once(&config, PULL, &Capture::default()).await;
+    assert!(!status.succeeded(), "{status:?}");
+    assert_eq!(status.failure_stage.as_deref(), Some("pull"));
+    assert!(status.error.unwrap().contains(&left.id));
+    assert!(hold.is_file());
+    assert_eq!(vaults.fake.writes("source"), no_writes());
+    assert_eq!(vaults.fake.writes("dest"), no_writes());
+    let kept = files(&vaults.dest, "Added during the outage").await;
+    assert!(
+        kept == [b"made during the outage"],
+        "destination file changed"
+    );
+}
+
+/// A pull that cannot take its hold changes neither vault, and leaves a file
+/// it did not make where the hold goes.
+#[tokio::test]
+async fn a_pull_that_cannot_take_its_hold_changes_nothing() {
+    use vault_mirror::app::run_once;
+    let vaults = mirrored().await;
+    replace_file(&vaults.dest, "Work note", b"destination replacement").await;
+    let backups = tempfile::tempdir().unwrap();
+    let hold = backups.path().join("pull-cleanup-hold.json");
+    let config = app_config(&vaults, backups.path());
+    vaults
+        .fake
+        .side("dest", |side| side.file_on_next_sync = Some(hold.clone()));
+    vaults.fake.forget_writes();
+    let status = run_once(&config, PULL, &Capture::default()).await;
+    assert!(!status.succeeded(), "{status:?}");
+    assert_eq!(status.failure_stage.as_deref(), Some("pull"));
+    assert!(status.error.unwrap().contains("pull-cleanup-hold.json"));
+    assert_eq!(vaults.fake.writes("source"), no_writes());
+    assert_eq!(vaults.fake.writes("dest"), no_writes());
+    assert!(
+        std::fs::read(&hold).unwrap() == b"{}",
+        "the other file changed"
+    );
+    let kept = files(&vaults.source, "Work note").await;
+    assert!(kept == [b"first"], "source file changed");
+}
+
+/// A pull that finishes releases its hold, whether or not it had markers to
+/// remove, and leaves nothing that stops the next run.
+#[tokio::test]
+async fn a_finished_pull_releases_its_hold() {
+    use vault_mirror::app::{RunFlags, run_once};
+    for merges in [false, true] {
+        let vaults = mirrored().await;
+        if merges {
+            replace_file(&vaults.source, "Work note", b"source replacement").await;
+            edit(&vaults.dest, "Work note", set_notes("destination note")).await;
+        }
+        let backups = tempfile::tempdir().unwrap();
+        let hold = backups.path().join("pull-cleanup-hold.json");
+        let config = app_config(&vaults, backups.path());
+        for flags in [PULL, PULL, RunFlags::default()] {
+            let status = run_once(&config, flags, &Capture::default()).await;
+            assert!(status.succeeded(), "{merges}: {status:?}");
+            assert!(!hold.exists(), "{merges}");
+        }
+        if merges {
+            let dest = vaults.dest.load(&PERSONAL).await.unwrap();
+            let note = notes(by_name(&dest, "Work note"));
+            assert!(note == Some("destination note"), "destination notes lost");
+            let kept = files(&vaults.dest, "Work note").await;
+            assert!(kept == [b"source replacement"], "source file lost");
+        }
+    }
 }
 
 #[tokio::test]

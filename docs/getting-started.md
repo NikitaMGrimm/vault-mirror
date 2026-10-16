@@ -53,7 +53,7 @@ It then writes two files and shows what the first run would do:
 ```text
      Created vault-mirror.env, readable only by you
      Created compose.yaml
-note: keep a copy of BACKUP_PASSPHRASE outside the backups and the vault; without it, the backups cannot be read
+note: keep BACKUP_PASSPHRASE outside the backups and vault. After the first run, copy backups/key.age there too. Recovery needs both.
        Would create 152 items, create 6 folders, copy 3 attachments; 0 items unchanged
     Finished check in 4.1s; neither vault was changed
 ```
@@ -61,8 +61,9 @@ note: keep a copy of BACKUP_PASSPHRASE outside the backups and the vault; withou
 Nothing has been changed yet. The "Would" line is the plan.
 
 > [!IMPORTANT]
-> Copy `BACKUP_PASSPHRASE` from `vault-mirror.env` into your password manager.
-> Without it, nobody can read the backups, including you.
+> Keep `BACKUP_PASSPHRASE` somewhere you can reach without either vault.
+> After the first run, keep a separate copy of `backups/key.age` there too.
+> Recovery needs both. The passphrase cannot recreate a lost key file.
 
 The two files:
 
@@ -106,6 +107,10 @@ Your items are now in the destination. Each copy has an extra hidden field,
 `vault-mirror`, which links it to its source item. Leave that field in place.
 
 [How it works](how-it-works.md) explains each step of a run.
+
+Copy `backups/key.age` to your separate recovery location now. Test recovery
+with [export](backups.md#restore-with-vault-mirror) before relying on the backups.
+Check the exported items and attachments, then delete the unencrypted output.
 
 ## Step 4: Check that it keeps working
 

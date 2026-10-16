@@ -342,6 +342,12 @@ fn listed(ids: &[&str]) -> String {
 /// mirror after it pairs the two even when it is interrupted and run again.
 /// The pull reads each item back, as a server can drop part of a write.
 /// `unmark` removes the markers once the mirror has run.
+///
+/// A failed pull can leave a source item holding only part of what it wrote,
+/// and calling this again can take that for an edit made in the source. The
+/// caller must persist a recovery hold before calling this, keep it through
+/// the mirror and `unmark`, and release it only when all of them succeed.
+/// `run --pull` does this in its backup directory.
 pub async fn pull(
     source: &Endpoint<'_>,
     dest: &Endpoint<'_>,

@@ -110,11 +110,9 @@ is safe only for untouched untracked additions that the mirror leaves alone.
 Export the destination before resolving a refused recovery. To preserve a copy
 independently, remove its marker deliberately. A run without `--pull` still
 lets the source win. After source writes, the pull verifies its intended
-content and placement before the forward mirror can use it. If the source drops
-a new item's folder or collection membership, a resumed pull retries that
-placement. An interrupted pull with pending files must be completed with
-`--pull` before ordinary mirroring resumes, even when a later run's filter
-excludes the unfinished item.
+content and placement before the forward mirror can use it. A run without
+`--pull` stops at a source item the pull did not finish, even when its filter
+excludes that item.
 
 Then it mirrors as usual. A pull removes no items: an item you deleted in the
 destination is still in the source, and the mirror copies it back, so delete it
@@ -124,9 +122,10 @@ only counts what it would copy into the source. After verifying the actual
 run's result, resume with
 `docker compose up -d`.
 
-Marker cleanup is verified too. An interrupted or failed cleanup leaves
-`pull-cleanup-hold.json`, which pauses mirroring until you
-[reconcile the recovered items](backups.md#resume-after-interrupted-pull-cleanup).
+Marker cleanup is verified too. An actual pull takes `pull-cleanup-hold.json`
+before it writes, and keeps it unless the pull, the mirror and the cleanup all
+succeed. A failed run leaves it, which pauses mirroring until you
+[reconcile the recovered items](backups.md#resume-after-an-interrupted-pull).
 
 ### Switching the source and destination
 

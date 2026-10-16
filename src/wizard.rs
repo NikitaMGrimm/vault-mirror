@@ -148,8 +148,8 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
     )?;
     Console::status("Created", COMPOSE_FILE);
     Console::note(
-        "keep a copy of BACKUP_PASSPHRASE outside the backups and the vault; \
-         without it, the backups cannot be read",
+        "keep BACKUP_PASSPHRASE outside the backups and vault. After the first run, \
+         copy backups/key.age there too. Recovery needs both.",
     );
 
     if mirror {

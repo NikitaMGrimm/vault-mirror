@@ -573,11 +573,10 @@ async fn a_pull_leaves_out_items_the_source_would_not_show() -> Result<()> {
     Ok(())
 }
 
-/// A pull that stopped after adding an item to the source, but before copying
-/// its attachments, finishes it when run again. The destination keeps its file,
-/// and the source keeps an edit made in between.
+/// An older interrupted pull can leave source edits beside a pending marker.
+/// Recovery holds preserve them until the operator reconciles both vaults.
 #[tokio::test]
-async fn a_pull_run_again_finishes_an_item_it_added_halfway() -> Result<()> {
+async fn an_unfinished_pull_holds_until_source_edits_are_reconciled() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
@@ -612,7 +611,7 @@ async fn a_pull_run_again_finishes_an_item_it_added_halfway() -> Result<()> {
     edited
         .content
         .insert("notes".into(), Node::secret("edited in the source"));
-    source
+    let unfinished = source
         .create_item(
             &PERSONAL,
             &Draft {
@@ -623,12 +622,38 @@ async fn a_pull_run_again_finishes_an_item_it_added_halfway() -> Result<()> {
         )
         .await?;
 
-    let pulled = run(RunFlags {
+    let before_source = source.load(&PERSONAL).await?;
+    let before_dest = dest.load(&PERSONAL).await?;
+    let flags = RunFlags {
         pull: true,
         ..RunFlags::default()
-    })
-    .await;
+    };
+    let refused = run(flags).await;
+    assert!(!refused.succeeded(), "{refused:?}");
+    assert_eq!(refused.failure_stage.as_deref(), Some("pull"));
+    let hold = dir.path().join("pull-cleanup-hold.json");
+    assert!(hold.is_file());
+    assert!(source.load(&PERSONAL).await?.items == before_source.items);
+    assert!(dest.load(&PERSONAL).await?.items == before_dest.items);
+
+    let copy = by_name(&before_dest, "Added during the outage");
+    let mut reconciled = copy.content.clone();
+    reconciled.insert("notes".into(), unfinished.content["notes"].clone());
+    dest.update_item(
+        &PERSONAL,
+        copy,
+        &Draft {
+            content: reconciled,
+            folder_id: copy.folder_id.clone(),
+            collection_ids: copy.collection_ids.clone(),
+        },
+    )
+    .await?;
+    source.delete_items(&[unfinished.id]).await?;
+    std::fs::remove_file(&hold)?;
+    let pulled = run(flags).await;
     assert!(pulled.succeeded(), "{pulled:?}");
+    assert!(!hold.exists());
     assert_eq!(pulled.pulled.as_ref().unwrap().summary.items_created, 1);
     for (account, vault) in [
         (&source, source.load(&PERSONAL).await?),
@@ -638,9 +663,9 @@ async fn a_pull_run_again_finishes_an_item_it_added_halfway() -> Result<()> {
             .filter(|item| item.name() == "Added during the outage")
             .collect();
         assert_eq!(named.len(), 1);
-        assert_eq!(
-            named[0].content["notes"].as_str(),
-            Some("edited in the source")
+        assert!(
+            named[0].content["notes"].as_str() == Some("edited in the source"),
+            "reconciliation lost the surviving source edit"
         );
         let [attachment] = named[0].attachments.as_slice() else {
             panic!("expected one attachment");
@@ -648,7 +673,10 @@ async fn a_pull_run_again_finishes_an_item_it_added_halfway() -> Result<()> {
         let data = account
             .download_attachment(&PERSONAL, named[0], attachment)
             .await?;
-        assert_eq!(data, b"made during the outage");
+        assert!(
+            data == b"made during the outage",
+            "reconciliation changed the file"
+        );
     }
     let back = source.load(&PERSONAL).await?;
     assert!(back.items.iter().all(|item| marker_of(item).is_none()));
