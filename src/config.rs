@@ -3,7 +3,7 @@
 use std::{collections::HashMap, fs, path::PathBuf, str::FromStr, time::Duration};
 
 use crate::{
-    api::DEFAULT_CLIENT_VERSION,
+    api::{ClientOptions, DEFAULT_CLIENT_VERSION},
     mirror::Filter,
     plan::Safety,
     store::{Protection, Retention},
@@ -166,6 +166,37 @@ impl Env<'_> {
             organization_id,
         }))
     }
+
+    fn protection(&self) -> Result<Protection> {
+        let passphrase = self.secret("BACKUP_PASSPHRASE")?;
+        let recipients: Vec<String> = self
+            .get("BACKUP_RECIPIENTS")
+            .map(|list| {
+                list.split([',', ' ', '\n'])
+                    .filter(|part| !part.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        match (passphrase, recipients.is_empty()) {
+            (Some(_), false) => Err(ConfigError(
+                "set either BACKUP_PASSPHRASE or BACKUP_RECIPIENTS, not both".into(),
+            )),
+            (Some(passphrase), true) => Ok(Protection::Passphrase(passphrase)),
+            (None, false) => Ok(Protection::Recipients(recipients)),
+            (None, true) => Err(ConfigError(
+                "backups need BACKUP_PASSPHRASE or BACKUP_RECIPIENTS; set BACKUP_ENABLED=false to run without backups".into(),
+            )),
+        }
+    }
+
+    fn concurrency(&self) -> Result<usize> {
+        let concurrency = self.parse("CONCURRENCY", 4)?;
+        if !(1..=32).contains(&concurrency) {
+            return Err(ConfigError("CONCURRENCY must be between 1 and 32".into()));
+        }
+        Ok(concurrency)
+    }
 }
 
 impl Config {
@@ -189,30 +220,7 @@ impl Config {
         }
 
         let backup = if env.flag("BACKUP_ENABLED", true)? {
-            let passphrase = env.secret("BACKUP_PASSPHRASE")?;
-            let recipients: Vec<String> = env
-                .get("BACKUP_RECIPIENTS")
-                .map(|list| {
-                    list.split([',', ' ', '\n'])
-                        .filter(|part| !part.is_empty())
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let protection = match (passphrase, recipients.is_empty()) {
-                (Some(_), false) => {
-                    return Err(ConfigError(
-                        "set either BACKUP_PASSPHRASE or BACKUP_RECIPIENTS, not both".into(),
-                    ));
-                }
-                (Some(passphrase), true) => Protection::Passphrase(passphrase),
-                (None, false) => Protection::Recipients(recipients),
-                (None, true) => {
-                    return Err(ConfigError(
-                        "backups need BACKUP_PASSPHRASE or BACKUP_RECIPIENTS; set BACKUP_ENABLED=false to run without backups".into(),
-                    ));
-                }
-            };
+            let protection = env.protection()?;
             let retention = if env.flag("ENABLE_PRUNING", true)? {
                 Some(Retention {
                     days: env.parse("RETENTION_DAYS", 30)?,
@@ -267,10 +275,7 @@ impl Config {
                 ));
             }
         };
-        let concurrency: usize = env.parse("CONCURRENCY", 4)?;
-        if !(1..=32).contains(&concurrency) {
-            return Err(ConfigError("CONCURRENCY must be between 1 and 32".into()));
-        }
+        let concurrency = env.concurrency()?;
 
         let schedule = match (env.get("SCHEDULE"), env.get("INTERVAL")) {
             (Some(_), Some(_)) => {
@@ -315,6 +320,37 @@ pub fn backups_dir(env: &HashMap<String, String>) -> PathBuf {
             .get("BACKUPS_DIR")
             .unwrap_or_else(|| "backups".into()),
     )
+}
+
+pub fn backup_passphrase(env: &HashMap<String, String>) -> Result<Option<String>> {
+    Env(env).secret("BACKUP_PASSPHRASE")
+}
+
+pub fn vault_config(env: &HashMap<String, String>, prefix: &str) -> Result<VaultConfig> {
+    Env(env)
+        .vault(prefix)?
+        .ok_or_else(|| ConfigError(format!("no {} vault is configured", prefix.to_lowercase())))
+}
+
+pub fn concurrency(env: &HashMap<String, String>) -> Result<usize> {
+    Env(env).concurrency()
+}
+
+pub fn client_options(env: &HashMap<String, String>) -> Result<ClientOptions> {
+    let env = Env(env);
+    let mut options = ClientOptions {
+        client_version: env
+            .get("BITWARDEN_CLIENT_VERSION")
+            .unwrap_or_else(|| DEFAULT_CLIENT_VERSION.into()),
+        ..ClientOptions::default()
+    };
+    if let Some(path) = env.get("CA_CERT_FILE") {
+        options.extra_root_certs.push(
+            fs::read(&path)
+                .map_err(|error| ConfigError(format!("reading CA_CERT_FILE {path}: {error}")))?,
+        );
+    }
+    Ok(options)
 }
 
 /// Parses an interval such as `90s`, `30m`, `6h` or `1d`.
@@ -540,6 +576,31 @@ mod tests {
         let mut disabled = without(&["BACKUP_PASSPHRASE"]);
         disabled.insert("BACKUP_ENABLED".into(), "false".into());
         assert!(Config::from_env(&disabled).unwrap().backup.is_none());
+    }
+
+    #[test]
+    fn recovery_reads_only_the_requested_settings() {
+        let mut values = with(&[]);
+        values.remove("SOURCE_PASSWORD");
+        values.insert(
+            "SOURCE_PASSWORD_FILE".into(),
+            "/unavailable-source-secret".into(),
+        );
+        values.insert(
+            "NOTIFY_SUCCESS_URL_FILE".into(),
+            "/unavailable-notification-secret".into(),
+        );
+        assert!(Config::from_env(&values).is_err());
+        let target = vault_config(&values, "DEST").unwrap();
+        assert_eq!(target.client_id, "user.dest");
+        assert_eq!(
+            backup_passphrase(&values).unwrap().as_deref(),
+            Some("backup passphrase")
+        );
+        assert!(client_options(&values).is_ok());
+        assert_eq!(concurrency(&values).unwrap(), 4);
+        values.insert("CONCURRENCY".into(), "0".into());
+        assert!(concurrency(&values).is_err());
     }
 
     #[test]

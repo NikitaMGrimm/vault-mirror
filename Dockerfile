@@ -25,5 +25,5 @@ USER 65532:65532
 ENV BACKUPS_DIR=/data
 VOLUME /data
 # Reports unhealthy when the last run failed or is older than 26 hours.
-HEALTHCHECK --interval=5m --timeout=10s --start-period=1h CMD ["/vault-mirror", "healthcheck"]
+HEALTHCHECK --interval=5m --timeout=10s --start-period=26h CMD ["/vault-mirror", "healthcheck"]
 ENTRYPOINT ["/vault-mirror"]

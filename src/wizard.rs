@@ -269,7 +269,8 @@ async fn log_in(env: &HashMap<String, String>, prefix: &str, role: &str) -> Resu
         Console::warning(&warning);
     }
     let http = app::http_client(&config)?;
-    let account = app::open_account(&config, &http, vault, &prefix.to_lowercase()).await?;
+    let account =
+        app::open_account(&config.backups_dir, &http, vault, &prefix.to_lowercase()).await?;
     let loaded = account.load(&app::scope_of(vault)).await?;
     Console::status(
         "Logged in",
@@ -321,7 +322,9 @@ fn compose_file(dir: &Path, ca_cert: Option<&Path>) -> Result<String> {
                     "      - type: bind\n        \
                              source: {}\n        \
                              target: /ca.pem\n        \
-                             read_only: true\n",
+                             read_only: true\n        \
+                             bind:\n          \
+                               create_host_path: false\n",
                     compose_source(dir, path)
                 ),
             )
@@ -510,6 +513,10 @@ mod tests {
                 "\n      - type: bind\n        source: \"./certs/ca.pem\"\n        \
                  target: /ca.pem\n        read_only: true\n"
             ),
+            "{inside}"
+        );
+        assert!(
+            inside.contains("\n        bind:\n          create_host_path: false\n"),
             "{inside}"
         );
         let outside = compose_file(&dir, Some(Path::new(r#"/etc/ssl/a\b "c" $HOME.pem"#))).unwrap();

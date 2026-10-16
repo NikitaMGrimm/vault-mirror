@@ -10,12 +10,16 @@ see [Setting up by hand](#setting-up-by-hand).
 
 Each line is `NAME=value`. Lines starting with `#` are comments.
 
-Values are taken literally, without quotes or `$VARIABLES`, so a password can
-contain any character:
+Values are taken literally, without quote or `$VARIABLES` expansion. Quotes,
+spaces, and dollar signs stay part of the password:
 
 ```dotenv
 SOURCE_PASSWORD=it's "quoted" and $not a variable
 ```
+
+Each setting occupies one line. To supply a password containing a newline,
+set the environment variable directly. Secret files preserve internal newlines
+but trim trailing newline characters.
 
 How each tool reads it:
 
@@ -67,8 +71,8 @@ file.
 | `BACKUP_ENABLED` | `true` | Set to `false` to mirror without backups. |
 | `BACKUP_ATTACHMENTS` | `true` | Store attachment content in the backups, not only their names. |
 | `ENABLE_PRUNING` | `true` | Delete old snapshots. |
-| `RETENTION_DAYS` | `30` | Delete snapshots older than this. Past the last 24 hours, keep only the newest snapshot of each UTC day… |
-| `MIN_FILES` | `10` | …but always keep at least this many of the newest snapshots of each vault. |
+| `RETENTION_DAYS` | `30` | Delete current-group snapshots older than this. Past the last 24 hours, keep the newest of each UTC day. Legacy and inactive encryption groups are preserved. |
+| `MIN_FILES` | `10` | Always keep at least this many newest snapshots of the active vault and encryption group. Identical recipient-only points count separately. |
 | `BACKUPS_DIR` | `backups` (`/data` in the image) | Where backups, `last-run.json` and login state live. |
 
 ### Running
@@ -78,11 +82,17 @@ file.
 | `SCHEDULE` | | When `daemon` runs, as a cron expression such as `0 3 * * *`. |
 | `INTERVAL` | | Or how often `daemon` runs, such as `30m`, `6h` or `1d`. The first run starts right away. |
 | `TZ` | UTC | The time zone `SCHEDULE` is read in, such as `Europe/Berlin`. |
-| `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After each run, `POST` a one-line summary here. Works with [ntfy](https://ntfy.sh), [healthchecks.io](https://healthchecks.io), Gotify and anything else that accepts a plain-text `POST`. The summary has counts and error messages, never vault content. |
+| `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After each actual run, `POST` a one-line summary here. Dry runs send no notification. Works with [ntfy](https://ntfy.sh), [healthchecks.io](https://healthchecks.io), Gotify and anything else that accepts a plain-text `POST`. The summary has counts and error messages, never vault content. A delivery failure is a warning. |
 | `CONCURRENCY` | `4` | How many items are written at once, from 1 to 32. |
-| `VERIFY_ATTACHMENTS` | `true` | Download every copied attachment again and compare its SHA-256 hash. |
+| `VERIFY_ATTACHMENTS` | `true` | Download newly copied attachments again and compare their SHA-256 hashes. Replacements are always checked before old files are removed. Pull and restore always verify uploaded bytes. |
 | `CA_CERT_FILE` | | A PEM file of extra certificate authorities to trust, for a server with a private CA. |
 | `BITWARDEN_CLIENT_VERSION` | a recent version | The client version reported to servers. Only change this if a server rejects the default. |
+
+When `CA_CERT_FILE` is set during `init`, the settings file keeps its absolute
+path for native runs. Generated Compose settings mount it read-only at
+`/ca.pem` and override the path inside the container. If you run `init` in
+Docker, keep the certificate inside the mounted working directory. For example,
+pass `-e CA_CERT_FILE=/work/ca.pem` when that directory is mounted at `/work`.
 
 ## Setting up by hand
 
@@ -108,7 +118,7 @@ If you can't run `init`, for example because there's no terminal:
        volumes:
          - ./backups:/data
        restart: unless-stopped
-       # Lets a run in progress finish when the container is stopped.
+       # Gives a run in progress up to 5 minutes to finish when the container stops.
        stop_grace_period: 5m
    EOF
    ```

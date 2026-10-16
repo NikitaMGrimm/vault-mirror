@@ -426,15 +426,9 @@ pub fn parse(document: &Value) -> Result<Restorable> {
         .ok_or_else(|| anyhow!("the backup has no list of items"))?;
     let organization = match &block {
         Some(block) => {
-            let expected = if block.organization {
-                "collections"
-            } else {
-                "folders"
-            };
-            let other = if block.organization {
-                "folders"
-            } else {
-                "collections"
+            let (expected, other) = match block.organization {
+                true => ("collections", "folders"),
+                false => ("folders", "collections"),
             };
             if !root.get(expected).is_some_and(Value::is_array) || root.contains_key(other) {
                 bail!("the backup's folders and collections do not match its scope");

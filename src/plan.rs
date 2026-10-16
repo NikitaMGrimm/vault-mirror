@@ -159,6 +159,9 @@ pub enum DeleteReason {
 pub struct Delete {
     pub dest: usize,
     pub reason: DeleteReason,
+    /// The copy was changed in the destination since vault-mirror last wrote
+    /// it, so deleting it deletes that change too. Duplicates never are.
+    pub changed_in_dest: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,6 +206,10 @@ pub struct Plan {
     /// Source attachments the destination lacks and does not get, because it
     /// cannot take attachments.
     pub attachments_withheld: usize,
+    /// Source items a pull stopped writing halfway, whose copies changed in the
+    /// destination. Mirroring them would replace those changes with what the
+    /// pull left; a pull finishes them.
+    pub unfinished_pulls: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -485,7 +492,7 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
     // with its own marker. An item that only the source item's marker names
     // has none: it is the original that the source item was copied from.
     let mut claims: BTreeMap<usize, Vec<(usize, Option<Marker>)>> = BTreeMap::new();
-    // Folders and collections that hold anything besides copies are kept.
+    // Folders and collections that hold anything besides live copies are kept.
     let mut untracked_folders: HashSet<&str> = dest
         .folders_used_elsewhere
         .iter()
@@ -500,12 +507,11 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
     for (index, item) in dest.items.iter().enumerate() {
         let marker = marker_of(item);
         // The trash is left to the server, which empties it on its own
-        // schedule. Until then whoever put an item there can take it back,
-        // and backups do not cover it.
+        // schedule. Until then whoever put an item there, a run included, can
+        // take it back, into its folder and collections, and backups do not
+        // cover it.
         if item.in_trash {
-            if marker.is_none() {
-                keep_containers(index);
-            }
+            keep_containers(index);
             continue;
         }
         if marker.is_some() {
@@ -519,14 +525,18 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
             // An original, or a copy whose source item is gone, that a source
             // item copied from it names.
             (None, Some(&entry)) => claims.entry(entry).or_default().push((index, None)),
-            (None, None) if marker.is_some() => plan.deletes.push(Delete {
-                dest: index,
-                reason: DeleteReason::Stale,
-            }),
-            (None, None) => {
-                plan.untracked.push(index);
-                keep_containers(index);
-            }
+            (None, None) => match &marker {
+                Some(marker) => plan.deletes.push(Delete {
+                    dest: index,
+                    reason: DeleteReason::Stale,
+                    changed_in_dest: dest_content(item) != marker.content
+                        || (marker.dest_files != UNKNOWN && marker.dest_files != dest_files(item)),
+                }),
+                None => {
+                    plan.untracked.push(index);
+                    keep_containers(index);
+                }
+            },
         }
     }
 
@@ -562,6 +572,7 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
                 plan.deletes.push(Delete {
                     dest: index,
                     reason: DeleteReason::Duplicate,
+                    changed_in_dest: false,
                 });
             } else {
                 if marker_of(item).is_some() {
@@ -579,7 +590,7 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         .filter(|(index, _)| marker_of(&dest.items[*index]).is_none())
         .count();
 
-    for entry_index in 0..plan.entries.len() {
+    for (entry_index, (_, link)) in links.iter().enumerate() {
         let source_item = &source.items[plan.entries[entry_index].source];
         let Some((dest_index, own)) = dest_by_entry.get(&entry_index) else {
             if !copy_attachments {
@@ -629,6 +640,16 @@ pub fn plan_with(source: &Vault, dest: &Vault, mode: Mode, copy_attachments: boo
         let files_changed_in_dest = copy_attachments && known.files_changed_in_dest;
         let set_archived =
             (dest_item.archived != source_item.archived).then_some(source_item.archived);
+        // The source item names this copy with a pending marker, and the copy
+        // names it back: a pull wrote the source item and stopped before it
+        // finished.
+        let pulled_halfway = own.is_some()
+            && link
+                .as_ref()
+                .is_some_and(|link| link.source_id == dest_item.id && link.files_pending());
+        if pulled_halfway && (content_changed_in_dest || files_changed_in_dest) {
+            plan.unfinished_pulls += 1;
+        }
 
         if write_content || sync_attachments || set_archived.is_some() {
             plan.updates.push(Update {

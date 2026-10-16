@@ -3,6 +3,7 @@
 use std::{
     collections::HashMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -15,7 +16,7 @@ use crate::{
     api::{self, ApiCredentials, ClientOptions, ServerUrls, build_http_client},
     backup::{BackupOptions, BackupReport, backup_loaded},
     config::{Config, VaultConfig},
-    mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto, pull, unmark},
+    mirror::{Endpoint, MirrorOptions, Reporter, mirror_after_pull, mirror_onto, pull, unmark},
     plan::{Safety, Summary},
     store::{self, Keys, Store},
     text::count,
@@ -25,6 +26,8 @@ use crate::{
 pub const STATUS_FILE: &str = "last-run.json";
 const STATE_FILE: &str = "state.json";
 const LOCK_FILE: &str = "run.lock";
+const RESTORE_HOLD_FILE: &str = "restore-hold.json";
+const PULL_HOLD_FILE: &str = "pull-cleanup-hold.json";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunFlags {
@@ -114,8 +117,7 @@ struct State {
 }
 
 pub fn device_id(backups_dir: &Path, role: &str) -> Result<String> {
-    fs::create_dir_all(backups_dir)
-        .with_context(|| format!("creating {}", backups_dir.display()))?;
+    store::create_private_dir(backups_dir)?;
     let path = backups_dir.join(STATE_FILE);
     let mut state: State = fs::read(&path)
         .ok()
@@ -134,8 +136,7 @@ pub fn device_id(backups_dir: &Path, role: &str) -> Result<String> {
 /// the file is closed. Two runs at once could both prune and write the same
 /// snapshots and attachment files, and would both write `last-run.json`.
 pub fn lock_backups_dir(backups_dir: &Path) -> Result<fs::File> {
-    fs::create_dir_all(backups_dir)
-        .with_context(|| format!("creating {}", backups_dir.display()))?;
+    store::create_private_dir(backups_dir)?;
     let path = backups_dir.join(LOCK_FILE);
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(false);
@@ -154,6 +155,66 @@ pub fn lock_backups_dir(backups_dir: &Path) -> Result<fs::File> {
             Err(error).with_context(|| format!("locking {}", path.display()))
         }
     }
+}
+
+/// Pauses mirroring after restoring independent items. The caller must hold
+/// the backup directory lock and persist this before the first vault write.
+pub fn hold_after_restore(backups_dir: &Path) -> Result<()> {
+    let path = backups_dir.join(RESTORE_HOLD_FILE);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !fs::symlink_metadata(&path)?.file_type().is_file() {
+                return Err(anyhow!(
+                    "recovery hold is not a regular file: {}",
+                    path.display()
+                ));
+            }
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .with_context(|| format!("opening {}", path.display()))?;
+            file.sync_all()?;
+            #[cfg(unix)]
+            fs::File::open(backups_dir)?.sync_all()?;
+            return Ok(());
+        }
+        Err(error) => return Err(error).with_context(|| format!("creating {}", path.display())),
+    };
+    file.write_all(b"{\"format\":1}\n")?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    fs::File::open(backups_dir)?.sync_all()?;
+    Ok(())
+}
+
+fn check_recovery_holds(backups_dir: &Path) -> Result<()> {
+    for (file, reason) in [
+        (RESTORE_HOLD_FILE, "restored items are independent"),
+        (
+            PULL_HOLD_FILE,
+            "pull marker cleanup was interrupted or could not be verified",
+        ),
+    ] {
+        let path = backups_dir.join(file);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("checking {}", path.display()));
+            }
+            Ok(_) => {
+                return Err(anyhow!(
+                    "mirroring is paused by {}; {reason}. Stop scheduling and follow the recovery reconciliation steps in docs/backups.md before removing this hold",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn http_client(config: &Config) -> Result<reqwest::Client> {
@@ -193,7 +254,7 @@ pub fn plain_http_warning(vault: &VaultConfig, role: &str) -> Option<String> {
 }
 
 pub async fn open_account(
-    config: &Config,
+    backups_dir: &Path,
     http: &reqwest::Client,
     vault: &VaultConfig,
     role: &str,
@@ -201,7 +262,7 @@ pub async fn open_account(
     let credentials = ApiCredentials {
         client_id: vault.client_id.clone(),
         client_secret: vault.client_secret.clone(),
-        device_id: device_id(&config.backups_dir, role)?,
+        device_id: device_id(backups_dir, role)?,
     };
     let urls = ServerUrls::from_server(&vault.server)?;
     Account::open(http.clone(), urls, credentials, &vault.password)
@@ -254,12 +315,15 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
     // A run turned away by the lock leaves the status file to the run that
     // holds it.
     if lock.is_some()
+        && !status.dry_run
         && let Err(error) = write_status(&config.backups_dir, &status)
     {
         reporter.warn(&format!("Could not write the status file: {error:#}"));
     }
     drop(lock);
-    notify(config, &status, reporter).await;
+    if !status.dry_run {
+        notify(config, &status, reporter).await;
+    }
     status
 }
 
@@ -270,6 +334,12 @@ async fn execute(
     progress: &mut Progress,
     now: OffsetDateTime,
 ) -> Result<()> {
+    if config.dest.is_some() {
+        progress.stage = "recovery hold";
+        check_recovery_holds(&config.backups_dir)?;
+    }
+    progress.stage = "backup metadata";
+    store::migrate_metadata(&config.backups_dir)?;
     let http = http_client(config)?;
     let keys = match &config.backup {
         Some(backup) => Some(Keys::open(&config.backups_dir, &backup.protection)?),
@@ -289,7 +359,7 @@ async fn execute(
         progress.status.warnings.push(warning);
     }
     progress.stage = "source login";
-    let source = open_account(config, &http, &config.source, "source").await?;
+    let source = open_account(&config.backups_dir, &http, &config.source, "source").await?;
     let source_scope = scope_of(&config.source);
     // A pull writes to the source, and changes only what this backup holds.
     let mut source_vault = None;
@@ -313,7 +383,7 @@ async fn execute(
         return Ok(());
     };
     progress.stage = "destination login";
-    let dest = open_account(config, &http, dest_config, "dest").await?;
+    let dest = open_account(&config.backups_dir, &http, dest_config, "dest").await?;
     let dest_scope = scope_of(dest_config);
     // Attachment content is stored on this side too. A destination file can
     // be the only copy: one the source never had, one changed in the
@@ -355,6 +425,7 @@ async fn execute(
         dest_backed_up: dest_vault.is_some(),
     };
 
+    let mut cleanup_source_ids = Default::default();
     if flags.pull {
         progress.stage = "pull";
         let backed_up = source_vault.is_some();
@@ -381,14 +452,30 @@ async fn execute(
             summary: pulled.summary,
         });
         progress.status.warnings.extend(pulled.warnings);
+        cleanup_source_ids = pulled.cleanup_source_ids;
         if flags.dry_run {
             return Ok(());
         }
     }
 
     progress.stage = "mirror";
-    match mirror_onto(&source, &dest, dest_vault, &options, reporter).await {
+    let outcome = if flags.pull {
+        mirror_after_pull(
+            &source,
+            &dest,
+            dest_vault,
+            &options,
+            reporter,
+            &cleanup_source_ids,
+        )
+        .await
+    } else {
+        mirror_onto(&source, &dest, dest_vault, &options, reporter).await
+    };
+    let cleanup_source_items;
+    match outcome {
         Ok(outcome) => {
+            cleanup_source_items = outcome.cleanup_source_items;
             progress.status.mirror = Some(SummaryRecord {
                 changed: outcome.changed,
                 summary: outcome.summary,
@@ -405,9 +492,15 @@ async fn execute(
         }
     }
 
-    if flags.pull {
+    if flags.pull && !cleanup_source_items.is_empty() {
         progress.stage = "removing markers from the source";
-        let unmarked = unmark(&source, &dest, config.concurrency).await?;
+        let hold = config.backups_dir.join(PULL_HOLD_FILE);
+        store::write_private_new(&hold, b"{\"format\":1}\n")
+            .with_context(|| format!("persisting {} before marker cleanup", hold.display()))?;
+        let unmarked = unmark(&source, &dest, &cleanup_source_items, config.concurrency).await
+            .with_context(|| format!("mirroring remains paused by {}; reconcile the vaults using docs/backups.md before removing this hold", hold.display()))?;
+        fs::remove_file(&hold).with_context(|| format!("removing {}", hold.display()))?;
+        store::sync_dir(&config.backups_dir)?;
         if unmarked > 0 {
             reporter.status("Unmarked", &count(unmarked, "source item"));
         }
@@ -488,14 +581,18 @@ async fn notify(config: &Config, status: &Status, reporter: &dyn Reporter) {
         .header("content-type", "text/plain; charset=utf-8")
         .body(describe(status))
         .send()
-        .await
-        .and_then(|response| response.error_for_status());
-    if let Err(error) = sent {
+        .await;
+    match sent {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => reporter.warn(&format!(
+            "Could not send the notification: the server answered {}",
+            response.status()
+        )),
         // The URL can embed a token, so it is not repeated here.
-        reporter.warn(&format!(
+        Err(error) => reporter.warn(&format!(
             "Could not send the notification: {}",
             error.without_url()
-        ));
+        )),
     }
 }
 
@@ -505,6 +602,9 @@ pub fn health(
     max_age: Duration,
     now: OffsetDateTime,
 ) -> std::result::Result<(), String> {
+    if status.dry_run {
+        return Err("the last recorded run was a dry run; complete a real run first".to_string());
+    }
     if !status.succeeded() {
         return Err(format!(
             "the last run failed during {}: {}",
@@ -676,6 +776,170 @@ mod tests {
             message.contains("source login") && message.contains("bad key"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn a_successful_dry_run_does_not_prove_health() {
+        let status = Status {
+            dry_run: true,
+            ..success()
+        };
+        assert!(
+            health(
+                &status,
+                Duration::from_secs(26 * 3600),
+                datetime!(2026-10-14 20:00:00 UTC)
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_preserves_the_last_actual_run_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = [
+            ("SOURCE_SERVER", "invalid-server-url"),
+            ("SOURCE_CLIENT_ID", "user.test"),
+            ("SOURCE_CLIENT_SECRET", "synthetic-secret"),
+            ("SOURCE_PASSWORD", "synthetic-password"),
+            ("DEST_SERVER", "invalid-server-url"),
+            ("DEST_CLIENT_ID", "user.dest"),
+            ("DEST_CLIENT_SECRET", "synthetic-secret"),
+            ("DEST_PASSWORD", "synthetic-password"),
+            ("BACKUP_ENABLED", "false"),
+            ("BACKUPS_DIR", dir.path().to_str().unwrap()),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        let config = Config::from_env(&env).unwrap();
+        write_status(dir.path(), &success()).unwrap();
+        let flags = RunFlags {
+            dry_run: true,
+            ..RunFlags::default()
+        };
+        let status = run_once(&config, flags, &Quiet).await;
+        assert!(status.dry_run && !status.succeeded());
+        assert_eq!(read_status(dir.path()).unwrap(), success());
+        fs::remove_file(status_path(dir.path())).unwrap();
+        run_once(&config, flags, &Quiet).await;
+        assert!(!status_path(dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn recovery_holds_stop_mirroring_before_login_even_with_overrides() {
+        for name in [RESTORE_HOLD_FILE, PULL_HOLD_FILE] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join(name), b"{}").unwrap();
+            let env = [
+                ("SOURCE_SERVER", "invalid-server-url"),
+                ("SOURCE_CLIENT_ID", "user.source"),
+                ("SOURCE_CLIENT_SECRET", "synthetic-secret"),
+                ("SOURCE_PASSWORD", "synthetic-password"),
+                ("DEST_SERVER", "invalid-server-url"),
+                ("DEST_CLIENT_ID", "user.dest"),
+                ("DEST_CLIENT_SECRET", "synthetic-secret"),
+                ("DEST_PASSWORD", "synthetic-password"),
+                ("BACKUP_ENABLED", "false"),
+                ("BACKUPS_DIR", dir.path().to_str().unwrap()),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+            let mut config = Config::from_env(&env).unwrap();
+            let status = run_once(
+                &config,
+                RunFlags {
+                    allow_mass_delete: true,
+                    reverse: true,
+                    pull: true,
+                    ..RunFlags::default()
+                },
+                &Quiet,
+            )
+            .await;
+            assert_eq!(status.failure_stage.as_deref(), Some("recovery hold"));
+            assert!(status.error.unwrap().contains(name));
+            assert!(!dir.path().join("key.age").exists());
+            config.dest = None;
+            let status = run_once(&config, RunFlags::default(), &Quiet).await;
+            assert_eq!(status.failure_stage.as_deref(), Some("source login"));
+            assert!(dir.path().join(name).is_file());
+        }
+    }
+
+    #[test]
+    fn a_restore_hold_preserves_existing_recovery_information() {
+        let dir = tempfile::tempdir().unwrap();
+        hold_after_restore(dir.path()).unwrap();
+        assert!(check_recovery_holds(dir.path()).is_err());
+        let path = dir.path().join(RESTORE_HOLD_FILE);
+        fs::write(&path, b"operator recovery notes").unwrap();
+        hold_after_restore(dir.path()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"operator recovery notes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_broken_restore_hold_symlink_still_pauses_mirroring() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RESTORE_HOLD_FILE);
+        std::os::unix::fs::symlink(dir.path().join("missing"), &path).unwrap();
+        assert!(check_recovery_holds(dir.path()).is_err());
+        assert!(hold_after_restore(dir.path()).is_err());
+        assert!(!dir.path().join("missing").exists());
+    }
+
+    #[test]
+    fn a_directory_cannot_stand_in_for_a_persisted_restore_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(RESTORE_HOLD_FILE)).unwrap();
+        assert!(check_recovery_holds(dir.path()).is_err());
+        assert!(hold_after_restore(dir.path()).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_notification_redirect_is_reported_as_a_delivery_failure() {
+        use crate::api::tests::{http_response, http_server};
+        struct Warnings(std::sync::Mutex<Vec<String>>);
+        impl Reporter for Warnings {
+            fn status(&self, _: &str, _: &str) {}
+            fn warn(&self, warning: &str) {
+                self.0.lock().unwrap().push(warning.to_string());
+            }
+        }
+        let (url, received) = http_server(vec![http_response(
+            "307 Temporary Redirect",
+            "Location: https://example.invalid/secret-token\r\n",
+            "",
+        )]);
+        let env = [
+            ("SOURCE_SERVER", "invalid-server-url"),
+            ("SOURCE_CLIENT_ID", "user.test"),
+            ("SOURCE_CLIENT_SECRET", "synthetic-secret"),
+            ("SOURCE_PASSWORD", "synthetic-password"),
+            ("BACKUP_PASSPHRASE", "synthetic-passphrase"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        let mut config = Config::from_env(&env).unwrap();
+        config.notify_success_url = Some(url);
+        let warnings = Warnings(std::sync::Mutex::new(Vec::new()));
+        notify(&config, &success(), &warnings).await;
+        assert_eq!(received.join().unwrap().len(), 1);
+        let messages = warnings.0.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("307"));
+        assert!(!messages[0].contains("secret-token"));
     }
 
     #[test]
