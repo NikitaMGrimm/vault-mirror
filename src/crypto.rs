@@ -68,36 +68,45 @@ impl KdfParams {
                 .filter(|v| *v > 0)
                 .ok_or_else(|| CryptoError::UnsupportedKdf(format!("{name}={value}")))
         };
-        match kdf {
-            0 => Ok(Self::Pbkdf2 {
+        let params = match kdf {
+            0 => Self::Pbkdf2 {
                 iterations: narrow(iterations, "iterations")?,
-            }),
-            1 => Ok(Self::Argon2id {
+            },
+            1 => Self::Argon2id {
                 iterations: narrow(iterations, "iterations")?,
                 memory_mib: narrow(memory.unwrap_or(0), "memory")?,
                 parallelism: narrow(parallelism.unwrap_or(0), "parallelism")?,
-            }),
-            other => Err(CryptoError::UnsupportedKdf(format!("kdf type {other}"))),
-        }
+            },
+            other => return Err(CryptoError::UnsupportedKdf(format!("kdf type {other}"))),
+        };
+        params.to_upstream()?;
+        Ok(params)
     }
 
-    fn to_upstream(&self) -> Kdf {
-        // `from_server` rejects zero, and every other constructor uses literals.
-        let nz = |v: u32| NonZeroU32::new(v).expect("kdf parameter is non-zero");
-        match *self {
+    fn to_upstream(&self) -> Result<Kdf> {
+        // Match Bitwarden's configurable ranges, including legacy PBKDF2 accounts.
+        let bounded = |value: u32, name: &str, min: u32, max: u32| {
+            if !(min..=max).contains(&value) {
+                return Err(CryptoError::UnsupportedKdf(format!(
+                    "{name}={value}; supported range is {min}..={max}"
+                )));
+            }
+            NonZeroU32::new(value).ok_or_else(|| CryptoError::UnsupportedKdf(name.to_string()))
+        };
+        Ok(match *self {
             Self::Pbkdf2 { iterations } => Kdf::PBKDF2 {
-                iterations: nz(iterations),
+                iterations: bounded(iterations, "PBKDF2 iterations", 5000, 2_000_000)?,
             },
             Self::Argon2id {
                 iterations,
                 memory_mib,
                 parallelism,
             } => Kdf::Argon2id {
-                iterations: nz(iterations),
-                memory: nz(memory_mib),
-                parallelism: nz(parallelism),
+                iterations: bounded(iterations, "Argon2 iterations", 2, 10)?,
+                memory: bounded(memory_mib, "Argon2 memory (MiB)", 16, 1024)?,
+                parallelism: bounded(parallelism, "Argon2 parallelism", 1, 16)?,
             },
-        }
+        })
     }
 }
 
@@ -241,7 +250,7 @@ impl MasterSecret {
     /// `salt` is the account email; the server treats it case-insensitively.
     pub fn derive(password: &str, salt: &str, kdf: &KdfParams) -> Result<Self> {
         let salt = salt.trim().to_lowercase();
-        MasterKey::derive(password, &salt, &kdf.to_upstream())
+        MasterKey::derive(password, &salt, &kdf.to_upstream()?)
             .map(Self)
             .map_err(|err| CryptoError::UnsupportedKdf(err.to_string()))
     }
@@ -453,5 +462,27 @@ mod tests {
         assert!(KdfParams::from_server(0, 0, None, None).is_err());
         assert!(KdfParams::from_server(1, 3, None, Some(4)).is_err());
         assert!(KdfParams::from_server(7, 3, None, None).is_err());
+    }
+
+    #[test]
+    fn server_kdf_costs_are_bounded_before_derivation() {
+        for (kind, iterations, memory, parallelism) in [
+            (0, 2_000_001, None, None),
+            (0, u32::MAX as u64, None, None),
+            (0, 4999, None, None),
+            (1, 11, Some(64), Some(4)),
+            (1, 3, Some(1025), Some(4)),
+            (1, 3, Some(u32::MAX as u64), Some(4)),
+            (1, 3, Some(64), Some(17)),
+            (1, 1, Some(64), Some(4)),
+            (1, 3, Some(15), Some(4)),
+        ] {
+            assert!(KdfParams::from_server(kind, iterations, memory, parallelism).is_err());
+        }
+        for iterations in [5000, 100_000, 600_000, 2_000_000] {
+            assert!(KdfParams::from_server(0, iterations, None, None).is_ok());
+        }
+        assert!(KdfParams::from_server(1, 2, Some(16), Some(1)).is_ok());
+        assert!(KdfParams::from_server(1, 10, Some(1024), Some(16)).is_ok());
     }
 }

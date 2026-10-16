@@ -20,9 +20,34 @@ keep secrets out of them, put each one in a file and point to it with
 `NAME_FILE`, for example with Docker secrets or systemd credentials. See
 [Secrets in files](docs/configuration.md#secrets-in-files).
 
-vault-mirror never writes to the source, except when you run
-`restore --to source`. In the destination, it only changes and deletes the
-copies it made.
+vault-mirror writes to the source only when you run `restore --to source` or
+`run --pull`. A normal run changes and deletes only the copies it made in the
+destination.
+
+## How automation changes your vault's security
+
+An unattended mirror needs to unlock both vaults without you present. The
+machine running it becomes another place an attacker could obtain your vault
+content. Anyone who controls that machine or the vault-mirror process can read
+the master passwords, use the API keys, and capture decrypted items and
+attachments from both vaults. Folder and collection filters limit copying,
+but backups and account access cover the whole configured scope.
+
+API-key login does not ask for your interactive two-step login. Keep two-step
+login enabled for your normal clients, but do not expect it to protect stored
+automation credentials. The master passwords are used locally to decrypt the
+vaults. They do not make a compromised runner safe.
+
+Secrets in files reduce exposure through environment variables and container
+inspection. They remain readable by the process that needs them and by an
+administrator. Use a trusted, maintained host and protect access to both
+accounts. Copying a password into a second account also gives anyone who can
+unlock that account access to the password.
+
+Use a separate backup passphrase. Keep a recoverable copy of `key.age` as well
+as its passphrase. With `BACKUP_RECIPIENTS`, keep the private age identity off
+the runner. This protects encrypted backups if the disk or runner is stolen,
+but a compromised running process can still capture the vault it decrypts.
 
 ## What it stores
 
@@ -30,21 +55,35 @@ copies it made.
 | --- | --- | --- |
 | `key.age` | The backup key, when you use `BACKUP_PASSPHRASE`. | Encrypted with your passphrase, using scrypt. |
 | `*/snapshots/*.json.age` | Complete vault exports, secrets included. | Encrypted with age. |
-| `*/attachments/*.age` | Attachment content. | Encrypted with age. |
-| `*/snapshots/*.meta.json` | Creation time, item count, attachment ids, and a salted fingerprint. | None. No vault content. |
-| `last-run.json` | Time, result and counts of the last run. | None. No vault content. |
+| `*/attachments/<snapshot-id>/*.age` | Attachment content. Legacy files are directly under `attachments/`. | Encrypted with age. |
+| `*/snapshots/*.meta.json` | Creation time, counts, opaque origin and encryption ids, and a ciphertext hash. | None. No plaintext vault fingerprint. |
+| `last-run.json` | Time, result and counts of the last actual run. | None. No vault content. |
 | `state.json` | The device ids vault-mirror logs in with. | None. |
 | `run.lock` | Nothing. It's locked while a run or restore is using the directory. | None. |
+| `restore-hold.json` | A local hold that stops mirroring after a native restore. | None. |
+| `pull-cleanup-hold.json` | A local hold retained when pull marker cleanup is interrupted or cannot be verified. | None. |
 
 On Unix, backup and state files are readable only by their owner. With
 `BACKUP_PASSPHRASE`, snapshots and attachments are encrypted to the backup key in
 `key.age`. With `BACKUP_RECIPIENTS`, they're encrypted to your own age public
 keys, so the machine making the backups can't read them back.
 
+New snapshots own separate attachment files and bind their ciphertext hashes
+inside the encrypted document. Public-recipient writers check the bytes they
+just encrypted and persisted. They cannot test possession of a recipient's
+private key. Test recovery separately on a trusted machine.
+
+On upgrade, old plaintext fingerprints are removed from local sidecars. Those
+fingerprints could help test a guessed item password if an attacker could
+reconstruct every other byte of the exported document. They did not reveal the
+master password. Historical copies outside this directory retain the fields
+until you remove them or their retention ends.
+
 > [!WARNING]
-> You need `BACKUP_PASSPHRASE`, or your age identity file when you use
-> `BACKUP_RECIPIENTS`, to read the backups. Without it nobody can decrypt them.
-> Keep it somewhere other than the backup disk.
+> You need both `key.age` and `BACKUP_PASSPHRASE`, or your private age identity
+> when you use `BACKUP_RECIPIENTS`, to read the backups. The passphrase cannot
+> recreate a lost `key.age`. Keep recovery material somewhere other than the
+> backup disk.
 
 ## What leaves the machine
 
@@ -59,7 +98,14 @@ point it to, and, if you configure them, your notification URLs.
 
 Error messages and logs never include request URLs, because attachment download
 URLs contain access tokens. Server error responses are cut down to their message,
-with URLs and the credentials that were sent removed.
+with URLs and the credentials that were sent removed. Attachment storage errors
+omit the response body, which could echo a signed token. HTTP redirects are
+refused. Configure each server's final address.
+
+Server-supplied key derivation costs are bounded before use. Supported ranges
+are 5,000 to 2,000,000 PBKDF2 iterations, or Argon2id with 2 to 10 iterations,
+16 to 1,024 MiB of memory, and parallelism of 1 to 16. These include legacy
+PBKDF2 accounts and Bitwarden's configurable ranges.
 
 ## The marker on each copy
 
