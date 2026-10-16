@@ -473,7 +473,7 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
             count(report.collections_created, "new collection"),
             started.elapsed().as_secs_f64()
         ),
-        true,
+        report.items_left_out + report.items_left_unarchived + report.attachments_skipped > 0,
     );
     Ok(ExitCode::SUCCESS)
 }
