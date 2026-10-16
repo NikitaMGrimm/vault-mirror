@@ -14,7 +14,7 @@ use vault_mirror::{
     plan::marker_of,
     restore::{RestoreOptions, restore},
     store::{Keys, Store},
-    vault::{Account, Draft, Scope, Vault},
+    vault::{Account, Draft, Item, Scope, Vault},
 };
 
 const PERSONAL: Scope = Scope::Personal;
@@ -773,6 +773,119 @@ async fn a_pull_into_an_archived_item_keeps_it_archived() -> Result<()> {
             .await?;
         assert_eq!(data, b"second");
     }
+    Ok(())
+}
+
+/// A new personal item named `name`, with a file.
+async fn item_with_file(account: &Account, name: &str, data: &[u8]) -> Result<Item> {
+    let mut content = fixtures::named("Bare login without folder").content;
+    content.insert("name".into(), Node::secret(name));
+    let draft = Draft {
+        content,
+        folder_id: None,
+        collection_ids: vec![],
+    };
+    let item = account.create_item(&PERSONAL, &draft).await?;
+    account
+        .upload_attachment(&PERSONAL, &item, "file.txt", data)
+        .await?;
+    Ok(item)
+}
+
+/// Gives the item named `name` these notes.
+async fn write_notes(account: &Account, name: &str, notes: &str) -> Result<()> {
+    let vault = account.load(&PERSONAL).await?;
+    let item = by_name(&vault, name);
+    let mut draft = Draft {
+        content: item.content.clone(),
+        folder_id: item.folder_id.clone(),
+        collection_ids: vec![],
+    };
+    draft.content.insert("notes".into(), Node::secret(notes));
+    account.update_item(&PERSONAL, item, &draft).await?;
+    Ok(())
+}
+
+/// Replaces the one file of the item named `name`.
+async fn replace_file(account: &Account, name: &str, data: &[u8]) -> Result<()> {
+    let vault = account.load(&PERSONAL).await?;
+    let item = by_name(&vault, name);
+    account
+        .delete_attachment(&item.id, &item.attachments[0].id)
+        .await?;
+    account
+        .upload_attachment(&PERSONAL, item, "file.txt", data)
+        .await?;
+    Ok(())
+}
+
+/// The notes and the one file of the item named `name`.
+async fn notes_and_file(account: &Account, name: &str) -> Result<(String, Vec<u8>)> {
+    let vault = account.load(&PERSONAL).await?;
+    let item = by_name(&vault, name);
+    let [attachment] = item.attachments.as_slice() else {
+        panic!("expected one attachment");
+    };
+    let data = account
+        .download_attachment(&PERSONAL, item, attachment)
+        .await?;
+    let notes = item.content["notes"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    Ok((notes, data))
+}
+
+/// A pull brings back only what changed in the destination, so what changed
+/// only in the source survives it and reaches the destination.
+#[tokio::test]
+async fn a_pull_takes_only_what_changed_in_the_destination() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    let (files_in_dest, notes_in_dest) = ("File changed in the destination", "Notes changed there");
+    item_with_file(&source, files_in_dest, b"first").await?;
+    item_with_file(&source, notes_in_dest, b"first").await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    let capture = Capture::default();
+    let run = |flags| app::run_once(&config, flags, &capture);
+    assert!(run(RunFlags::default()).await.succeeded());
+
+    write_notes(&source, files_in_dest, "newer in the source").await?;
+    replace_file(&dest, files_in_dest, b"from the destination").await?;
+    replace_file(&source, notes_in_dest, b"from the source").await?;
+    write_notes(&dest, notes_in_dest, "edited in the destination").await?;
+
+    let pulled = run(RunFlags {
+        pull: true,
+        ..RunFlags::default()
+    })
+    .await;
+    assert!(pulled.succeeded(), "{pulled:?}");
+    for account in [&source, &dest] {
+        assert_eq!(
+            notes_and_file(account, files_in_dest).await?,
+            (
+                "newer in the source".into(),
+                b"from the destination".to_vec()
+            )
+        );
+        assert_eq!(
+            notes_and_file(account, notes_in_dest).await?,
+            (
+                "edited in the destination".into(),
+                b"from the source".to_vec()
+            )
+        );
+    }
+    let again = run(RunFlags::default()).await;
+    assert!(again.succeeded(), "{again:?}");
+    assert!(!again.mirror.as_ref().unwrap().changed);
     Ok(())
 }
 

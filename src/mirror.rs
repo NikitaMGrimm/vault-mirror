@@ -255,9 +255,8 @@ pub async fn pull(
         .await
         .context("reading the source server's settings")?;
 
-    // Destination items to bring back, each with the source item it replaces
-    // and whether its files go too.
-    let mut items: Vec<(&Item, Option<&Item>, bool)> = Vec::new();
+    // Destination items to bring back, each with the source item it changes.
+    let mut items: Vec<(&Item, Option<(&Item, &plan::Update)>)> = Vec::new();
     for update in plan
         .updates
         .iter()
@@ -265,12 +264,12 @@ pub async fn pull(
     {
         let original = &selected_source.items[plan.entries[update.entry].source];
         let copy = &dest_vault.items[update.dest];
-        items.push((copy, Some(original), update.files_changed_in_dest));
+        items.push((copy, Some((original, update))));
     }
     let changed = items.len();
     // A changed copy whose source item is gone comes back as a new item.
     for delete in plan.deletes.iter().filter(|delete| delete.changed_in_dest) {
-        items.push((&dest_vault.items[delete.dest], None, true));
+        items.push((&dest_vault.items[delete.dest], None));
     }
     // Items vault-mirror didn't make, except the originals of copies made the
     // other way round.
@@ -292,7 +291,7 @@ pub async fn pull(
             continue;
         }
         let item = dest_vault.items.iter().find(|real| real.id == item.id);
-        items.extend(item.map(|item| (item, None, true)));
+        items.extend(item.map(|item| (item, None)));
     }
 
     let mut pulled = Pulled::default();
@@ -354,8 +353,8 @@ pub async fn pull(
         not_archived: 0,
         archive_refusal: None,
     };
-    for (copy, original, files) in items {
-        pulled.summary.attachments_copied += puller.pull(copy, original, files).await?;
+    for (copy, changed) in items {
+        pulled.summary.attachments_copied += puller.pull(copy, changed).await?;
     }
     if let Some(error) = puller.archive_refusal {
         warn(format!(
@@ -383,16 +382,20 @@ struct Puller<'a> {
 }
 
 impl Puller<'_> {
-    /// Writes `copy` into `original`, or into a new source item, with its
-    /// files if `files`. Then makes `copy` the copy of that source item, and
+    /// Writes what changed in `copy` into its original, or all of it into a
+    /// new source item. Then makes `copy` the copy of that source item, and
     /// returns how many files it copied.
-    async fn pull(&mut self, copy: &Item, original: Option<&Item>, files: bool) -> Result<usize> {
+    async fn pull(
+        &mut self,
+        copy: &Item,
+        changed: Option<(&Item, &plan::Update)>,
+    ) -> Result<usize> {
         let (source, dest, mode) = (self.source, self.dest, self.mode);
+        let original = changed.map(|(original, _)| original);
+        let (content, files) = changed.map_or((true, true), |(_, update)| {
+            (update.content_changed_in_dest, update.files_changed_in_dest)
+        });
         let folder = folder_name(self.dest_vault, copy, mode);
-        let folder_id = match mode {
-            Mode::Personal => source_folder(source, &mut self.folders, folder.as_deref()).await?,
-            Mode::Organization => original.and_then(|original| original.folder_id.clone()),
-        };
         // An edited copy keeps its original's collections.
         let names = match original {
             Some(original) => collection_names(self.source_vault, original, mode),
@@ -404,35 +407,47 @@ impl Puller<'_> {
                 collection_names(self.dest_vault, &selected, mode)
             }
         };
-        let collection_ids = match (original, &source.scope) {
-            (Some(original), _) => original.collection_ids.clone(),
-            (None, Scope::Organization(org)) => {
-                let mut ids = Vec::new();
-                for name in &names {
-                    if !self.collections.contains_key(name) {
-                        let created = source.account.create_collection(org, name, None).await?;
-                        self.collections.insert(created.name, created.id);
-                    }
-                    ids.push(self.collections[name].clone());
-                }
-                ids
-            }
-            (None, Scope::Personal) => Vec::new(),
-        };
-        let draft = Draft {
-            content: plan::unmarked(copy),
-            folder_id,
-            collection_ids,
-        };
         let written = match original {
-            Some(original) => {
-                (source.account)
-                    .update_item(&source.scope, original, &draft)
-                    .await
+            Some(original) if !content => original.clone(),
+            _ => {
+                let folder_id = match mode {
+                    Mode::Personal => {
+                        source_folder(source, &mut self.folders, folder.as_deref()).await?
+                    }
+                    Mode::Organization => original.and_then(|original| original.folder_id.clone()),
+                };
+                let collection_ids = match (original, &source.scope) {
+                    (Some(original), _) => original.collection_ids.clone(),
+                    (None, Scope::Organization(org)) => {
+                        let mut ids = Vec::new();
+                        for name in &names {
+                            if !self.collections.contains_key(name) {
+                                let created =
+                                    source.account.create_collection(org, name, None).await?;
+                                self.collections.insert(created.name, created.id);
+                            }
+                            ids.push(self.collections[name].clone());
+                        }
+                        ids
+                    }
+                    (None, Scope::Personal) => Vec::new(),
+                };
+                let draft = Draft {
+                    content: plan::unmarked(copy),
+                    folder_id,
+                    collection_ids,
+                };
+                match original {
+                    Some(original) => {
+                        (source.account)
+                            .update_item(&source.scope, original, &draft)
+                            .await
+                    }
+                    None => source.account.create_item(&source.scope, &draft).await,
+                }
+                .with_context(|| format!("writing destination item {} into the source", copy.id))?
             }
-            None => source.account.create_item(&source.scope, &draft).await,
-        }
-        .with_context(|| format!("writing destination item {} into the source", copy.id))?;
+        };
         let (stored, copied) = match files {
             true => {
                 let old: Vec<String> = written.attachments.iter().map(|a| a.id.clone()).collect();
@@ -442,7 +457,7 @@ impl Puller<'_> {
         };
         // A server can accept a write and keep less of it, and the mirror
         // after the pull would copy that loss into the destination.
-        if comparable(&stored, None, &[], mode) != comparable(copy, None, &[], mode) {
+        if content && comparable(&stored, None, &[], mode) != comparable(copy, None, &[], mode) {
             bail!(
                 "source item {} did not keep all of destination item {}, so the pull stopped there",
                 stored.id,
@@ -453,8 +468,24 @@ impl Puller<'_> {
         if stored.archived != archived {
             self.archive(&stored, archived).await?;
         }
+        // The marker vouches for the content and files both sides now share,
+        // so the mirror after the pull brings over what changed only in the
+        // source: content, if only the files came back, and files the source
+        // replaced while only the copy's content changed.
+        let shared = Item {
+            content: copy.content.clone(),
+            ..stored.clone()
+        };
+        let files_match = changed.is_none_or(|(_, update)| files || !update.sync_attachments);
         let marked = Draft {
-            content: plan::mark_copy(copy, &stored, folder.as_deref(), &names, mode, Some(copy)),
+            content: plan::mark_copy(
+                copy,
+                &shared,
+                folder.as_deref(),
+                &names,
+                mode,
+                files_match.then_some(copy),
+            ),
             folder_id: copy.folder_id.clone(),
             collection_ids: copy.collection_ids.clone(),
         };
