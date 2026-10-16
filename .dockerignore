@@ -3,3 +3,6 @@ target
 sandbox
 tests
 *.md
+# Secrets, kept out even though the Dockerfile copies only what it needs.
+.env
+**/vault-mirror.env
