@@ -178,12 +178,23 @@ pub(crate) fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
+    let created: Vec<&Path> = (path.ancestors())
+        .take_while(|directory| !directory.as_os_str().is_empty() && !directory.is_dir())
+        .collect();
     fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         // Best effort: a bind mount may not allow changing the mode.
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+    // A snapshot in a new directory survives a crash only once that
+    // directory's own entry does.
+    for directory in created {
+        let parent = (directory.parent())
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        sync_dir(parent)?;
     }
     Ok(())
 }
