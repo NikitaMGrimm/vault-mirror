@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="https://github.com/NikitaMGrimm/vault-mirror/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/NikitaMGrimm/vault-mirror/ci.yml?branch=main&style=flat-square&label=CI"></a>
-  <a href="https://github.com/NikitaMGrimm/vault-mirror/releases"><img alt="Release" src="https://img.shields.io/github/v/release/NikitaMGrimm/vault-mirror?sort=semver&style=flat-square"></a>
+  <a href="https://github.com/NikitaMGrimm/vault-mirror/releases"><img alt="Release" src="https://img.shields.io/badge/dynamic/xml?url=https%3A%2F%2Fgithub.com%2FNikitaMGrimm%2Fvault-mirror%2Freleases.atom&amp;query=%28%2F%2F%2A%5Blocal-name%28%29%3D%22entry%22%5D%2F%2A%5Blocal-name%28%29%3D%22title%22%5D%29%5B1%5D&amp;label=release&amp;color=blue&amp;style=flat-square"></a>
   <a href="https://crates.io/crates/vault-mirror"><img alt="crates.io" src="https://img.shields.io/crates/v/vault-mirror?style=flat-square"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square"></a>
 </p>
