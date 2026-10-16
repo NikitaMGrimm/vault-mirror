@@ -10,9 +10,10 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, TryStreamExt, stream};
+use sha2::{Digest, Sha256};
 
 use crate::{
-    mirror::{Endpoint, Reporter, Tally, refused},
+    mirror::{Endpoint, Reporter, Tally, check_uploads, refused},
     node::Node,
     plan::{Mode, comparable, differing_paths},
     snapshot::{self, RestorableItem, SnapshotAttachment},
@@ -216,12 +217,16 @@ pub async fn restore(
         .create_items(scope, &drafts, &folder_names, &|n| writes.add(n))
         .await?;
 
+    let mode = match scope {
+        Scope::Personal => Mode::Personal,
+        Scope::Organization(_) => Mode::Organization,
+    };
     let files: Vec<Vec<String>> = stream::iter(items.iter().zip(&created).map(
         |(item, created)| async move {
-            let mut names = Vec::new();
+            let mut uploaded = Vec::new();
             for attachment in (item.attachments.iter()).filter(|_| attachments_allowed) {
                 let data = read(attachment)?;
-                account
+                let id = account
                     .upload_attachment(scope, created, &attachment.file_name, &data)
                     .await
                     .with_context(|| {
@@ -230,9 +235,21 @@ pub async fn restore(
                             attachment.attachment_id, item.id
                         )
                     })?;
-                names.push(attachment.file_name.clone());
+                uploaded.push((
+                    id,
+                    attachment.file_name.as_str(),
+                    <[u8; 32]>::from(Sha256::digest(&data)),
+                ));
             }
-            anyhow::Ok(names)
+            if !uploaded.is_empty() {
+                check_uploads(target, created, &uploaded, mode).await?;
+            }
+            anyhow::Ok(
+                uploaded
+                    .iter()
+                    .map(|(_, name, _)| name.to_string())
+                    .collect(),
+            )
         },
     ))
     .buffered(WRITES_AT_ONCE)
@@ -275,10 +292,6 @@ pub async fn restore(
         .load(scope)
         .await
         .context("reading the target vault again")?;
-    let mode = match scope {
-        Scope::Personal => Mode::Personal,
-        Scope::Organization(_) => Mode::Organization,
-    };
     let mut problems = differences(&expected, &vault, mode);
     if !problems.is_empty() {
         let more = match problems.len() {
