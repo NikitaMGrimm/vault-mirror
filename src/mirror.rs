@@ -1,7 +1,7 @@
 //! Makes a destination vault match a source vault.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -511,6 +511,7 @@ impl Archiver {
                 archived.collection_ids = stored.collection_ids.clone();
                 if comparable(&archived, None, &[], mode) != comparable(&stored, None, &[], mode)
                     || archived.folder_id != stored.folder_id
+                    || attachment_ids(&archived) != attachment_ids(&stored)
                 {
                     bail!(
                         "item {} changed during the run. Run again to copy it",
@@ -698,6 +699,10 @@ fn mode(source: &Scope, dest: &Scope) -> Result<Mode> {
             "the source and destination must both be individual vaults or both be organizations"
         ),
     }
+}
+
+fn attachment_ids(item: &Item) -> BTreeSet<&str> {
+    item.attachments.iter().map(|a| a.id.as_str()).collect()
 }
 
 struct Run<'a> {
