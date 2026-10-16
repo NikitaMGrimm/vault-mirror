@@ -270,11 +270,27 @@ pub async fn pull(
         items.push((copy, Some((original, update))));
     }
     let changed = items.len();
+    // A new source item the source would not show would be added again on
+    // every pull.
+    let mut left_out = 0;
+    let mut add = |item: &'_ Item| {
+        let homeless = mode == Mode::Organization
+            && traits.items_need_collections
+            && item.collection_ids.is_empty();
+        let shown = !traits.hides(item) && !homeless;
+        if !shown {
+            left_out += 1;
+        }
+        shown
+    };
     // A changed copy whose source item is gone comes back as a new item.
     for delete in (plan.deletes.iter()).filter(|delete| {
         delete.changed_in_dest && selected.contains(dest_vault.items[delete.dest].id.as_str())
     }) {
-        items.push((&dest_vault.items[delete.dest], None));
+        let copy = &dest_vault.items[delete.dest];
+        if add(copy) {
+            items.push((copy, None));
+        }
     }
     // Items vault-mirror didn't make, except the originals of copies made the
     // other way round.
@@ -282,21 +298,14 @@ pub async fn pull(
         .filter_map(plan::marker_of)
         .map(|marker| marker.source_id)
         .collect();
-    let mut left_out = 0;
     for item in &selected_dest.items {
         if item.in_trash || plan::marker_of(item).is_some() || originals.contains(&item.id) {
             continue;
         }
-        // The source would not show it, and every pull would add it again.
-        let homeless = mode == Mode::Organization
-            && traits.items_need_collections
-            && item.collection_ids.is_empty();
-        if traits.hides(item) || homeless {
-            left_out += 1;
-            continue;
+        if add(item) {
+            let item = dest_vault.items.iter().find(|real| real.id == item.id);
+            items.extend(item.map(|item| (item, None)));
         }
-        let item = dest_vault.items.iter().find(|real| real.id == item.id);
-        items.extend(item.map(|item| (item, None)));
     }
 
     let mut pulled = Pulled::default();
