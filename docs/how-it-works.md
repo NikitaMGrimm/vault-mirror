@@ -66,7 +66,7 @@ docker compose up -d
 ```
 
 A pull copies into the source every copy you changed, and every item you added
-in the destination. Then it mirrors as usual. It deletes nothing, so an item
+in the destination, as far as the filter selects them. Then it mirrors as usual. It deletes nothing, so an item
 you deleted in the destination comes back from the source. Until a started
 pull finishes, runs without `--pull` refuse to start.
 

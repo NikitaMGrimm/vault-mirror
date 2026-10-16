@@ -889,6 +889,59 @@ async fn a_pull_takes_only_what_changed_in_the_destination() -> Result<()> {
     Ok(())
 }
 
+/// A copy moved out of what the filter selects and edited there stays out of
+/// the source.
+#[tokio::test]
+async fn a_pull_leaves_edits_outside_the_filter_out_of_the_source() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    let work = source.create_folder("Work").await?;
+    let mut content = fixtures::named("Bare login without folder").content;
+    content.insert("name".into(), Node::secret("Moved out"));
+    let draft = Draft {
+        content,
+        folder_id: Some(work.id),
+        collection_ids: vec![],
+    };
+    source.create_item(&PERSONAL, &draft).await?;
+    let dir = tempfile::tempdir()?;
+    let filter = [("INCLUDE_FOLDERS", "Work")];
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &filter);
+    let capture = Capture::default();
+    let run = |flags| app::run_once(&config, flags, &capture);
+    assert!(run(RunFlags::default()).await.succeeded());
+
+    let private = dest.create_folder("Private").await?;
+    let vault = dest.load(&PERSONAL).await?;
+    let copy = by_name(&vault, "Moved out");
+    let mut edited = Draft {
+        content: copy.content.clone(),
+        folder_id: Some(private.id),
+        collection_ids: vec![],
+    };
+    (edited.content).insert("notes".into(), Node::secret("private change"));
+    dest.update_item(&PERSONAL, copy, &edited).await?;
+
+    let pulled = run(RunFlags {
+        pull: true,
+        ..RunFlags::default()
+    })
+    .await;
+    assert!(pulled.succeeded(), "{pulled:?}");
+    assert_eq!(pulled.pulled.as_ref().unwrap().summary.items_updated, 0);
+    let back = source.load(&PERSONAL).await?;
+    let original = by_name(&back, "Moved out");
+    assert_eq!(folder_of(&back, original).as_deref(), Some("Work"));
+    let notes = original.content.get("notes").and_then(Node::as_str);
+    assert_ne!(notes, Some("private change"));
+    Ok(())
+}
+
 /// Edits a destination copy as the pull starts, as someone still using the
 /// destination might.
 struct EditDuringPull<'a> {

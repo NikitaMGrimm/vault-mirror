@@ -256,19 +256,24 @@ pub async fn pull(
         .context("reading the source server's settings")?;
 
     // Destination items to bring back, each with the source item it changes.
+    // Only what the filter selects in the destination comes back: an edit
+    // in an excluded folder or collection stays out of the source.
+    let selected: HashSet<&str> = (selected_dest.items.iter())
+        .map(|item| item.id.as_str())
+        .collect();
     let mut items: Vec<(&Item, Option<(&Item, &plan::Update)>)> = Vec::new();
-    for update in plan
-        .updates
-        .iter()
-        .filter(|update| update.changed_in_dest())
-    {
+    for update in (plan.updates.iter()).filter(|update| {
+        update.changed_in_dest() && selected.contains(dest_vault.items[update.dest].id.as_str())
+    }) {
         let original = &selected_source.items[plan.entries[update.entry].source];
         let copy = &dest_vault.items[update.dest];
         items.push((copy, Some((original, update))));
     }
     let changed = items.len();
     // A changed copy whose source item is gone comes back as a new item.
-    for delete in plan.deletes.iter().filter(|delete| delete.changed_in_dest) {
+    for delete in (plan.deletes.iter()).filter(|delete| {
+        delete.changed_in_dest && selected.contains(dest_vault.items[delete.dest].id.as_str())
+    }) {
         items.push((&dest_vault.items[delete.dest], None));
     }
     // Items vault-mirror didn't make, except the originals of copies made the
@@ -307,8 +312,9 @@ pub async fn pull(
             count(left_out, "item")
         ));
     }
-    let both = (plan.updates.iter())
-        .filter(|update| update.changed_in_dest() && plan.changed_in_both(update, dest_vault))
+    let both = (items.iter())
+        .filter_map(|(_, changed)| *changed)
+        .filter(|(_, update)| plan.changed_in_both(update, dest_vault))
         .count();
     if both > 0 {
         warn(format!(
@@ -565,26 +571,7 @@ async fn copy_attachments(
         ));
     }
     if !copied.is_empty() {
-        let uploaded = reread(to, to_item, mode).await?;
-        for (id, name, digest) in &copied {
-            let found = uploaded.attachments.iter().find(|a| a.id == *id);
-            let matches = match found {
-                Some(attachment) if attachment.file_name == *name => {
-                    let data = to
-                        .account
-                        .download_attachment(&to.scope, &uploaded, attachment)
-                        .await?;
-                    <[u8; 32]>::from(Sha256::digest(&data)) == *digest
-                }
-                _ => false,
-            };
-            if !matches {
-                bail!(
-                    "the attachments of item {} do not match what was copied",
-                    to_item.id
-                );
-            }
-        }
+        check_uploads(to, to_item, &copied, mode).await?;
     }
     for attachment_id in old {
         to.account
@@ -602,6 +589,37 @@ async fn copy_attachments(
         );
     }
     Ok((stored, copied.len()))
+}
+
+/// Reads `item` back and fails unless it holds each `uploaded` file, by id,
+/// name and SHA-256 of its content.
+pub(crate) async fn check_uploads(
+    to: &Endpoint<'_>,
+    item: &Item,
+    uploaded: &[(String, &str, [u8; 32])],
+    mode: Mode,
+) -> Result<()> {
+    let stored = reread(to, item, mode).await?;
+    for (id, name, digest) in uploaded {
+        let found = stored.attachments.iter().find(|a| a.id == *id);
+        let matches = match found {
+            Some(attachment) if attachment.file_name == *name => {
+                let data = to
+                    .account
+                    .download_attachment(&to.scope, &stored, attachment)
+                    .await?;
+                <[u8; 32]>::from(Sha256::digest(&data)) == *digest
+            }
+            _ => false,
+        };
+        if !matches {
+            bail!(
+                "the attachments of item {} do not match what was uploaded",
+                item.id
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `item` as the server now holds it. Fails if it was edited since this run
