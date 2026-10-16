@@ -142,11 +142,6 @@ impl Env<'_> {
 }
 
 impl Config {
-    /// The configured vaults with their roles: `source`, then `dest`.
-    pub fn vaults(&self) -> impl Iterator<Item = (&VaultConfig, &'static str)> {
-        std::iter::once((&self.source, "source")).chain(self.dest.iter().map(|dest| (dest, "dest")))
-    }
-
     pub fn from_env(env: &HashMap<String, String>) -> Result<Self> {
         let env = Env(env);
         let source = env.vault("SOURCE")?.ok_or_else(|| {
