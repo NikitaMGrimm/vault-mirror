@@ -53,8 +53,9 @@ The container's `daemon` command runs at the times `SCHEDULE` names, not at
 startup. The image's health check gives the first run 26 hours. To use your
 own scheduler instead, have it start `vault-mirror run`.
 
-Only one command at a time can use a backup directory. Another one stops
-straight away without changing anything.
+Only one `run`, `daemon` run, `restore`, `export` or `snapshots` can use a
+backup directory at a time. Another one stops straight away without changing
+anything.
 
 The generated `compose.yaml` gives a run five minutes to finish when the
 container stops. Raise `stop_grace_period` for large vaults.
