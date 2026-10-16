@@ -110,9 +110,11 @@ is safe only for untouched untracked additions that the mirror leaves alone.
 Export the destination before resolving a refused recovery. To preserve a copy
 independently, remove its marker deliberately. A run without `--pull` still
 lets the source win. After source writes, the pull verifies its intended
-content before the forward mirror can use it. An interrupted pull with pending
-files must be completed with `--pull` before ordinary mirroring resumes, even
-when a later run's filter excludes the unfinished item.
+content and placement before the forward mirror can use it. If the source drops
+a new item's folder or collection membership, a resumed pull retries that
+placement. An interrupted pull with pending files must be completed with
+`--pull` before ordinary mirroring resumes, even when a later run's filter
+excludes the unfinished item.
 
 Then it mirrors as usual. A pull removes no items: an item you deleted in the
 destination is still in the source, and the mirror copies it back, so delete it

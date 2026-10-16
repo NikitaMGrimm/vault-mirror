@@ -1998,4 +1998,31 @@ async fn a_pull_rejects_collection_membership_the_source_dropped() {
             .iter()
             .all(|item| marker_of(item).is_some_and(|marker| marker.files_pending()))
     );
+
+    fake.side("source", |side| side.dropping_collections = false);
+    let source_vault = source.account.load(&source.scope).await.unwrap();
+    mirror::pull(
+        &source,
+        &dest,
+        &source_vault,
+        &dest_vault,
+        &pull_options(Filter::default()),
+        true,
+        &Capture::default(),
+    )
+    .await
+    .unwrap();
+    let recovered = source.account.load(&source.scope).await.unwrap();
+    assert_eq!(recovered.items.len(), 1);
+    let shared = recovered
+        .collections
+        .iter()
+        .find(|collection| collection.name == "Shared")
+        .unwrap();
+    assert_eq!(
+        by_name(&recovered, "Added during the outage")
+            .collection_ids
+            .as_slice(),
+        std::slice::from_ref(&shared.id)
+    );
 }

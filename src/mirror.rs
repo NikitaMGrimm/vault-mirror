@@ -587,8 +587,6 @@ pub async fn pull(
         else {
             continue;
         };
-        let folder = folder_name(dest_vault, copy, mode);
-        let names = collection_names(dest_vault, copy, mode);
         let draft = Draft {
             content: original.content.clone(),
             folder_id: original.folder_id.clone(),
@@ -604,7 +602,7 @@ pub async fn pull(
             &draft,
             &files,
             original.archived,
-            (copy, folder.as_deref(), &names),
+            copy,
             mode,
         )
         .await?;
@@ -662,14 +660,13 @@ pub async fn pull(
             final_draft = draft(Some(&stored));
             written = stored;
         }
-        let pair = (copy, folder.as_deref(), names.as_slice());
         check_pulled(
             source,
             &written,
             &final_draft,
             &wanted_files,
             wanted_archived,
-            pair,
+            copy,
             mode,
         )
         .await?;
@@ -683,7 +680,7 @@ pub async fn pull(
             &final_draft,
             &wanted_files,
             wanted_archived,
-            pair,
+            copy,
             mode,
         )
         .await?;
@@ -752,14 +749,13 @@ pub async fn pull(
             .into_iter()
             .map(str::to_string)
             .collect();
-        let pair = (item, folder.as_deref(), names.as_slice());
         check_pulled(
             source,
             &stored,
             &final_draft,
             &wanted,
             wanted_archived,
-            pair,
+            item,
             mode,
         )
         .await?;
@@ -774,7 +770,7 @@ pub async fn pull(
             &final_draft,
             &wanted,
             wanted_archived,
-            pair,
+            item,
             mode,
         )
         .await?;
@@ -822,7 +818,7 @@ async fn check_pulled(
     draft: &Draft,
     files: &BTreeSet<String>,
     archived: bool,
-    (copy, folder, names): (&Item, Option<&str>, &[String]),
+    copy: &Item,
     mode: Mode,
 ) -> Result<()> {
     let vault = source
@@ -862,8 +858,10 @@ async fn check_pulled(
         id: copy.id.clone(),
         ..held.clone()
     };
+    let folder = folder_name(&vault, held, mode);
+    let names = collection_names(&vault, held, mode);
     let pending = Draft {
-        content: plan::mark_copy(held, &holds, folder, names, mode, None),
+        content: plan::mark_copy(held, &holds, folder.as_deref(), &names, mode, None),
         folder_id: held.folder_id.clone(),
         collection_ids: held.collection_ids.clone(),
     };
