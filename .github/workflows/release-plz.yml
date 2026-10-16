@@ -54,12 +54,22 @@ jobs:
     steps:
       # Without a `ref`, this checks out the pushed commit that CI passed,
       # even if main has moved on since. release-plz releases it only if it
-      # squashed a release pull request (`release_always`). From a merge commit
-      # it would release the pull request's own last commit, untested by CI.
+      # squashed a release pull request (`release_always`).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify the tested release commit
+        run: |
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "::error::The checkout is not the commit that passed CI"
+            exit 1
+          fi
+          read -r -a parents <<< "$(git show -s --format=%P HEAD)"
+          if (( ${#parents[@]} > 1 )); then
+            echo "::error::Squash-merge release pull requests so release-plz publishes the tested commit"
+            exit 1
+          fi
       - name: Install Rust
         run: |
           toolchain=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
@@ -81,6 +91,7 @@ jobs:
     if: needs.release.outputs.tag != ''
     permissions:
       contents: write
+      actions: read
       packages: write
       id-token: write
       attestations: write
