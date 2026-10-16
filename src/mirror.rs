@@ -912,10 +912,13 @@ impl Run<'_> {
         let changed = plan.updates.iter().filter(|u| u.changed_in_dest()).count();
         if changed > 0 {
             let them = if changed == 1 { "it" } else { "them" };
+            let backed_up = match self.options.dry_run {
+                true => "",
+                false => " Your changes are in the destination backup from the start of this run.",
+            };
             self.warn(format!(
                 "{} changed in the destination since vault-mirror wrote {them}. A run replaces \
-                 {them} with the source version, so make lasting changes in the source. Your \
-                 changes are in the destination backup from the start of this run.",
+                 {them} with the source version, so make lasting changes in the source.{backed_up}",
                 count(changed, "copy")
             ));
         }
