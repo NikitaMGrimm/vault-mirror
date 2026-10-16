@@ -3,7 +3,6 @@
 use std::{
     collections::HashMap,
     fs,
-    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -26,7 +25,6 @@ use crate::{
 pub const STATUS_FILE: &str = "last-run.json";
 const STATE_FILE: &str = "state.json";
 const LOCK_FILE: &str = "run.lock";
-const RESTORE_HOLD_FILE: &str = "restore-hold.json";
 /// Present while a `run --pull` has not finished its pull.
 const UNFINISHED_PULL_FILE: &str = "unfinished-pull";
 
@@ -158,53 +156,6 @@ pub fn lock_backups_dir(backups_dir: &Path) -> Result<fs::File> {
     }
 }
 
-/// Pauses mirroring after restoring independent items. The caller must hold
-/// the backup directory lock and persist this before the first vault write.
-pub fn hold_after_restore(backups_dir: &Path) -> Result<()> {
-    let path = backups_dir.join(RESTORE_HOLD_FILE);
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = match options.open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            if !fs::symlink_metadata(&path)?.file_type().is_file() {
-                return Err(anyhow!(
-                    "recovery hold is not a regular file: {}",
-                    path.display()
-                ));
-            }
-            let file = fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .with_context(|| format!("opening {}", path.display()))?;
-            file.sync_all()?;
-            #[cfg(unix)]
-            fs::File::open(backups_dir)?.sync_all()?;
-            return Ok(());
-        }
-        Err(error) => return Err(error).with_context(|| format!("creating {}", path.display())),
-    };
-    file.write_all(b"{\"format\":1}\n")?;
-    file.sync_all()?;
-    #[cfg(unix)]
-    fs::File::open(backups_dir)?.sync_all()?;
-    Ok(())
-}
-
-fn check_recovery_holds(backups_dir: &Path) -> Result<()> {
-    let path = backups_dir.join(RESTORE_HOLD_FILE);
-    match fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("checking {}", path.display())),
-        Ok(_) => Err(anyhow!(
-            "mirroring is paused by {}; restored items are independent. Stop scheduling and follow the recovery reconciliation steps in docs/backups.md before removing this hold",
-            path.display()
-        )),
-    }
-}
-
 pub fn http_client(config: &Config) -> Result<reqwest::Client> {
     let mut options = ClientOptions {
         client_version: config.client_version.clone(),
@@ -323,17 +274,14 @@ async fn execute(
     now: OffsetDateTime,
 ) -> Result<()> {
     let unfinished_pull = config.backups_dir.join(UNFINISHED_PULL_FILE);
-    if config.dest.is_some() {
-        progress.stage = "recovery hold";
-        check_recovery_holds(&config.backups_dir)?;
-        // Destination items the pull didn't get to still hold changes that a
-        // run without it would overwrite.
-        if !flags.pull && unfinished_pull.exists() {
-            bail!(
-                "the last run --pull stopped before it finished, and this run would overwrite \
-                 what it had still to bring back. Run with --pull again"
-            );
-        }
+    // Destination items the pull didn't get to still hold changes that a run
+    // without it would overwrite.
+    if config.dest.is_some() && !flags.pull && unfinished_pull.exists() {
+        progress.stage = "unfinished pull";
+        bail!(
+            "the last run --pull stopped before it finished, and this run would overwrite \
+             what it had still to bring back. Run with --pull again"
+        );
     }
     progress.stage = "backup metadata";
     store::migrate_metadata(&config.backups_dir)?;
@@ -807,31 +755,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_restore_hold_stops_mirroring_before_login_even_with_overrides() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(RESTORE_HOLD_FILE), b"{}").unwrap();
-        let mut config = mirror_config(dir.path());
-        let flags = RunFlags {
-            allow_mass_delete: true,
-            reverse: true,
-            pull: true,
-            ..RunFlags::default()
-        };
-        let status = run_once(&config, flags, &Quiet).await;
-        assert_eq!(status.failure_stage.as_deref(), Some("recovery hold"));
-        assert!(status.error.unwrap().contains(RESTORE_HOLD_FILE));
-        config.dest = None;
-        let status = run_once(&config, RunFlags::default(), &Quiet).await;
-        assert_eq!(status.failure_stage.as_deref(), Some("source login"));
-    }
-
-    #[tokio::test]
     async fn an_unfinished_pull_lets_only_another_pull_run() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(UNFINISHED_PULL_FILE), b"").unwrap();
         let config = mirror_config(dir.path());
         let refused = run_once(&config, RunFlags::default(), &Quiet).await;
-        assert_eq!(refused.failure_stage.as_deref(), Some("recovery hold"));
+        assert_eq!(refused.failure_stage.as_deref(), Some("unfinished pull"));
         assert!(refused.error.unwrap().contains("--pull"));
         let pull = RunFlags {
             pull: true,
@@ -840,44 +769,6 @@ mod tests {
         let status = run_once(&config, pull, &Quiet).await;
         assert_eq!(status.failure_stage.as_deref(), Some("source login"));
         assert!(dir.path().join(UNFINISHED_PULL_FILE).exists());
-    }
-
-    #[test]
-    fn a_restore_hold_preserves_existing_recovery_information() {
-        let dir = tempfile::tempdir().unwrap();
-        hold_after_restore(dir.path()).unwrap();
-        assert!(check_recovery_holds(dir.path()).is_err());
-        let path = dir.path().join(RESTORE_HOLD_FILE);
-        fs::write(&path, b"operator recovery notes").unwrap();
-        hold_after_restore(dir.path()).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"operator recovery notes");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_broken_restore_hold_symlink_still_pauses_mirroring() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(RESTORE_HOLD_FILE);
-        std::os::unix::fs::symlink(dir.path().join("missing"), &path).unwrap();
-        assert!(check_recovery_holds(dir.path()).is_err());
-        assert!(hold_after_restore(dir.path()).is_err());
-        assert!(!dir.path().join("missing").exists());
-    }
-
-    #[test]
-    fn a_directory_cannot_stand_in_for_a_persisted_restore_hold() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join(RESTORE_HOLD_FILE)).unwrap();
-        assert!(check_recovery_holds(dir.path()).is_err());
-        assert!(hold_after_restore(dir.path()).is_err());
     }
 
     #[tokio::test]

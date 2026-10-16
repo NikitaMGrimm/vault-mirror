@@ -21,7 +21,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{self, BufRead, Read, Seek, Write},
+    io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Mutex, PoisonError},
@@ -439,22 +439,6 @@ pub(crate) fn sync_dir(directory: &Path) -> io::Result<()> {
 
 fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
-}
-
-/// Copies `from` to `to`, and returns the digest of what it copied.
-fn copy_hashed(from: &mut impl Read, to: &mut impl Write) -> io::Result<String> {
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; 1 << 16];
-    loop {
-        let read = match from.read(&mut buffer) {
-            Ok(0) => return Ok(hex::encode(hasher.finalize())),
-            Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        hasher.update(&buffer[..read]);
-        to.write_all(&buffer[..read])?;
-    }
 }
 
 fn is_sha256_hex(text: &str) -> bool {
@@ -890,32 +874,6 @@ impl<'a> Store<'a> {
             .with_context(|| format!("decrypting {}", path.display()))
     }
 
-    /// Copies an attachment's encrypted file into a temporary file, so that
-    /// what a restore checks first is what it uploads later, without its
-    /// content in the clear on disk or every attachment in memory.
-    pub fn stage_snapshot_attachment(
-        &self,
-        attachment: &SnapshotAttachment,
-    ) -> Result<StagedAttachment<'a>> {
-        let (path, digest) = self.attachment_file(attachment)?;
-        let mut source =
-            fs::File::open(&path).with_context(|| format!("reading {}", path.display()))?;
-        let mut file = tempfile::tempfile().context("creating a temporary file")?;
-        let staged = copy_hashed(&mut source, &mut file)
-            .with_context(|| format!("copying {} to a temporary file", path.display()))?;
-        if digest.is_some_and(|digest| digest != staged) {
-            bail!(
-                "{} is not the file the backup recorded; it is damaged or was replaced",
-                path.display()
-            );
-        }
-        Ok(StagedAttachment {
-            keys: self.keys,
-            file: Mutex::new(file),
-            ciphertext_sha256: staged,
-        })
-    }
-
     fn group(&self, origin: &VaultOrigin) -> Group {
         Group {
             origin: origin.id(),
@@ -1297,34 +1255,6 @@ impl Drop for SnapshotWriter<'_> {
     }
 }
 
-/// An attachment's encrypted file, copied aside by
-/// [`Store::stage_snapshot_attachment`].
-pub struct StagedAttachment<'a> {
-    keys: &'a Keys,
-    /// Locked for each read, since reads share the file's position.
-    file: Mutex<fs::File>,
-    /// The digest of the copy, checked when it was made.
-    ciphertext_sha256: String,
-}
-
-impl StagedAttachment<'_> {
-    /// Decrypts the copy, after checking it is still the file that was
-    /// checked when staged.
-    pub fn read_plaintext(&self) -> Result<Vec<u8>> {
-        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
-        file.rewind().context("reading a temporary file")?;
-        let digest =
-            copy_hashed(&mut *file, &mut io::sink()).context("reading a temporary file")?;
-        if digest != self.ciphertext_sha256 {
-            bail!("the temporary copy of an attachment changed after it was checked");
-        }
-        file.rewind().context("reading a temporary file")?;
-        let mut out = Vec::new();
-        self.keys.decrypt_to(io::BufReader::new(&*file), &mut out)?;
-        Ok(out)
-    }
-}
-
 fn meta_path(snapshot: &Path) -> PathBuf {
     let stem = snapshot_id_of(snapshot).unwrap_or(file_name(snapshot));
     snapshot.with_file_name(format!("{stem}{META_SUFFIX}"))
@@ -1652,10 +1582,9 @@ mod tests {
         assert!(Keys::from_key_file(dir.path(), "p").is_err());
         assert!(!dir.path().join(KEY_FILE).exists());
 
-        // Any other file is a sign of earlier backups, such as a hold a
-        // restore left.
+        // Any other file is a sign of earlier backups.
         fs::remove_dir_all(dir.path().join("source")).unwrap();
-        fs::write(dir.path().join("restore-hold.json"), b"{}").unwrap();
+        fs::write(dir.path().join("unfinished-pull"), b"").unwrap();
         assert!(Keys::open(dir.path(), &passphrase("p")).is_err());
         assert!(!dir.path().join(KEY_FILE).exists());
 
@@ -2352,7 +2281,6 @@ mod tests {
         )
         .unwrap();
         assert!(store.read_snapshot_attachment(attachment).is_err());
-        assert!(store.stage_snapshot_attachment(attachment).is_err());
 
         let omitted = record("att-1", AttachmentStorage::Omitted);
         assert!(store.read_snapshot_attachment(&omitted).is_err());
@@ -2367,51 +2295,5 @@ mod tests {
                 .unwrap_err();
             assert!(error.to_string().contains("refusing"), "{error}");
         }
-    }
-
-    #[test]
-    fn a_staged_attachment_is_what_was_checked() {
-        let dir = tempfile::tempdir().unwrap();
-        let keys = Keys::open(dir.path(), &passphrase("p")).unwrap();
-        let store = Store::open(dir.path(), "source", &keys).unwrap();
-        let path = write(
-            &store,
-            &origin("user"),
-            datetime!(2026-10-14 00:00 UTC),
-            "a",
-            &[("att-1", b"content")],
-        );
-        let files = files_of(&store, &path);
-        let [attachment] = &files[..] else {
-            panic!("one attachment")
-        };
-        let staged = store.stage_snapshot_attachment(attachment).unwrap();
-        let file = directory_of(&store, &path).join("att-1.age");
-        fs::write(&file, b"changed after staging").unwrap();
-        assert_eq!(staged.read_plaintext().unwrap(), b"content");
-        assert_eq!(staged.read_plaintext().unwrap(), b"content");
-        assert!(store.stage_snapshot_attachment(attachment).is_err());
-
-        let legacy = record("att-2", AttachmentStorage::Legacy);
-        let encrypted = keys.encrypt(b"old content").unwrap();
-        write_private(&store.attachments.join("att-2.age"), &encrypted).unwrap();
-        let staged_legacy = store.stage_snapshot_attachment(&legacy).unwrap();
-        assert_eq!(staged_legacy.read_plaintext().unwrap(), b"old content");
-        // A copy replaced by another file that the same key opens is refused.
-        for staged in [&staged, &staged_legacy] {
-            let mut file = staged.file.lock().unwrap();
-            file.set_len(0).unwrap();
-            file.rewind().unwrap();
-            file.write_all(&keys.encrypt(b"other content").unwrap())
-                .unwrap();
-            drop(file);
-            let error = staged.read_plaintext().unwrap_err();
-            assert!(error.to_string().contains("changed"), "{error}");
-        }
-
-        let foreign = record("att-3", AttachmentStorage::Legacy);
-        write_private(&store.attachments.join("att-3.age"), b"not age").unwrap();
-        let staged = store.stage_snapshot_attachment(&foreign).unwrap();
-        assert!(staged.read_plaintext().is_err());
     }
 }

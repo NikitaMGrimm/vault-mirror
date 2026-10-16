@@ -137,7 +137,6 @@ fn export_uses_an_identity_without_requiring_vault_credentials() {
         assert!(!output.status.success());
         assert!(stderr.contains("invalid server URL"), "{stderr}");
         assert!(!stderr.contains("unavailable-unrelated-secret"), "{stderr}");
-        assert!(!dir.path().join("restore-hold.json").exists());
     }
 
     fs::write(

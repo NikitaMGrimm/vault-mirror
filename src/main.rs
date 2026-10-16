@@ -19,7 +19,7 @@ use vault_mirror::{
     app::{self, RunFlags},
     config::{self, Config},
     mirror::{Endpoint, MirrorOptions, mirror},
-    restore::{self, RestoreOptions},
+    restore::{RestoreOptions, restore},
     schedule::Timetable,
     snapshot,
     store::{self, Keys, Store},
@@ -530,12 +530,7 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
         allow_non_empty: args.allow_non_empty,
         concurrency: config::concurrency(&env)?,
     };
-    let prepared = restore::prepare(&target, &restorable, Some(&store), &options).await?;
-    app::hold_after_restore(&backups)?;
-    Console::warning(
-        "Mirroring is paused by restore-hold.json. Reconcile the recovered vaults before resuming; see docs/backups.md.",
-    );
-    let report = prepared.apply(&Console).await?;
+    let report = restore(&target, &restorable, Some(&store), &options, &Console).await?;
     Console::finished(
         &format!(
             "restore of {}, {}, {} and {} in {:.1}s",
@@ -572,9 +567,9 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
                 missing += 1;
                 continue;
             }
-            let staged = store.stage_snapshot_attachment(attachment)?;
-            staged.read_plaintext()?;
-            files.push((item, attachment, staged));
+            // A damaged backup exports nothing.
+            store.read_snapshot_attachment(attachment)?;
+            files.push((item, attachment));
         }
     }
     if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
@@ -591,7 +586,7 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
         serde_json::to_vec_pretty(&document)?,
     )?;
     let mut written = 0;
-    for (item, attachment, staged) in files {
+    for (item, attachment) in files {
         // Item and attachment ids keep files with the same name apart;
         // the name itself is reduced to its final path component.
         let name = Path::new(&attachment.file_name)
@@ -603,7 +598,10 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
             .join(safe(&item.id))
             .join(safe(&attachment.attachment_id));
         fs::create_dir_all(&directory)?;
-        fs::write(directory.join(name), staged.read_plaintext()?)?;
+        fs::write(
+            directory.join(name),
+            store.read_snapshot_attachment(attachment)?,
+        )?;
         written += 1;
     }
     if missing > 0 {

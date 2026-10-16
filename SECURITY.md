@@ -60,7 +60,6 @@ but a compromised running process can still capture the vault it decrypts.
 | `last-run.json` | Time, result and counts of the last actual run. | None. No vault content. |
 | `state.json` | The device ids vault-mirror logs in with. | None. |
 | `run.lock` | Nothing. It's locked while a run or restore is using the directory. | None. |
-| `restore-hold.json` | A local hold that stops mirroring after a native restore. | None. |
 | `unfinished-pull` | Nothing. It's there while a pull has not finished. | None. |
 
 On Unix, backup and state files are readable only by their owner. With

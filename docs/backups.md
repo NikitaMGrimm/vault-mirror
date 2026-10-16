@@ -15,7 +15,6 @@ backups/
 ├── last-run.json                    # last actual run's outcome
 ├── state.json                       # login device ids
 ├── run.lock                         # serializes access
-├── restore-hold.json                # present after native restore
 ├── unfinished-pull                  # present while a pull has not finished
 ├── source/
 │   ├── snapshots/
@@ -116,23 +115,15 @@ To restore the source's latest complete snapshot into the destination:
 docker compose run --rm vault-mirror restore --to dest
 ```
 
-Restore validates promised attachment files before writing. It then verifies
-the created items, their placement, and uploaded attachment bytes. Missing or
-corrupt promised files stop preparation. Intentionally omitted attachments and
-[unsupported features](limitations.md) are reported separately.
+Restore reads every attachment file from the backup before it writes anything,
+so a damaged backup restores nothing. Afterwards it reads the vault again and
+checks every restored item. Omitted attachments and
+[unsupported features](limitations.md) are reported as warnings.
 
-Restore fills omitted client flags with their standard defaults. Saved
-master-password reprompt values and personal-vault favorites are preserved and
-verified.
-
-Restore and export stage private encrypted copies of the promised attachment
-files. Allow that much free space in the system temporary directory. Files are
-decrypted in memory as needed.
-
-Restored items are independent. They have no operative mirror markers, even
-when recovered from a destination backup. Existing user items are never adopted.
-A partial failed restore can leave created items for inspection. Retrying with
-`--allow-non-empty` can create duplicates.
+Restored items have no mirror markers, even from a destination backup, so a run
+into a restored destination copies the source next to them. To rebuild a lost
+destination, mirror into an empty one instead. A restore that fails partway
+leaves what it created; retrying with `--allow-non-empty` can create duplicates.
 
 | Option | Effect |
 | --- | --- |
@@ -149,27 +140,6 @@ vault do not block recovery. `BACKUP_ENABLED=false` does not prevent reading.
 Without Docker, replace `docker compose run --rm vault-mirror` with
 `vault-mirror --env-file vault-mirror.env`. Mount an identity file read-only
 when using it in a container.
-
-### Resume mirroring after restore
-
-Before the first restore write, vault-mirror creates `restore-hold.json`.
-Runs using that backup directory refuse to mirror while it exists. The hold
-remains after a successful or failed restore. It cannot stop another
-installation using a different directory.
-
-1. Keep scheduling stopped. Preserve both recovered vaults before reconciling.
-2. Verify recovered items and attachments. Choose the authoritative vault and
-   configure it as the source.
-3. Reconcile independent destination items. The clearest rebuild uses a new
-   empty destination while preserving the old one. A normal run into an
-   independently restored destination creates managed copies next to its
-   recovered items. Removing the hold alone does not avoid duplicates.
-4. After reconciliation, remove only `backups/restore-hold.json`. Inspect a dry
-   run, then complete an actual run and verify its result.
-5. Restart scheduling with `docker compose up -d`.
-
-Do not clear the hold just to bypass a failure. Use `export` while investigating.
-Backup-only setups can continue to make backups under a hold.
 
 ## Restore without vault-mirror
 
@@ -208,5 +178,4 @@ private directory and delete decrypted files when done.
    `backups/source/attachments/<attachmentId>.age`. A record with `stored:false`
    has no backed-up content. Attach each recovered file to its item in a client.
 
-5. Delete decrypted files. Follow the reconciliation steps above before resuming
-   mirroring. Manual imports do not create `restore-hold.json`.
+5. Delete decrypted files.
