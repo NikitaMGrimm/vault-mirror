@@ -149,9 +149,6 @@ same pull request and give the reason.
 - CI skips the build and tests when a change only touches Markdown files,
   `docs/` or `assets/`. Otherwise it runs the tests against Vaultwarden and
   against Bitwarden's own server.
-- Pull requests are labelled `size:S` (under 50 lines), `size:M` (under
-  300) or `size:L`. Only lines that change what vault-mirror does count, not
-  tests, documentation or the lockfile.
 - Update the README or `docs/` when behaviour or configuration changes.
 - The maintainer turns on auto-merge after review. A pull request merges as
   soon as the required checks pass. Fix a problem found later in a new pull
