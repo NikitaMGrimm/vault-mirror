@@ -53,12 +53,9 @@ destination, vault-mirror only makes backups. See
 
 ## Do backups pile up?
 
-Current snapshots thin out to one a day and expire after `RETENTION_DAYS`,
-subject to `MIN_FILES`. New snapshots each hold their own attachments. An
-unchanged vault can be skipped when the runner can authenticate its earlier
-backup. Legacy snapshots and
-inactive encryption groups are preserved. See
-[How long backups are kept](backups.md#how-long-backups-are-kept).
+No. Snapshots older than a day thin out to one a day and expire after
+`RETENTION_DAYS`, and an unchanged vault gets no new snapshot. See
+[Backups and restoring](backups.md).
 
 ## Where are my master passwords stored?
 

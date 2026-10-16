@@ -8,15 +8,15 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     mirror::{Endpoint, Reporter, Tally, refused},
     node::Node,
     plan::{Mode, comparable, differing_paths},
-    snapshot::{AttachmentStorage, Restorable, RestorableItem, SnapshotAttachment},
-    store::Store,
+    snapshot::{self, RestorableItem, SnapshotAttachment},
+    store::Snapshot,
     text::count,
     vault::{Draft, Item, Scope, Vault},
 };
@@ -32,8 +32,6 @@ pub struct RestoreReport {
     pub folders_created: usize,
     pub collections_created: usize,
     pub attachments_restored: usize,
-    /// Attachments the snapshot lists but whose content the backup left out.
-    pub attachments_missing: usize,
     /// Attachments left out because the account may not upload attachments.
     pub attachments_skipped: usize,
 }
@@ -47,11 +45,11 @@ pub struct RestoreOptions {
 
 pub async fn restore(
     target: &Endpoint<'_>,
-    snapshot: &Restorable,
-    store: Option<&Store<'_>>,
+    backup: &Snapshot<'_>,
     options: &RestoreOptions,
     reporter: &dyn Reporter,
 ) -> Result<RestoreReport> {
+    let snapshot = &snapshot::parse(&backup.document()?)?;
     let account = target.account;
     let scope = &target.scope;
     match (snapshot.organization(), scope) {
@@ -74,23 +72,18 @@ pub async fn restore(
             count(live, "item")
         );
     }
-    let read = |item: &RestorableItem, attachment: &SnapshotAttachment| {
-        store
-            .ok_or_else(|| anyhow!("no backup directory was given to read it from"))
-            .and_then(|store| store.read_snapshot_attachment(attachment))
+    let read = |attachment: &SnapshotAttachment| {
+        backup
+            .attachment(&attachment.attachment_id)
             .with_context(|| {
                 format!(
                     "reading attachment {} of snapshot item {} from the backup",
-                    attachment.attachment_id, item.id
+                    attachment.attachment_id, attachment.item_id
                 )
             })
     };
-    for item in snapshot.items() {
-        for attachment in &item.attachments {
-            if attachment.storage != AttachmentStorage::Omitted {
-                read(item, attachment)?;
-            }
-        }
+    for attachment in snapshot.attachments() {
+        read(attachment)?;
     }
 
     // Items the server would accept but not show could not be found, and
@@ -119,11 +112,7 @@ pub async fn restore(
             continue;
         }
         items.push(item);
-        if attachments_allowed {
-            report.attachments_missing += (item.attachments.iter())
-                .filter(|attachment| attachment.storage == AttachmentStorage::Omitted)
-                .count();
-        } else {
+        if !attachments_allowed {
             report.attachments_skipped += item.attachments.len();
         }
     }
@@ -140,12 +129,6 @@ pub async fn restore(
             "Skipped {}: the account has no premium subscription, which Bitwarden requires \
              for attachments.",
             count(report.attachments_skipped, "attachment")
-        ));
-    }
-    if report.attachments_missing > 0 {
-        reporter.warn(&format!(
-            "The backup lacks the content of {} listed in the snapshot.",
-            count(report.attachments_missing, "attachment")
         ));
     }
 
@@ -240,11 +223,8 @@ pub async fn restore(
     let files: Vec<Vec<String>> = stream::iter(items.iter().zip(&created).map(
         |(item, created)| async move {
             let mut names = Vec::new();
-            for attachment in &item.attachments {
-                if !attachments_allowed || attachment.storage == AttachmentStorage::Omitted {
-                    continue;
-                }
-                let data = read(item, attachment)?;
+            for attachment in (item.attachments.iter()).filter(|_| attachments_allowed) {
+                let data = read(attachment)?;
                 account
                     .upload_attachment(scope, created, &attachment.file_name, &data)
                     .await

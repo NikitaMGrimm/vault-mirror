@@ -2,138 +2,99 @@
 
 [← Documentation](README.md)
 
-Every run backs up the whole source and destination
-scope before changing either vault. Folder and collection filters limit copying,
-not backups. The encrypted files use the standard [age](https://age-encryption.org)
-format, so recovery does not require vault-mirror or either server.
+Every run backs up the whole source and destination before changing either
+vault. Folder and collection filters limit copying, not backups. The files use
+the standard [age](https://age-encryption.org) format, so recovery needs neither
+vault-mirror nor either server.
 
 ## What's in the backup directory
 
 ```text
 backups/
-├── key.age                          # needed with BACKUP_PASSPHRASE
-├── last-run.json                    # last actual run's outcome
-├── state.json                       # login device ids
-├── run.lock                         # serializes access
-├── unfinished-pull                  # present while a pull has not finished
+├── key.age                    # the backup key, encrypted with BACKUP_PASSPHRASE
+├── last-run.json              # the last run's outcome
+├── state.json                 # login device ids
+├── run.lock                   # held while a command uses the directory
+├── unfinished-pull            # there while a pull has not finished
 ├── source/
-│   ├── snapshots/
-│   │   ├── vault-20261014T030000Z.json.age
-│   │   └── vault-20261014T030000Z.meta.json
-│   └── attachments/
-│       └── vault-20261014T030000Z/
-│           └── attachment-id.age
+│   └── 20261014T030000Z/      # one snapshot
+│       ├── vault.json.age
+│       └── attachments/
+│           └── <attachment id>.age
 └── dest/
     └── …
 ```
 
-A **snapshot** holds a full vault export without the trash. Each new snapshot
-owns its attachment files. Its encrypted document records their paths and
-ciphertext hashes. Older snapshots may share flat `attachments/<id>.age` files.
-Those files stay readable and are never overwritten by a new backup.
+A **snapshot** is a full vault export without the trash, with its own copy of
+every attachment. A run skips the snapshot when the vault hasn't changed since
+the newest one and that one still opens. Each snapshot stores the attachments
+again, so ten snapshots of a vault with 1 GiB of attachments take about 10 GiB.
 
-A run skips a vault unchanged since its newest snapshot, after checking that
-snapshot and every attachment it promises.
+Snapshots are kept like this:
 
-Each changed recovery point downloads and stores another complete attachment
-set. If a vault has 1 GiB of attachments, ten retained points need about 10 GiB
-plus their JSON exports.
-Plan disk space and network use for both vaults.
+- everything from the last 24 hours,
+- the newest of each older day, for `RETENTION_DAYS` (30 by default),
+- and always the newest snapshot.
 
-Backup writes synchronize encrypted file contents. Unix runs also synchronize
-the key's publication and backup directory entries before allowing vault
-changes. Directory durability barriers are not implemented on Windows. Keep
-independent copies of your recovery material on every platform.
+## Keep the key
 
-### How long backups are kept
-
-After a verified backup, pruning applies to snapshots of the same vault and
-encryption setup:
-
-- Keep every snapshot from the last 24 hours.
-- For older days, keep the newest snapshot of each day in UTC.
-- Delete snapshots older than `RETENTION_DAYS`, 30 by default.
-- Always keep at least `MIN_FILES` newest snapshots, 10 by default.
-
-Each removed snapshot takes its own attachment directory with it.
-
-Legacy snapshots, unfinished publications, and inactive encryption groups are
-preserved. Their storage is additional to current retention. Review them
-manually after testing recovery. Malformed or unknown metadata stops automatic
-pruning. `ENABLE_PRUNING=false` keeps everything.
-
-### Keep the recovery key
-
-With `BACKUP_PASSPHRASE`, the first run generates a random key and encrypts it
-into `key.age`. You need **both** that file and the passphrase. The passphrase
-cannot recreate a lost key. Keep a separate copy of both.
-
-A missing `key.age` in a populated directory stops new backups. Restore the
-original file or choose a new empty `BACKUPS_DIR`. Changing the passphrase does
-not re-encrypt the existing key file.
-
-An upgrade removes old plaintext snapshot fingerprints from local metadata.
-Copies already held by rclone, restic, filesystem snapshots, or another backup
-service keep those fingerprints until you remove them or their retention ends.
+The first run creates a random backup key and stores it in `key.age`, encrypted
+with `BACKUP_PASSPHRASE`. You need **both** to read the backups. The passphrase
+can't recreate a lost `key.age`, so keep copies of both somewhere other than
+the backup disk. If `key.age` goes missing from a directory with snapshots, runs
+stop until you put it back or choose an empty `BACKUPS_DIR`.
 
 ## Restore with vault-mirror
 
-Stop the daemon and every other scheduler using these vaults before recovery:
+Stop the daemon first, so no run changes the vaults while you recover:
 
 ```sh
 docker compose stop vault-mirror
 ```
 
-List source snapshots:
+List the snapshots of the source, or of the destination with `--from dest`:
 
 ```sh
 docker compose run --rm vault-mirror snapshots
 ```
 
-Export the latest complete snapshot and its attachments:
+Export the newest snapshot and its attachments, unencrypted:
 
 ```sh
 docker compose run --rm vault-mirror export --output /data/recovered
 ```
 
-The output is unencrypted. Import its `export.json` with a Bitwarden client,
-then attach the recovered files to their items. Delete the output when done.
-Export removes operative mirror markers, including in old snapshots.
+Import `export.json` with any Bitwarden client, then attach the files from
+`attachments/<attachment id>/` to their items. Delete the output when done.
 
-To restore the source's latest complete snapshot into the destination:
+Or restore the newest source snapshot straight into the destination:
 
 ```sh
 docker compose run --rm vault-mirror restore --to dest
 ```
 
-Restore reads every attachment file from the backup before it writes anything,
-so a damaged backup restores nothing. Afterwards it reads the vault again and
-checks every restored item. Omitted attachments and
-[unsupported features](limitations.md) are reported as warnings.
-
-Restored items have no mirror markers, even from a destination backup, so a run
-into a restored destination copies the source next to them. To rebuild a lost
-destination, mirror into an empty one instead. A restore that fails partway
-leaves what it created; retrying with `--allow-non-empty` can create duplicates.
+Restore reads every attachment from the backup before it writes anything, and
+checks every restored item afterwards. Items the server wouldn't show, and
+attachments a free Bitwarden account can't hold, are left out with a warning.
+Restored items are not copies, so a run into a restored destination copies the
+source next to them. To rebuild a lost destination, mirror into an empty one
+instead.
 
 | Option | Effect |
 | --- | --- |
-| `--from dest` | Read destination backups. |
-| `--snapshot NAME` | Select a named recovery point instead of `latest`. |
-| `--allow-non-empty` | Add recovered items to a vault that already has items. |
+| `--from dest` | Read the destination's snapshots. |
+| `--snapshot ID` | Use this snapshot instead of the newest. |
+| `--allow-non-empty` | Restore into a vault that already has items. |
 
-`snapshots` needs only `BACKUPS_DIR`. `export` additionally needs the existing
-backup passphrase. Restore additionally needs only the chosen
-target account and transport settings. Unavailable credentials for the other
-vault do not block recovery.
-
-Without Docker, replace `docker compose run --rm vault-mirror` with
+These commands need only `BACKUPS_DIR`, `BACKUP_PASSPHRASE` and, to restore, the
+target vault's settings. Without Docker, replace
+`docker compose run --rm vault-mirror` with
 `vault-mirror --env-file vault-mirror.env`.
 
 ## Restore without vault-mirror
 
-Stop all scheduling first. These commands write secrets unencrypted. Use a
-private directory and delete decrypted files when done.
+These commands write secrets unencrypted. Work in a private directory and
+delete the files when done.
 
 1. Decrypt the key. `age` asks for the passphrase:
 
@@ -142,27 +103,17 @@ private directory and delete decrypted files when done.
    age -d -o key.txt backups/key.age
    ```
 
-2. Choose an explicit snapshot filename. Same-second counters sort numerically.
-   Do not select the newest with a lexical `ls | tail` pipeline. For example:
+2. Decrypt a snapshot:
 
    ```sh
-   age -d -i key.txt -o vault.json backups/source/snapshots/vault-20261014T030000Z.json.age
+   age -d -i key.txt -o vault.json backups/source/20261014T030000Z/vault.json.age
    ```
 
-3. Import `vault.json` as **Bitwarden (json)**. New format-2 snapshots have no
-   operative markers. Old destination snapshots can retain them. Use the
-   upgraded `export` command to sanitize those before importing into an active
-   mirror vault.
+3. Import `vault.json` as **Bitwarden (json)**.
 
-4. In `vaultMirror.attachments`, find each stored record's `snapshotId`,
-   `attachmentId`, and `fileName`. Decrypt the matching file:
+4. `vaultMirror.attachments` in `vault.json` lists each attachment's item,
+   id and file name. Decrypt each file and attach it to its item in a client:
 
    ```sh
-   age -d -i key.txt -o recovered-file backups/source/attachments/vault-20261014T030000Z/attachment-id.age
+   age -d -i key.txt -o recovered-file backups/source/20261014T030000Z/attachments/<attachment id>.age
    ```
-
-   Legacy records have no `snapshotId`. Their file is
-   `backups/source/attachments/<attachmentId>.age`. A record with `stored:false`
-   has no backed-up content. Attach each recovered file to its item in a client.
-
-5. Delete decrypted files.

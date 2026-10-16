@@ -37,31 +37,18 @@ fn snapshots_need_only_the_backup_directory() {
 #[test]
 fn recovery_needs_only_the_backup_passphrase_and_the_target_vault() {
     use serde_json::json;
-    use vault_mirror::store::{Keys, Store, VaultOrigin};
+    use vault_mirror::store::{Keys, Store};
 
     let dir = tempfile::tempdir().unwrap();
     let keys = Keys::open(dir.path(), "synthetic passphrase").unwrap();
-    let store = Store::open(dir.path(), "source", &keys).unwrap();
-    let mut document = json!({"encrypted":false,"folders":[],"items":[{"id":"item-id","type":2,"name":"synthetic item","notes":"synthetic note","fields":[{"name":"vault-mirror","value":format!("source-item {} - -", "ab".repeat(32)),"type":1},{"name":"vault-mirror","value":"my own field","type":0}]}],"vaultMirror":{"format":2,"scope":"personal","plainStrings":{},"attachments":[],"markers":{}}});
-    let origin = VaultOrigin {
-        api_url: "http://127.0.0.1".into(),
-        account_id: "vault".into(),
-        organization_id: None,
-    };
-    let writer = store
-        .begin_snapshot(&origin, time::OffsetDateTime::now_utc())
-        .unwrap();
-    let vault_mirror::snapshot::AttachmentStorage::Snapshot {
-        snapshot_id,
-        ciphertext_sha256,
-    } = writer
+    let store = Store::new(dir.path(), "source", &keys);
+    let writer = store.begin(time::OffsetDateTime::now_utc()).unwrap();
+    writer
         .write_attachment("attachment-id", b"synthetic attachment bytes")
-        .unwrap()
-    else {
-        panic!("a new snapshot owns its attachment");
-    };
-    document["vaultMirror"]["attachments"] = json!([{"itemId":"item-id","attachmentId":"attachment-id","fileName":"../recovered.txt","size":26,"stored":true,"snapshotId":snapshot_id,"ciphertextSha256":ciphertext_sha256}]);
-    writer.finish(document).unwrap();
+        .unwrap();
+    let id = writer
+        .finish(&json!({"encrypted":false,"folders":[],"items":[{"id":"item-id","type":2,"name":"synthetic item","notes":"synthetic note"}],"vaultMirror":{"scope":"personal","plainStrings":{},"attachments":[{"itemId":"item-id","attachmentId":"attachment-id","fileName":"../recovered.txt"}]}}))
+        .unwrap();
     let output_dir = dir.path().join("recovered");
     let command = |output_dir: &std::path::Path| {
         let mut command = vault_mirror();
@@ -93,11 +80,7 @@ fn recovery_needs_only_the_backup_passphrase_and_the_target_vault() {
         serde_json::from_slice(&fs::read(output_dir.join("export.json")).unwrap()).unwrap();
     assert_eq!(exported["items"][0]["notes"], "synthetic note");
     assert_eq!(
-        exported["items"][0]["fields"],
-        json!([{"name":"vault-mirror","value":"my own field","type":0}])
-    );
-    assert_eq!(
-        fs::read(output_dir.join("attachments/item-id/attachment-id/recovered.txt")).unwrap(),
+        fs::read(output_dir.join("attachments/attachment-id/recovered.txt")).unwrap(),
         b"synthetic attachment bytes"
     );
 
@@ -125,9 +108,8 @@ fn recovery_needs_only_the_backup_passphrase_and_the_target_vault() {
     }
 
     fs::write(
-        dir.path().join(format!(
-            "source/attachments/{snapshot_id}/attachment-id.age"
-        )),
+        dir.path()
+            .join(format!("source/{id}/attachments/attachment-id.age")),
         b"damaged encrypted attachment",
     )
     .unwrap();

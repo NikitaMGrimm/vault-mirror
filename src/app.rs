@@ -52,9 +52,9 @@ pub struct Status {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror: Option<SummaryRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_backup: Option<BackupRecord>,
+    pub source_backup: Option<BackupReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dest_backup: Option<BackupRecord>,
+    pub dest_backup: Option<BackupReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,29 +82,6 @@ pub struct SummaryRecord {
     pub changed: bool,
     #[serde(flatten)]
     pub summary: Summary,
-}
-
-// The status file is read back by `healthcheck`, so this mirrors the report
-// with owned, deserializable fields.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct BackupRecord {
-    pub snapshot: Option<String>,
-    pub items: usize,
-    pub attachments_downloaded: usize,
-    pub snapshots_pruned: usize,
-    pub attachments_pruned: usize,
-}
-
-impl From<BackupReport> for BackupRecord {
-    fn from(report: BackupReport) -> Self {
-        Self {
-            snapshot: report.snapshot,
-            items: report.items,
-            attachments_downloaded: report.attachments_downloaded,
-            snapshots_pruned: report.pruned.snapshots_removed,
-            attachments_pruned: report.pruned.attachments_removed,
-        }
-    }
 }
 
 /// Ids this installation presents to each server. Kept across runs so the
@@ -283,12 +260,10 @@ async fn execute(
              what it had still to bring back. Run with --pull again"
         );
     }
-    progress.stage = "backup metadata";
-    store::migrate_metadata(&config.backups_dir)?;
     let http = http_client(config)?;
     let keys = Keys::open(&config.backups_dir, &config.backup.passphrase)?;
     let backup_options = BackupOptions {
-        retention: config.backup.retention.as_ref(),
+        retention_days: config.backup.retention_days,
         now,
     };
 
@@ -304,7 +279,7 @@ async fn execute(
     let source_scope = scope_of(&config.source);
     progress.stage = "source backup";
     reporter.status("Backing up", "the source vault");
-    let store = Store::open(&config.backups_dir, "source", &keys)?;
+    let store = Store::new(&config.backups_dir, "source", &keys);
     // A pull writes to the source, and changes only what this backup holds.
     let source_vault = source
         .load(&source_scope)
@@ -319,8 +294,7 @@ async fn execute(
             &backup_options,
             reporter,
         )
-        .await?
-        .into(),
+        .await?,
     );
 
     let Some(dest_config) = &config.dest else {
@@ -335,7 +309,7 @@ async fn execute(
     // about to delete or replace such files.
     progress.stage = "destination backup";
     reporter.status("Backing up", "the destination vault");
-    let store = Store::open(&config.backups_dir, "dest", &keys)?;
+    let store = Store::new(&config.backups_dir, "dest", &keys);
     // The mirror changes only what this backup holds.
     let dest_vault = dest.load(&dest_scope).await.context("reading the vault")?;
     progress.status.dest_backup = Some(
@@ -347,8 +321,7 @@ async fn execute(
             &backup_options,
             reporter,
         )
-        .await?
-        .into(),
+        .await?,
     );
 
     let source = Endpoint {

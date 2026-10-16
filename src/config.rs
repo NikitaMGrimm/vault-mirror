@@ -6,7 +6,6 @@ use crate::{
     api::{ClientOptions, DEFAULT_CLIENT_VERSION},
     mirror::Filter,
     plan::Safety,
-    store::Retention,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -27,8 +26,7 @@ pub struct VaultConfig {
 #[derive(Clone)]
 pub struct BackupConfig {
     pub passphrase: String,
-    /// `None` when pruning is switched off.
-    pub retention: Option<Retention>,
+    pub retention_days: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,17 +110,6 @@ impl Env<'_> {
         }
     }
 
-    fn flag(&self, name: &str, default: bool) -> Result<bool> {
-        match self.get(name).map(|value| value.to_lowercase()).as_deref() {
-            None => Ok(default),
-            Some("true" | "1" | "yes" | "on") => Ok(true),
-            Some("false" | "0" | "no" | "off") => Ok(false),
-            Some(other) => Err(ConfigError(format!(
-                "{name} must be true or false, not {other}"
-            ))),
-        }
-    }
-
     /// A comma-separated list of folder or collection names.
     fn names(&self, name: &str) -> Vec<String> {
         self.get(name)
@@ -197,14 +184,7 @@ impl Config {
             passphrase: env
                 .secret("BACKUP_PASSPHRASE")?
                 .ok_or_else(|| ConfigError("BACKUP_PASSPHRASE is not set".into()))?,
-            retention: if env.flag("ENABLE_PRUNING", true)? {
-                Some(Retention {
-                    days: env.parse("RETENTION_DAYS", 30)?,
-                    keep_at_least: env.parse("MIN_FILES", 10)?,
-                })
-            } else {
-                None
-            },
+            retention_days: env.parse("RETENTION_DAYS", 30)?,
         };
 
         let max_delete_percent: Option<u32> = env
@@ -387,13 +367,7 @@ mod tests {
         assert_eq!(config.source.password, " source password ");
         assert_eq!(config.dest.as_ref().unwrap().client_id, "user.dest");
         assert_eq!(config.backup.passphrase, "backup passphrase");
-        assert_eq!(
-            config.backup.retention,
-            Some(Retention {
-                days: 30,
-                keep_at_least: 10
-            })
-        );
+        assert_eq!(config.backup.retention_days, 30);
         assert_eq!(config.safety, Safety::default());
         assert_eq!(config.concurrency, 4);
         assert!(config.schedule.is_none());
@@ -542,19 +516,18 @@ mod tests {
     #[test]
     fn tuning_values_are_validated() {
         let config = Config::from_env(&with(&[
-            ("ENABLE_PRUNING", "false"),
+            ("RETENTION_DAYS", "7"),
             ("MAX_DELETE_PERCENT", "20"),
             ("CONCURRENCY", "8"),
         ]))
         .unwrap();
-        assert!(config.backup.retention.is_none());
+        assert_eq!(config.backup.retention_days, 7);
         assert_eq!(config.safety.max_delete_percent, Some(20));
         assert_eq!(config.concurrency, 8);
 
         assert!(error(with(&[("MAX_DELETE_PERCENT", "101")])).contains("between 0 and 100"));
         assert!(error(with(&[("CONCURRENCY", "0")])).contains("between 1 and 32"));
         assert!(error(with(&[("RETENTION_DAYS", "soon")])).contains("RETENTION_DAYS"));
-        assert!(error(with(&[("ENABLE_PRUNING", "maybe")])).contains("true or false"));
     }
 
     #[test]

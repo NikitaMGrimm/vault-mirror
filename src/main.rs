@@ -22,7 +22,7 @@ use vault_mirror::{
     restore::{RestoreOptions, restore},
     schedule::Timetable,
     snapshot,
-    store::{self, Keys, Store},
+    store::{self, Keys, Snapshot, Store},
     text::count,
 };
 
@@ -441,47 +441,29 @@ fn read_keys(backups: &Path, env: &HashMap<String, String>) -> Result<Keys> {
 fn snapshots(vault: Role) -> Result<ExitCode> {
     let backups = config::backups_dir(&settings());
     let _lock = app::lock_backups_dir(&backups)?;
-    let list = store::list(&backups, vault.name())?;
-    if list.is_empty() {
+    let ids = store::list(&backups, vault.name())?;
+    if ids.is_empty() {
         println!(
             "No snapshots of the {} vault in {}.",
             vault.name(),
             backups.display()
         );
     }
-    for snapshot in list {
-        let detail = match &snapshot.meta {
-            Some(meta) => format!(
-                "{}, {}",
-                count(meta.items, "item"),
-                count(meta.attachment_files, "attachment file")
-            ),
-            None => "no metadata".to_string(),
-        };
-        println!("{}  {detail}", snapshot.path.display());
+    for id in ids {
+        println!("{id}");
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn locate_snapshot(store: &Store<'_>, role: Role, snapshot: &str) -> Result<PathBuf> {
-    if snapshot != "latest" {
-        let path = PathBuf::from(snapshot);
-        if path.exists() {
-            return Ok(path);
-        }
-        // A file name as `snapshots` lists it.
-        return store
-            .list()?
-            .into_iter()
-            .find(|entry| entry.path.file_name() == Some(std::ffi::OsStr::new(snapshot)))
-            .map(|entry| entry.path)
-            .ok_or_else(|| anyhow!("no snapshot {snapshot} of the {} vault", role.name()));
-    }
-    store
-        .list()?
-        .pop()
-        .map(|latest| latest.path)
-        .ok_or_else(|| anyhow!("there are no snapshots of the {} vault", role.name()))
+/// The snapshot `name`, as `snapshots` lists it, or the newest for `latest`.
+fn locate_snapshot<'a>(store: &Store<'a>, role: Role, name: &str) -> Result<Snapshot<'a>> {
+    let ids = store.list()?;
+    let id = match name {
+        "latest" => ids.last(),
+        name => ids.iter().find(|id| *id == name),
+    };
+    let id = id.ok_or_else(|| anyhow!("no snapshot {name} of the {} vault", role.name()))?;
+    Ok(store.snapshot(id))
 }
 
 async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
@@ -493,16 +475,7 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
     let _lock = app::lock_backups_dir(&backups)?;
     let keys = read_keys(&backups, &env)?;
     let store = Store::new(&backups, args.snapshot.from.name(), &keys);
-    let path = locate_snapshot(&store, args.snapshot.from, &args.snapshot.snapshot)?;
-    let restorable = snapshot::parse(&store.read_snapshot(&path)?)?;
-    Console::status(
-        "Reading",
-        &format!(
-            "{} from {}",
-            count(restorable.items().len(), "item"),
-            path.display()
-        ),
-    );
+    let backup = locate_snapshot(&store, args.snapshot.from, &args.snapshot.snapshot)?;
 
     let http = build_http_client(&config::client_options(&env)?)?;
     let role = args.to.name();
@@ -519,7 +492,7 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
         allow_non_empty: args.allow_non_empty,
         concurrency: config::concurrency(&env)?,
     };
-    let report = restore(&target, &restorable, Some(&store), &options, &Console).await?;
+    let report = restore(&target, &backup, &options, &Console).await?;
     Console::finished(
         &format!(
             "restore of {}, {}, {} and {} in {:.1}s",
@@ -540,27 +513,17 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
     let _lock = app::lock_backups_dir(&backups)?;
     let keys = read_keys(&backups, &env)?;
     let store = Store::new(&backups, args.from.name(), &keys);
-    let path = locate_snapshot(&store, args.from, &args.snapshot)?;
-    let document = store.read_snapshot(&path)?;
+    let backup = locate_snapshot(&store, args.from, &args.snapshot)?;
+    let document = backup.document()?;
     let restorable = snapshot::parse(&document)?;
-    let document = snapshot::importable(&document)?;
-
     if output.exists() {
         bail!("{} already exists", output.display());
     }
-    let mut files = Vec::new();
-    let mut missing = 0;
-    for item in restorable.items() {
-        for attachment in &item.attachments {
-            if attachment.storage == snapshot::AttachmentStorage::Omitted {
-                missing += 1;
-                continue;
-            }
-            // A damaged backup exports nothing.
-            store.read_snapshot_attachment(attachment)?;
-            files.push((item, attachment));
-        }
+    // A damaged backup exports nothing.
+    for attachment in restorable.attachments() {
+        backup.attachment(&attachment.attachment_id)?;
     }
+
     if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
@@ -575,29 +538,20 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
         serde_json::to_vec_pretty(&document)?,
     )?;
     let mut written = 0;
-    for (item, attachment) in files {
-        // Item and attachment ids keep files with the same name apart;
-        // the name itself is reduced to its final path component.
+    for attachment in restorable.attachments() {
+        // The attachment id keeps files with the same name apart; the name
+        // itself is reduced to its final path component.
         let name = Path::new(&attachment.file_name)
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "attachment".to_string());
-        let directory = output
-            .join("attachments")
-            .join(safe(&item.id))
-            .join(safe(&attachment.attachment_id));
+        let directory = output.join("attachments").join(&attachment.attachment_id);
         fs::create_dir_all(&directory)?;
         fs::write(
             directory.join(name),
-            store.read_snapshot_attachment(attachment)?,
+            backup.attachment(&attachment.attachment_id)?,
         )?;
         written += 1;
-    }
-    if missing > 0 {
-        Console::warning(&format!(
-            "The backup lacks the content of {} listed in the snapshot.",
-            count(missing, "attachment")
-        ));
     }
     Console::warning(&format!(
         "{} is not encrypted. Any Bitwarden client can import its export.json. Delete it when you are done.",
@@ -613,12 +567,6 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
         true,
     );
     Ok(ExitCode::SUCCESS)
-}
-
-fn safe(id: &str) -> String {
-    id.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect()
 }
 
 fn healthcheck(max_age_hours: u64) -> Result<ExitCode> {

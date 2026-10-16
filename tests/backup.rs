@@ -13,8 +13,7 @@ use vault_mirror::{
     node::Node,
     plan::marker_of,
     restore::{RestoreOptions, restore},
-    snapshot,
-    store::{Keys, Retention, Store},
+    store::{Keys, Store},
     vault::{Account, Draft, Scope, Vault},
 };
 
@@ -24,9 +23,9 @@ fn keys(dir: &Path) -> Keys {
     Keys::open(dir, "test backup passphrase").unwrap()
 }
 
-fn options() -> BackupOptions<'static> {
+fn options() -> BackupOptions {
     BackupOptions {
-        retention: None,
+        retention_days: 30,
         now: OffsetDateTime::now_utc(),
     }
 }
@@ -65,7 +64,6 @@ async fn restored_copy(sandbox: &Sandbox, store: &Store<'_>) -> Result<Account> 
         .open(&sandbox.register(&sandbox.dest_url).await?)
         .await?;
     let latest = store.list()?.pop().expect("a snapshot");
-    let restorable = snapshot::parse(&store.read_snapshot(&latest.path)?)?;
     let endpoint = Endpoint {
         account: &target,
         scope: PERSONAL,
@@ -76,8 +74,7 @@ async fn restored_copy(sandbox: &Sandbox, store: &Store<'_>) -> Result<Account> 
     };
     restore(
         &endpoint,
-        &restorable,
-        Some(store),
+        &store.snapshot(&latest),
         &options,
         &Capture::default(),
     )
@@ -98,7 +95,7 @@ async fn a_backup_restores_into_an_identical_vault() -> Result<()> {
     seed_extra(&source, 12).await?;
     let dir = tempfile::tempdir()?;
     let keys = keys(dir.path());
-    let store = Store::open(dir.path(), "source", &keys)?;
+    let store = Store::new(dir.path(), "source", &keys);
 
     let report = backup(&source, &PERSONAL, &store, &options(), &Capture::default()).await?;
     assert_eq!(report.items, fixtures::samples().len() + 12);
@@ -129,7 +126,6 @@ async fn a_backup_restores_into_an_identical_vault() -> Result<()> {
 
     // Restoring again would duplicate everything, so it has to be asked for.
     let latest = store.list()?.pop().unwrap();
-    let restorable = snapshot::parse(&store.read_snapshot(&latest.path)?)?;
     let endpoint = Endpoint {
         account: &target,
         scope: PERSONAL,
@@ -140,8 +136,7 @@ async fn a_backup_restores_into_an_identical_vault() -> Result<()> {
     };
     let error = restore(
         &endpoint,
-        &restorable,
-        Some(&store),
+        &store.snapshot(&latest),
         &refused,
         &Capture::default(),
     )
@@ -162,7 +157,7 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
     fixtures::seed(&source).await?;
     let dir = tempfile::tempdir()?;
     let keys = keys(dir.path());
-    let store = Store::open(dir.path(), "source", &keys)?;
+    let store = Store::new(dir.path(), "source", &keys);
     let quiet = Capture::default();
 
     backup(&source, &PERSONAL, &store, &options(), &quiet).await?;
@@ -191,15 +186,11 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
         .delete_items(&[by_name(&vault, "Visa").id.clone()])
         .await?;
     let later = BackupOptions {
-        retention: Some(&Retention {
-            days: 30,
-            keep_at_least: 1,
-        }),
+        retention_days: 30,
         now: OffsetDateTime::now_utc() + time::Duration::days(60),
     };
     let fourth = backup(&source, &PERSONAL, &store, &later, &quiet).await?;
-    assert_eq!(fourth.pruned.snapshots_removed, 2);
-    assert_eq!(fourth.pruned.attachments_removed, 9);
+    assert_eq!(fourth.snapshots_pruned, 2);
     assert_eq!(store.list()?.len(), 1);
     Ok(())
 }
@@ -300,9 +291,8 @@ async fn a_full_run_backs_up_both_sides_mirrors_and_records_the_result() -> Resu
 
     // The mirror's own snapshot restores without mirror markers.
     let keys = keys(dir.path());
-    let dest_store = Store::open(dir.path(), "dest", &keys)?;
+    let dest_store = Store::new(dir.path(), "dest", &keys);
     let latest = dest_store.list()?.pop().unwrap();
-    let restorable = snapshot::parse(&dest_store.read_snapshot(&latest.path)?)?;
     let target = sandbox
         .open(&sandbox.register(&sandbox.dest_url).await?)
         .await?;
@@ -316,8 +306,7 @@ async fn a_full_run_backs_up_both_sides_mirrors_and_records_the_result() -> Resu
     };
     restore(
         &endpoint,
-        &restorable,
-        Some(&dest_store),
+        &dest_store.snapshot(&latest),
         &options,
         &Capture::default(),
     )
@@ -726,7 +715,7 @@ async fn destination_attachments_are_backed_up_before_the_mirror_deletes_them() 
     );
 
     let keys = keys(dir.path());
-    let store = Store::open(dir.path(), "dest", &keys)?;
+    let store = Store::new(dir.path(), "dest", &keys);
     let target = restored_copy(&sandbox, &store).await?;
     let restored = target.load(&PERSONAL).await?;
     let item = &restored.items[0];
@@ -854,9 +843,9 @@ async fn the_official_cli_imports_a_snapshot() -> Result<()> {
     fixtures::seed(&source).await?;
     let dir = tempfile::tempdir()?;
     let keys = keys(dir.path());
-    let store = Store::open(dir.path(), "source", &keys)?;
+    let store = Store::new(dir.path(), "source", &keys);
     backup(&source, &PERSONAL, &store, &options(), &Capture::default()).await?;
-    let document = store.read_snapshot(&store.list()?.pop().unwrap().path)?;
+    let document = store.snapshot(&store.list()?.pop().unwrap()).document()?;
     let export = dir.path().join("export.json");
     std::fs::write(&export, serde_json::to_vec(&document)?)?;
 

@@ -34,7 +34,7 @@ up the run:
 
 ```text
   Backing up the source vault
-       Saved snapshot vault-20261014T030000Z.json.age with 151 items
+       Saved snapshot 20261014T030000Z with 151 items
   Backing up the destination vault
      Skipped a new snapshot; the vault is unchanged since the newest one
      Planned to update 2 items, delete 1 item; 149 items unchanged

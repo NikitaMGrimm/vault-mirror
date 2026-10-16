@@ -67,9 +67,7 @@ file.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `BACKUP_PASSPHRASE` | | Required. The passphrase that protects the backup key. |
-| `ENABLE_PRUNING` | `true` | Delete old snapshots. |
-| `RETENTION_DAYS` | `30` | Delete current-group snapshots older than this. Past the last 24 hours, keep the newest of each UTC day. Legacy and inactive encryption groups are preserved. |
-| `MIN_FILES` | `10` | Always keep at least this many newest snapshots of the active vault and encryption group. |
+| `RETENTION_DAYS` | `30` | How many days of daily snapshots to keep. See [Backups](backups.md#whats-in-the-backup-directory). |
 | `BACKUPS_DIR` | `backups` (`/data` in the image) | Where backups, `last-run.json` and login state live. |
 
 ### Running

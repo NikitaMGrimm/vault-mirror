@@ -93,9 +93,9 @@ A first run prints:
 ```text
   Backing up the source vault
    Backed up 3 attachments
-       Saved snapshot vault-20261014T030000Z.json.age with 152 items
+       Saved snapshot 20261014T030000Z with 152 items
   Backing up the destination vault
-       Saved snapshot vault-20261014T030000Z.json.age with 0 items
+       Saved snapshot 20261014T030000Z with 0 items
      Planned to create 152 items, create 6 folders, copy 3 attachments; 0 items unchanged
      Created 152 items
       Copied 3 attachments

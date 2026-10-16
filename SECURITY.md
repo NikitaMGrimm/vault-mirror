@@ -53,9 +53,8 @@ but a compromised running process can still capture the vault it decrypts.
 | File | Contents | Protection |
 | --- | --- | --- |
 | `key.age` | The backup key. | Encrypted with your passphrase, using scrypt. |
-| `*/snapshots/*.json.age` | Complete vault exports, secrets included. | Encrypted with age. |
-| `*/attachments/<snapshot-id>/*.age` | Attachment content. Legacy files are directly under `attachments/`. | Encrypted with age. |
-| `*/snapshots/*.meta.json` | Creation time, counts, opaque origin and encryption ids, and a ciphertext hash. | None. No plaintext vault fingerprint. |
+| `*/<snapshot>/vault.json.age` | Complete vault exports, secrets included. | Encrypted with age. |
+| `*/<snapshot>/attachments/*.age` | Attachment content. | Encrypted with age. |
 | `last-run.json` | Time, result and counts of the last actual run. | None. No vault content. |
 | `state.json` | The device ids vault-mirror logs in with. | None. |
 | `run.lock` | Nothing. It's locked while a run or restore is using the directory. | None. |
@@ -63,15 +62,6 @@ but a compromised running process can still capture the vault it decrypts.
 
 On Unix, backup and state files are readable only by their owner. Snapshots
 and attachments are encrypted to the backup key in `key.age`.
-
-New snapshots own separate attachment files and bind their ciphertext hashes
-inside the encrypted document.
-
-On upgrade, old plaintext fingerprints are removed from local sidecars. Those
-fingerprints could help test a guessed item password if an attacker could
-reconstruct every other byte of the exported document. They did not reveal the
-master password. Historical copies outside this directory retain the fields
-until you remove them or their retention ends.
 
 > [!WARNING]
 > You need both `key.age` and `BACKUP_PASSPHRASE` to read the backups. The passphrase cannot
