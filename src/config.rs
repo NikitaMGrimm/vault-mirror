@@ -6,7 +6,7 @@ use crate::{
     api::{ClientOptions, DEFAULT_CLIENT_VERSION},
     mirror::Filter,
     plan::Safety,
-    store::{Protection, Retention},
+    store::Retention,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub struct VaultConfig {
 
 #[derive(Clone)]
 pub struct BackupConfig {
-    pub protection: Protection,
+    pub passphrase: String,
     /// `None` when pruning is switched off.
     pub retention: Option<Retention>,
 }
@@ -164,29 +164,6 @@ impl Env<'_> {
         }))
     }
 
-    fn protection(&self) -> Result<Protection> {
-        let passphrase = self.secret("BACKUP_PASSPHRASE")?;
-        let recipients: Vec<String> = self
-            .get("BACKUP_RECIPIENTS")
-            .map(|list| {
-                list.split([',', ' ', '\n'])
-                    .filter(|part| !part.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        match (passphrase, recipients.is_empty()) {
-            (Some(_), false) => Err(ConfigError(
-                "set either BACKUP_PASSPHRASE or BACKUP_RECIPIENTS, not both".into(),
-            )),
-            (Some(passphrase), true) => Ok(Protection::Passphrase(passphrase)),
-            (None, false) => Ok(Protection::Recipients(recipients)),
-            (None, true) => Err(ConfigError(
-                "backups need BACKUP_PASSPHRASE or BACKUP_RECIPIENTS".into(),
-            )),
-        }
-    }
-
     fn concurrency(&self) -> Result<usize> {
         let concurrency = self.parse("CONCURRENCY", 4)?;
         if !(1..=32).contains(&concurrency) {
@@ -217,7 +194,9 @@ impl Config {
         }
 
         let backup = BackupConfig {
-            protection: env.protection()?,
+            passphrase: env
+                .secret("BACKUP_PASSPHRASE")?
+                .ok_or_else(|| ConfigError("BACKUP_PASSPHRASE is not set".into()))?,
             retention: if env.flag("ENABLE_PRUNING", true)? {
                 Some(Retention {
                     days: env.parse("RETENTION_DAYS", 30)?,
@@ -407,9 +386,7 @@ mod tests {
         assert_eq!(config.source.server, "https://vault.bitwarden.com");
         assert_eq!(config.source.password, " source password ");
         assert_eq!(config.dest.as_ref().unwrap().client_id, "user.dest");
-        assert!(
-            matches!(config.backup.protection, Protection::Passphrase(ref p) if p == "backup passphrase")
-        );
+        assert_eq!(config.backup.passphrase, "backup passphrase");
         assert_eq!(
             config.backup.retention,
             Some(Retention {
@@ -525,25 +502,15 @@ mod tests {
             config.notify_failure_url.as_deref(),
             Some("https://ntfy.example.com/topic")
         );
-        assert!(
-            matches!(config.backup.protection, Protection::Passphrase(ref p) if p == " backup passphrase\t")
-        );
+        assert_eq!(config.backup.passphrase, " backup passphrase\t");
         assert!(error(with(&[("DEST_PASSWORD", "")])).contains("DEST_PASSWORD is not set"));
     }
 
     #[test]
-    fn backups_need_exactly_one_kind_of_key() {
-        assert!(
-            error(without(&["BACKUP_PASSPHRASE"]))
-                .contains("BACKUP_PASSPHRASE or BACKUP_RECIPIENTS")
-        );
-        assert!(error(with(&[("BACKUP_RECIPIENTS", "age1abc")])).contains("not both"));
-
-        let mut recipients = without(&["BACKUP_PASSPHRASE"]);
-        recipients.insert("BACKUP_RECIPIENTS".into(), "age1abc, age1def".into());
-        let config = Config::from_env(&recipients).unwrap();
-        assert!(
-            matches!(config.backup.protection, Protection::Recipients(ref r) if r == &["age1abc", "age1def"])
+    fn backups_need_a_passphrase() {
+        assert_eq!(
+            error(without(&["BACKUP_PASSPHRASE"])),
+            "BACKUP_PASSPHRASE is not set"
         );
     }
 

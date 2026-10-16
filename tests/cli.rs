@@ -35,20 +35,12 @@ fn snapshots_need_only_the_backup_directory() {
 }
 
 #[test]
-fn export_uses_an_identity_without_requiring_vault_credentials() {
-    use age::secrecy::ExposeSecret;
+fn recovery_needs_only_the_backup_passphrase_and_the_target_vault() {
     use serde_json::json;
-    use vault_mirror::store::{Keys, Protection, Store, VaultOrigin};
+    use vault_mirror::store::{Keys, Store, VaultOrigin};
 
     let dir = tempfile::tempdir().unwrap();
-    let identity = age::x25519::Identity::generate();
-    let path = dir.path().join("identity.txt");
-    fs::write(&path, identity.to_string().expose_secret()).unwrap();
-    let keys = Keys::open(
-        dir.path(),
-        &Protection::Recipients(vec![identity.to_public().to_string()]),
-    )
-    .unwrap();
+    let keys = Keys::open(dir.path(), "synthetic passphrase").unwrap();
     let store = Store::open(dir.path(), "source", &keys).unwrap();
     let mut document = json!({"encrypted":false,"folders":[],"items":[{"id":"item-id","type":2,"name":"synthetic item","notes":"synthetic note","fields":[{"name":"vault-mirror","value":format!("source-item {} - -", "ab".repeat(32)),"type":1},{"name":"vault-mirror","value":"my own field","type":0}]}],"vaultMirror":{"format":2,"scope":"personal","plainStrings":{},"attachments":[],"markers":{}}});
     let origin = VaultOrigin {
@@ -79,13 +71,8 @@ fn export_uses_an_identity_without_requiring_vault_credentials() {
                 "SOURCE_PASSWORD_FILE",
                 dir.path().join("unavailable-source-secret"),
             )
-            .env(
-                "BACKUP_PASSPHRASE_FILE",
-                dir.path().join("unavailable-backup-secret"),
-            )
+            .env("BACKUP_PASSPHRASE", "synthetic passphrase")
             .arg("export")
-            .arg("--identity")
-            .arg(&path)
             .arg("--output")
             .arg(output_dir);
         command
@@ -113,7 +100,6 @@ fn export_uses_an_identity_without_requiring_vault_credentials() {
         fs::read(output_dir.join("attachments/item-id/attachment-id/recovered.txt")).unwrap(),
         b"synthetic attachment bytes"
     );
-    assert!(!dir.path().join("key.age").exists());
 
     for (role, prefix, unrelated) in [("dest", "DEST", "SOURCE"), ("source", "SOURCE", "DEST")] {
         let output = vault_mirror()
@@ -126,11 +112,10 @@ fn export_uses_an_identity_without_requiring_vault_credentials() {
             .env(format!("{prefix}_CLIENT_ID"), "user.synthetic")
             .env(format!("{prefix}_CLIENT_SECRET"), "synthetic-api-secret")
             .env(format!("{prefix}_PASSWORD"), "synthetic-password")
+            .env("BACKUP_PASSPHRASE", "synthetic passphrase")
             .arg("restore")
             .arg("--to")
             .arg(role)
-            .arg("--identity")
-            .arg(&path)
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);

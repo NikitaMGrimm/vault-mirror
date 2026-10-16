@@ -58,109 +58,49 @@ const BLOCK: &str = "vaultMirror";
 /// `app` names them.
 const RUN_FILES: [&str; 3] = ["run.lock", "state.json", "last-run.json"];
 
-/// How backups are encrypted.
-#[derive(Clone)]
-pub enum Protection {
-    /// A key generated on first use and stored in the backup directory,
-    /// itself encrypted with this passphrase.
-    Passphrase(String),
-    /// age public keys. The machine writing backups cannot read them back.
-    Recipients(Vec<String>),
-}
-
-/// The keys in use for one run.
+/// The backup key, generated on first use and stored in the backup directory,
+/// itself encrypted with the passphrase.
 pub struct Keys {
-    /// Whom backups are encrypted to. Empty in keys that only read backups.
     recipients: Vec<age::x25519::Recipient>,
     identities: Vec<age::x25519::Identity>,
 }
 
 impl Keys {
-    /// The keys for writing backups. A passphrase's key is created on first
-    /// use, but never in a directory that already holds backups: they need
-    /// the old key, and a new one would only hide that it is gone.
-    pub fn open(backups: &Path, protection: &Protection) -> Result<Self> {
-        match protection {
-            Protection::Recipients(list) => {
-                if list.is_empty() {
-                    bail!("no backup recipients configured");
-                }
-                // The text may be a private key pasted by mistake, and the
-                // parser's error can quote it, so neither is repeated.
-                let recipients = list
-                    .iter()
-                    .enumerate()
-                    .map(|(index, text)| {
-                        age::x25519::Recipient::from_str(text.trim()).map_err(|_| {
-                            anyhow!(
-                                "BACKUP_RECIPIENTS entry {} is not an age public key. Give \
-                                 the public key, which starts with age1",
-                                index + 1
-                            )
-                        })
-                    })
-                    .collect::<Result<_>>()?;
-                Ok(Self {
-                    recipients,
-                    identities: Vec::new(),
-                })
-            }
-            Protection::Passphrase(passphrase) => {
-                let path = backups.join(KEY_FILE);
-                let identities = if path
-                    .try_exists()
-                    .with_context(|| format!("reading {}", path.display()))?
-                {
-                    read_key(&path, passphrase)?
-                } else if holds_backups(backups)? {
-                    bail!(
-                        "{} is missing, but {} holds backups that need it. Put the key file back \
-                         from your copy of it, or set BACKUPS_DIR to an empty directory to start \
-                         new backups",
-                        path.display(),
-                        backups.display()
-                    );
-                } else {
-                    create_private_dir(backups)?;
-                    create_key(&path, passphrase)?
-                };
-                Ok(Self {
-                    recipients: identities.iter().map(|i| i.to_public()).collect(),
-                    identities,
-                })
-            }
-        }
+    /// The key for writing backups. It is created on first use, but never in
+    /// a directory that already holds backups: they need the old key, and a
+    /// new one would only hide that it is gone.
+    pub fn open(backups: &Path, passphrase: &str) -> Result<Self> {
+        let path = backups.join(KEY_FILE);
+        let identities = if path
+            .try_exists()
+            .with_context(|| format!("reading {}", path.display()))?
+        {
+            read_key(&path, passphrase)?
+        } else if holds_backups(backups)? {
+            bail!(
+                "{} is missing, but {} holds backups that need it. Put the key file back \
+                 from your copy of it, or set BACKUPS_DIR to an empty directory to start \
+                 new backups",
+                path.display(),
+                backups.display()
+            );
+        } else {
+            create_private_dir(backups)?;
+            create_key(&path, passphrase)?
+        };
+        Ok(Self::new(identities))
     }
 
-    /// Keys that read the backups in `backups` with the passphrase's key.
-    /// Creates nothing.
+    /// The key in `backups`, for reading. Creates nothing.
     pub fn from_key_file(backups: &Path, passphrase: &str) -> Result<Self> {
-        Ok(Self {
-            recipients: Vec::new(),
-            identities: read_key(&backups.join(KEY_FILE), passphrase)?,
-        })
+        Ok(Self::new(read_key(&backups.join(KEY_FILE), passphrase)?))
     }
 
-    /// Keys that read backups with every age identity in `path`.
-    pub fn from_identity_file(path: &Path) -> Result<Self> {
-        Ok(Self {
-            recipients: Vec::new(),
-            identities: read_identities(path)?,
-        })
-    }
-
-    /// Adds the identities in `path`, such as those of earlier recipients.
-    pub fn with_identity_file(mut self, path: &Path) -> Result<Self> {
-        self.identities.extend(read_identities(path)?);
-        Ok(self)
-    }
-
-    /// Whether these keys open what they encrypt, so that a backup can be
-    /// checked by reading it back.
-    fn reads_own(&self) -> bool {
-        self.identities
-            .iter()
-            .any(|identity| self.recipients.contains(&identity.to_public()))
+    fn new(identities: Vec<age::x25519::Identity>) -> Self {
+        Self {
+            recipients: identities.iter().map(|i| i.to_public()).collect(),
+            identities,
+        }
     }
 
     fn recipient_names(&self) -> Vec<String> {
@@ -199,9 +139,6 @@ impl Keys {
     }
 
     fn decrypt_to(&self, data: impl BufRead, out: &mut impl Write) -> Result<()> {
-        if self.identities.is_empty() {
-            bail!("reading a backup needs the age identity; pass --identity");
-        }
         let decryptor = age::Decryptor::new_buffered(data)
             .map_err(|error| anyhow!("not a readable backup file: {error}"))?;
         let mut reader = decryptor
@@ -296,11 +233,6 @@ fn create_key(path: &Path, passphrase: &str) -> Result<Vec<age::x25519::Identity
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => read_key(path, passphrase),
         Err(error) => Err(error).with_context(|| format!("writing {}", path.display())),
     }
-}
-
-fn read_identities(path: &Path) -> Result<Vec<age::x25519::Identity>> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    parse_identities(&text).with_context(|| format!("reading {}", path.display()))
 }
 
 /// Every age secret key in an identity file. Comments and other lines are
@@ -909,11 +841,7 @@ impl<'a> Store<'a> {
     /// [`AttachmentStorage::Omitted`].
     ///
     /// Anything uncertain gives `None`: a needless snapshot costs only space.
-    /// So do keys that can't read what they write, since they can't check.
     pub fn unchanged(&self, origin: &VaultOrigin, document: &Value) -> Result<Option<PathBuf>> {
-        if !self.keys.reads_own() {
-            return Ok(None);
-        }
         let Some(latest) = self.list()?.pop() else {
             return Ok(None);
         };
@@ -961,9 +889,6 @@ impl<'a> Store<'a> {
         origin: &VaultOrigin,
         now: OffsetDateTime,
     ) -> Result<SnapshotWriter<'_>> {
-        if self.keys.recipients.is_empty() {
-            bail!("these backup keys only read backups");
-        }
         // Ids and the times they are read back as are in UTC.
         let now = now.to_offset(UtcOffset::UTC);
         let base = format!(
@@ -1008,13 +933,12 @@ impl<'a> Store<'a> {
         unreachable!("the counter is unbounded")
     }
 
-    /// Reads back a file just written, and decrypts it when the keys can, so
-    /// that a snapshot never counts on a file that doesn't hold what it should.
+    /// Reads back a file just written, and decrypts it, so that a snapshot
+    /// never counts on a file that doesn't hold what it should.
     fn check_written(&self, path: &Path, ciphertext: &[u8], plaintext: &[u8]) -> Result<()> {
         let stored = fs::read(path).with_context(|| format!("reading back {}", path.display()))?;
         let intact = stored == ciphertext
-            && (!self.keys.reads_own()
-                || (self.keys.decrypt(&stored)).is_ok_and(|read| read == plaintext));
+            && (self.keys.decrypt(&stored)).is_ok_and(|read| read == plaintext);
         if !intact {
             bail!("{} does not read back as it was written", path.display());
         }
@@ -1277,8 +1201,8 @@ mod tests {
         vault::{Item, Scope, Vault},
     };
 
-    fn passphrase(text: &str) -> Protection {
-        Protection::Passphrase(text.to_string())
+    fn passphrase(text: &str) -> String {
+        text.to_string()
     }
 
     fn origin(account: &str) -> VaultOrigin {
@@ -1378,19 +1302,6 @@ mod tests {
         });
         write_private(&meta_path(&path), meta.to_string().as_bytes()).unwrap();
         path
-    }
-
-    fn identity_file(dir: &Path, name: &str, identities: &[&age::x25519::Identity]) -> PathBuf {
-        let path = dir.join(name);
-        let text: String = (identities.iter())
-            .map(|identity| format!("# comment\n{}\n", identity.to_string().expose_secret()))
-            .collect();
-        fs::write(&path, text).unwrap();
-        path
-    }
-
-    fn recipients(identity: &age::x25519::Identity) -> Protection {
-        Protection::Recipients(vec![identity.to_public().to_string()])
     }
 
     fn json_file(path: &Path) -> Value {
@@ -1589,99 +1500,7 @@ mod tests {
         let backups = dir.path().join("backups");
         assert!(Keys::from_key_file(&backups, "p").is_err());
         assert_eq!(list(&backups, "source").unwrap(), []);
-        let identity = age::x25519::Identity::generate();
-        let file = identity_file(dir.path(), "identity.txt", &[&identity]);
-        let keys = Keys::from_identity_file(&file).unwrap();
-        assert_eq!(Store::new(&backups, "source", &keys).list().unwrap(), []);
         assert!(!backups.exists());
-        let error = Store::new(&backups, "source", &keys)
-            .begin_snapshot(&origin("user"), datetime!(2026-10-14 00:00 UTC))
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("only read"), "{error}");
-        assert!(!backups.exists());
-    }
-
-    #[test]
-    fn every_identity_in_an_identity_file_is_tried() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = age::x25519::Identity::generate();
-        let second = age::x25519::Identity::generate();
-        let keys = Keys::open(dir.path(), &recipients(&second)).unwrap();
-        let store = Store::open(dir.path(), "source", &keys).unwrap();
-        let path = write(
-            &store,
-            &origin("user"),
-            datetime!(2026-10-14 00:00 UTC),
-            "a",
-            &[("att-1", b"x")],
-        );
-
-        let file = identity_file(dir.path(), "identities.txt", &[&first, &second]);
-        let keys = Keys::from_identity_file(&file).unwrap();
-        let store = Store::new(dir.path(), "source", &keys);
-        assert_eq!(
-            store.read_snapshot(&path).unwrap()["items"][0]["notes"],
-            "a"
-        );
-        assert_eq!(
-            store
-                .read_snapshot_attachment(&files_of(&store, &path)[0])
-                .unwrap(),
-            b"x"
-        );
-    }
-
-    #[test]
-    fn after_a_key_change_new_snapshots_open_with_the_new_key_alone() {
-        let dir = tempfile::tempdir().unwrap();
-        let old = age::x25519::Identity::generate();
-        let new = age::x25519::Identity::generate();
-        let t0 = datetime!(2026-10-14 00:00 UTC);
-        let old_keys = Keys::open(dir.path(), &recipients(&old)).unwrap();
-        let old_store = Store::open(dir.path(), "source", &old_keys).unwrap();
-        write_legacy(&old_store, t0, &[("att-1", b"same file")]);
-        let before = write(
-            &old_store,
-            &origin("user"),
-            t0,
-            "a",
-            &[("att-1", b"same file")],
-        );
-
-        let new_keys = Keys::open(dir.path(), &recipients(&new)).unwrap();
-        let new_store = Store::open(dir.path(), "source", &new_keys).unwrap();
-        let after = write(
-            &new_store,
-            &origin("user"),
-            t0 + Duration::hours(1),
-            "a",
-            &[("att-1", b"same file")],
-        );
-
-        let file = identity_file(dir.path(), "new.txt", &[&new]);
-        let reader = Keys::from_identity_file(&file).unwrap();
-        let store = Store::new(dir.path(), "source", &reader);
-        let files = files_of(&store, &after);
-        let [attachment] = &files[..] else {
-            panic!("one attachment")
-        };
-        assert_eq!(
-            store.read_snapshot_attachment(attachment).unwrap(),
-            b"same file"
-        );
-        // The old snapshot still needs the old key, and the passphrase key
-        // can be combined with it.
-        assert!(store.read_snapshot(&before).is_err());
-        let both = Keys::from_identity_file(&file)
-            .unwrap()
-            .with_identity_file(&identity_file(dir.path(), "old.txt", &[&old]))
-            .unwrap();
-        assert!(
-            Store::new(dir.path(), "source", &both)
-                .read_snapshot(&before)
-                .is_ok()
-        );
     }
 
     #[test]
@@ -1871,19 +1690,9 @@ mod tests {
     #[test]
     fn pruning_thins_only_the_snapshots_of_this_vault_and_these_keys() {
         let dir = tempfile::tempdir().unwrap();
-        let old = age::x25519::Identity::generate();
         let now = datetime!(2026-10-15 12:00 UTC);
         let keys = Keys::open(dir.path(), &passphrase("p")).unwrap();
         let store = Store::open(dir.path(), "source", &keys).unwrap();
-        let old_keys = Keys::open(dir.path(), &recipients(&old)).unwrap();
-        let old_store = Store::open(dir.path(), "source", &old_keys).unwrap();
-        let other_keys = write(
-            &old_store,
-            &origin("user"),
-            now - Duration::days(40),
-            "a",
-            &[],
-        );
 
         let other_vault = write(&store, &origin("org"), now - Duration::days(41), "b", &[]);
         let mine = write(
@@ -1913,7 +1722,7 @@ mod tests {
         );
         assert!(!mine.exists() && !meta_path(&mine).exists());
         assert!(!directory_of(&store, &mine).exists());
-        assert!(other_keys.exists() && other_vault.exists());
+        assert!(other_vault.exists());
     }
 
     #[test]
@@ -2176,45 +1985,6 @@ mod tests {
                 .unwrap(),
             None
         );
-    }
-
-    #[test]
-    fn keys_that_cannot_read_their_backups_always_write_a_new_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let identity = age::x25519::Identity::generate();
-        let keys = Keys::open(dir.path(), &recipients(&identity)).unwrap();
-        assert!(!dir.path().join(KEY_FILE).exists());
-        let store = Store::open(dir.path(), "source", &keys).unwrap();
-        let path = write(
-            &store,
-            &origin("user"),
-            datetime!(2026-10-14 00:00 UTC),
-            "a",
-            &[("att-1", b"x")],
-        );
-        assert_eq!(
-            store
-                .unchanged(&origin("user"), &planned(Some("a"), &["att-1"]))
-                .unwrap(),
-            None
-        );
-        let error = store.read_snapshot(&path).unwrap_err();
-        assert!(format!("{error:#}").contains("--identity"), "{error:#}");
-
-        let file = identity_file(dir.path(), "identity.txt", &[&identity]);
-        let keys = Keys::open(dir.path(), &recipients(&identity))
-            .unwrap()
-            .with_identity_file(&file)
-            .unwrap();
-        let store = Store::open(dir.path(), "source", &keys).unwrap();
-        assert_eq!(
-            store.read_snapshot(&path).unwrap()["items"][0]["notes"],
-            "a"
-        );
-
-        let invalid = Protection::Recipients(vec!["not-a-key".into()]);
-        assert!(Keys::open(dir.path(), &invalid).is_err());
-        assert!(Keys::open(dir.path(), &Protection::Recipients(vec![])).is_err());
     }
 
     #[test]

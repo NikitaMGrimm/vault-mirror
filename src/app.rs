@@ -286,7 +286,7 @@ async fn execute(
     progress.stage = "backup metadata";
     store::migrate_metadata(&config.backups_dir)?;
     let http = http_client(config)?;
-    let keys = Keys::open(&config.backups_dir, &config.backup.protection)?;
+    let keys = Keys::open(&config.backups_dir, &config.backup.passphrase)?;
     let backup_options = BackupOptions {
         retention: config.backup.retention.as_ref(),
         now,
@@ -754,7 +754,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = mirror_config(dir.path());
         // The pull that stopped had backed up first.
-        Keys::open(dir.path(), &config.backup.protection).unwrap();
+        Keys::open(dir.path(), &config.backup.passphrase).unwrap();
         fs::write(dir.path().join(UNFINISHED_PULL_FILE), b"").unwrap();
         let refused = run_once(&config, RunFlags::default(), &Quiet).await;
         assert_eq!(refused.failure_stage.as_deref(), Some("unfinished pull"));
@@ -802,44 +802,6 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert!(messages[0].contains("307"));
         assert!(!messages[0].contains("secret-token"));
-    }
-
-    #[tokio::test]
-    async fn a_private_key_given_as_a_recipient_is_not_repeated() {
-        use age::secrecy::ExposeSecret;
-
-        use crate::api::tests::{http_response, http_server};
-        let dir = tempfile::tempdir().unwrap();
-        let private = age::x25519::Identity::generate()
-            .to_string()
-            .expose_secret()
-            .to_owned();
-        let (url, received) = http_server(vec![http_response("204 No Content", "", "")]);
-        let env = [
-            ("SOURCE_SERVER", "http://127.0.0.1:9"),
-            ("SOURCE_CLIENT_ID", "user.test"),
-            ("SOURCE_CLIENT_SECRET", "synthetic-secret"),
-            ("SOURCE_PASSWORD", "synthetic-password"),
-            ("BACKUPS_DIR", dir.path().to_str().unwrap()),
-            ("BACKUP_RECIPIENTS", &private),
-            ("NOTIFY_FAILURE_URL", &url),
-        ]
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value.to_string()))
-        .collect();
-        let config = Config::from_env(&env).unwrap();
-
-        let status = run_once(&config, RunFlags::default(), &Quiet).await;
-        assert!(!status.succeeded());
-        let error = status.error.unwrap();
-        // A failure message here would repeat the key, so none is printed.
-        assert!(!error.contains(&private));
-        assert!(error.contains("BACKUP_RECIPIENTS"));
-        let written = fs::read_to_string(status_path(dir.path())).unwrap();
-        assert!(!written.contains(&private));
-        let requests = received.join().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert!(!requests[0].contains(&private));
     }
 
     #[test]

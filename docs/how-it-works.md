@@ -18,9 +18,8 @@ flowchart LR
 ```
 
 1. **Back up the source.** It saves an encrypted **snapshot** of the source
-   with its own attachment files. With a local decryption key, it can skip an
-   unchanged vault after authenticating the earlier recovery point. Public
-   recipient backups save a point every run.
+   with its own attachment files. It skips a vault unchanged since its newest
+   snapshot.
 2. **Back up the destination**, the same way. Anything the run removes later is
    in this backup.
 3. **Compare.** It works out what to create, update and delete, prints that

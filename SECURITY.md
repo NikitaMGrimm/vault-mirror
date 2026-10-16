@@ -45,15 +45,14 @@ accounts. Copying a password into a second account also gives anyone who can
 unlock that account access to the password.
 
 Use a separate backup passphrase. Keep a recoverable copy of `key.age` as well
-as its passphrase. With `BACKUP_RECIPIENTS`, keep the private age identity off
-the runner. This protects encrypted backups if the disk or runner is stolen,
+as its passphrase. This protects encrypted backups if the disk or runner is stolen,
 but a compromised running process can still capture the vault it decrypts.
 
 ## What it stores
 
 | File | Contents | Protection |
 | --- | --- | --- |
-| `key.age` | The backup key, when you use `BACKUP_PASSPHRASE`. | Encrypted with your passphrase, using scrypt. |
+| `key.age` | The backup key. | Encrypted with your passphrase, using scrypt. |
 | `*/snapshots/*.json.age` | Complete vault exports, secrets included. | Encrypted with age. |
 | `*/attachments/<snapshot-id>/*.age` | Attachment content. Legacy files are directly under `attachments/`. | Encrypted with age. |
 | `*/snapshots/*.meta.json` | Creation time, counts, opaque origin and encryption ids, and a ciphertext hash. | None. No plaintext vault fingerprint. |
@@ -62,15 +61,11 @@ but a compromised running process can still capture the vault it decrypts.
 | `run.lock` | Nothing. It's locked while a run or restore is using the directory. | None. |
 | `unfinished-pull` | Nothing. It's there while a pull has not finished. | None. |
 
-On Unix, backup and state files are readable only by their owner. With
-`BACKUP_PASSPHRASE`, snapshots and attachments are encrypted to the backup key in
-`key.age`. With `BACKUP_RECIPIENTS`, they're encrypted to your own age public
-keys, so the machine making the backups can't read them back.
+On Unix, backup and state files are readable only by their owner. Snapshots
+and attachments are encrypted to the backup key in `key.age`.
 
 New snapshots own separate attachment files and bind their ciphertext hashes
-inside the encrypted document. Public-recipient writers check the bytes they
-just encrypted and persisted. They cannot test possession of a recipient's
-private key. Test recovery separately on a trusted machine.
+inside the encrypted document.
 
 On upgrade, old plaintext fingerprints are removed from local sidecars. Those
 fingerprints could help test a guessed item password if an attacker could
@@ -79,8 +74,7 @@ master password. Historical copies outside this directory retain the fields
 until you remove them or their retention ends.
 
 > [!WARNING]
-> You need both `key.age` and `BACKUP_PASSPHRASE`, or your private age identity
-> when you use `BACKUP_RECIPIENTS`, to read the backups. The passphrase cannot
+> You need both `key.age` and `BACKUP_PASSPHRASE` to read the backups. The passphrase cannot
 > recreate a lost `key.age`. Keep recovery material somewhere other than the
 > backup disk.
 

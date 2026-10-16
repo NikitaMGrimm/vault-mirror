@@ -56,7 +56,7 @@ destination, vault-mirror only makes backups. See
 Current snapshots thin out to one a day and expire after `RETENTION_DAYS`,
 subject to `MIN_FILES`. New snapshots each hold their own attachments. An
 unchanged vault can be skipped when the runner can authenticate its earlier
-backup. Public-recipient backups save a point every run. Legacy snapshots and
+backup. Legacy snapshots and
 inactive encryption groups are preserved. See
 [How long backups are kept](backups.md#how-long-backups-are-kept).
 
@@ -81,9 +81,7 @@ content. Two-step login does not protect the stored API keys.
 
 Use a trusted host, protect both accounts, and restrict access to the settings
 and secret files. `NAME_FILE` keeps secrets out of the environment, but the
-process still has to read them. Public-recipient backups let you keep their
-private decryption key off the runner. They cannot protect a vault from a
-compromised process that is currently decrypting it.
+process still has to read them.
 
 Read [How automation changes your vault's security](../SECURITY.md#how-automation-changes-your-vaults-security)
 before choosing where to run it.

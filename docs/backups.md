@@ -32,14 +32,12 @@ owns its attachment files. Its encrypted document records their paths and
 ciphertext hashes. Older snapshots may share flat `attachments/<id>.age` files.
 Those files stay readable and are never overwritten by a new backup.
 
-With a local decryption key, a run can skip an unchanged vault after checking
-its newest matching snapshot and every promised attachment. With
-`BACKUP_RECIPIENTS`, each run writes a new recovery point because the runner
-cannot decrypt earlier backups.
+A run skips a vault unchanged since its newest snapshot, after checking that
+snapshot and every attachment it promises.
 
 Each changed recovery point downloads and stores another complete attachment
 set. If a vault has 1 GiB of attachments, ten retained points need about 10 GiB
-plus their JSON exports. Recipient-only backups download that set on every run.
+plus their JSON exports.
 Plan disk space and network use for both vaults.
 
 Backup writes synchronize encrypted file contents. Unix runs also synchronize
@@ -57,9 +55,7 @@ encryption setup:
 - Delete snapshots older than `RETENTION_DAYS`, 30 by default.
 - Always keep at least `MIN_FILES` newest snapshots, 10 by default.
 
-Each removed snapshot takes its own attachment directory with it. Repeated
-identical recipient-only recovery points count toward `MIN_FILES`. That setting
-does not guarantee ten distinct vault states.
+Each removed snapshot takes its own attachment directory with it.
 
 Legacy snapshots, unfinished publications, and inactive encryption groups are
 preserved. Their storage is additional to current retention. Review them
@@ -75,11 +71,6 @@ cannot recreate a lost key. Keep a separate copy of both.
 A missing `key.age` in a populated directory stops new backups. Restore the
 original file or choose a new empty `BACKUPS_DIR`. Changing the passphrase does
 not re-encrypt the existing key file.
-
-With `BACKUP_RECIPIENTS`, keep the private identity off the runner and keep
-recovery copies elsewhere. New recipient settings apply to new snapshots.
-Older snapshots still need their original identities and are kept outside
-the new encryption group's retention.
 
 An upgrade removes old plaintext snapshot fingerprints from local metadata.
 Copies already held by rclone, restic, filesystem snapshots, or another backup
@@ -129,17 +120,15 @@ leaves what it created; retrying with `--allow-non-empty` can create duplicates.
 | --- | --- |
 | `--from dest` | Read destination backups. |
 | `--snapshot NAME` | Select a named recovery point instead of `latest`. |
-| `--identity PATH` | Use an age private identity file. All supported identities in it are tried. |
 | `--allow-non-empty` | Add recovered items to a vault that already has items. |
 
 `snapshots` needs only `BACKUPS_DIR`. `export` additionally needs the existing
-backup passphrase or `--identity`. Restore additionally needs only the chosen
+backup passphrase. Restore additionally needs only the chosen
 target account and transport settings. Unavailable credentials for the other
 vault do not block recovery.
 
 Without Docker, replace `docker compose run --rm vault-mirror` with
-`vault-mirror --env-file vault-mirror.env`. Mount an identity file read-only
-when using it in a container.
+`vault-mirror --env-file vault-mirror.env`.
 
 ## Restore without vault-mirror
 
@@ -152,8 +141,6 @@ private directory and delete decrypted files when done.
    umask 077
    age -d -o key.txt backups/key.age
    ```
-
-   With `BACKUP_RECIPIENTS`, use your private identity instead of `key.txt`.
 
 2. Choose an explicit snapshot filename. Same-second counters sort numerically.
    Do not select the newest with a lexical `ls | tail` pipeline. For example:

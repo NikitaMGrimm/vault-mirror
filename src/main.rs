@@ -103,9 +103,6 @@ struct SnapshotArgs {
     /// A snapshot file or name, as `snapshots` lists it, or `latest`.
     #[arg(long, default_value = "latest")]
     snapshot: String,
-    /// An age identity file, needed when backups are made with BACKUP_RECIPIENTS.
-    #[arg(long)]
-    identity: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -435,17 +432,9 @@ fn checked(started: Instant) -> String {
     )
 }
 
-fn read_keys(
-    backups: &Path,
-    env: &HashMap<String, String>,
-    identity: Option<&Path>,
-) -> Result<Keys> {
-    if let Some(path) = identity {
-        return Keys::from_identity_file(path);
-    }
-    let passphrase = config::backup_passphrase(env)?.ok_or_else(|| {
-        anyhow!("reading a backup needs BACKUP_PASSPHRASE or --identity with an age identity file")
-    })?;
+fn read_keys(backups: &Path, env: &HashMap<String, String>) -> Result<Keys> {
+    let passphrase = config::backup_passphrase(env)?
+        .ok_or_else(|| anyhow!("reading a backup needs BACKUP_PASSPHRASE"))?;
     Keys::from_key_file(backups, &passphrase)
 }
 
@@ -502,7 +491,7 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
     // A run at the same time could prune the snapshot being restored, or
     // mirror into the vault being restored to.
     let _lock = app::lock_backups_dir(&backups)?;
-    let keys = read_keys(&backups, &env, args.snapshot.identity.as_deref())?;
+    let keys = read_keys(&backups, &env)?;
     let store = Store::new(&backups, args.snapshot.from.name(), &keys);
     let path = locate_snapshot(&store, args.snapshot.from, &args.snapshot.snapshot)?;
     let restorable = snapshot::parse(&store.read_snapshot(&path)?)?;
@@ -549,7 +538,7 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
     let env = settings();
     let backups = config::backups_dir(&env);
     let _lock = app::lock_backups_dir(&backups)?;
-    let keys = read_keys(&backups, &env, args.identity.as_deref())?;
+    let keys = read_keys(&backups, &env)?;
     let store = Store::new(&backups, args.from.name(), &keys);
     let path = locate_snapshot(&store, args.from, &args.snapshot)?;
     let document = store.read_snapshot(&path)?;

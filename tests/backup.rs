@@ -14,18 +14,14 @@ use vault_mirror::{
     plan::marker_of,
     restore::{RestoreOptions, restore},
     snapshot,
-    store::{Keys, Protection, Retention, Store},
+    store::{Keys, Retention, Store},
     vault::{Account, Draft, Scope, Vault},
 };
 
 const PERSONAL: Scope = Scope::Personal;
 
 fn keys(dir: &Path) -> Keys {
-    Keys::open(
-        dir,
-        &Protection::Passphrase("test backup passphrase".into()),
-    )
-    .unwrap()
+    Keys::open(dir, "test backup passphrase").unwrap()
 }
 
 fn options() -> BackupOptions<'static> {

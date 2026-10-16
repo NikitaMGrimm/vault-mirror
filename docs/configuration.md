@@ -66,11 +66,10 @@ file.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `BACKUP_PASSPHRASE` | | The passphrase that protects the backup key. Backups need this or `BACKUP_RECIPIENTS`. |
-| `BACKUP_RECIPIENTS` | | age public keys (`age1…`), separated by commas or spaces. Backups are encrypted to these keys, so the machine running vault-mirror can't read them back. Restoring then needs `--identity`. |
+| `BACKUP_PASSPHRASE` | | Required. The passphrase that protects the backup key. |
 | `ENABLE_PRUNING` | `true` | Delete old snapshots. |
 | `RETENTION_DAYS` | `30` | Delete current-group snapshots older than this. Past the last 24 hours, keep the newest of each UTC day. Legacy and inactive encryption groups are preserved. |
-| `MIN_FILES` | `10` | Always keep at least this many newest snapshots of the active vault and encryption group. Identical recipient-only points count separately. |
+| `MIN_FILES` | `10` | Always keep at least this many newest snapshots of the active vault and encryption group. |
 | `BACKUPS_DIR` | `backups` (`/data` in the image) | Where backups, `last-run.json` and login state live. |
 
 ### Running
