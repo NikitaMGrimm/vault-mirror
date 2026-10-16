@@ -85,11 +85,19 @@ impl Keys {
                 if list.is_empty() {
                     bail!("no backup recipients configured");
                 }
+                // The text may be a private key pasted by mistake, and the
+                // parser's error can quote it, so neither is repeated.
                 let recipients = list
                     .iter()
-                    .map(|text| {
-                        age::x25519::Recipient::from_str(text.trim())
-                            .map_err(|error| anyhow!("invalid age recipient {text:?}: {error}"))
+                    .enumerate()
+                    .map(|(index, text)| {
+                        age::x25519::Recipient::from_str(text.trim()).map_err(|_| {
+                            anyhow!(
+                                "BACKUP_RECIPIENTS entry {} is not an age public key. Give \
+                                 the public key, which starts with age1",
+                                index + 1
+                            )
+                        })
                     })
                     .collect::<Result<_>>()?;
                 Ok(Self {
