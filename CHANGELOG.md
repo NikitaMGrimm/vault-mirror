@@ -4,6 +4,34 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.6.1](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.6.0...v0.6.1) - 2026-10-16
+
+### Fixed
+
+- A failed or interrupted `run --pull` now pauses mirroring until you
+  reconcile the vaults. Retrying can no longer copy a partial source write
+  over intact destination notes or attachments. This also stops a pull at
+  unfinished source items left by an older version.
+- Invalid `BACKUP_RECIPIENTS` values no longer appear in errors, the status
+  file, or failure notifications. This protects a private age key pasted into
+  that setting by mistake.
+- Malformed values in known encrypted vault fields now stop the run instead of
+  being copied as plaintext.
+
+### Documentation
+
+- Setup now tells you to keep both `BACKUP_PASSPHRASE` and a separate copy of
+  `backups/key.age`. Recovery needs both. The guide also recommends testing an
+  export before relying on the backups.
+
+### After a failed pull
+
+The recovery hold remains even after a temporary upload failure or a refusal
+before any write. Keep scheduling stopped, preserve both vaults and their
+backups, then follow the recovery steps before removing
+`pull-cleanup-hold.json`. A hold protects runs using the same backup
+directory.
+
 ## [0.6.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.5.3...v0.6.0) - 2026-10-16
 
 ### Fixed
