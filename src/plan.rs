@@ -229,6 +229,17 @@ impl Plan {
             && self.collections_to_delete.is_empty())
     }
 
+    /// The source item, too, changed what `update` finds changed in its
+    /// copy in `dest`, since vault-mirror last wrote the copy.
+    pub fn changed_in_both(&self, update: &Update, dest: &Vault) -> bool {
+        let entry = &self.entries[update.entry];
+        marker_of(&dest.items[update.dest]).is_some_and(|marker| {
+            (update.content_changed_in_dest && marker.content != entry.marker.content)
+                || (update.files_changed_in_dest
+                    && marker.source_files != entry.marker.source_files)
+        })
+    }
+
     pub fn summary(&self, source: &Vault) -> Summary {
         let attachments = |entry: usize| match self.copy_attachments {
             true => source.items[self.entries[entry].source].attachments.len(),
