@@ -478,9 +478,7 @@ async fn a_pull_leaves_out_items_in_no_collection_that_the_source_refuses() -> R
             .warnings
             .iter()
             .any(|w| w.contains("out of the pull")),
-        refused,
-        "{:?}",
-        pulled.warnings
+        refused
     );
     Ok(())
 }
