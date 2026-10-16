@@ -668,14 +668,6 @@ impl Account {
             .send_once(Method::POST, &path, Some(&body))
             .await?;
         let attachment_id = required_str(&slot, "attachmentId", "attachment upload")?;
-        // An upload there would overwrite that file, and a caller replacing
-        // the item's files would then delete the new one with the old.
-        if item.attachments.iter().any(|a| a.id == attachment_id) {
-            bail!(
-                "the server gave the new file of item {} the id {attachment_id} of a file the item already has",
-                item.id
-            );
-        }
         match slot.get("fileUploadType").and_then(Value::as_u64) {
             Some(1) => {
                 let url = required_str(&slot, "url", "attachment upload")?;
@@ -687,10 +679,8 @@ impl Account {
                     .upload_direct(&path, &encrypted_name, blob)
                     .await
             }
-        }.with_context(|| format!(
-            "uploading attachment {attachment_id} of item {}; its registration was kept because the file may have arrived. If a later backup cannot read it, stop scheduling and inspect that attachment before retrying",
-            item.id
-        ))?;
+        }
+        .with_context(|| format!("uploading attachment {attachment_id} of item {}", item.id))?;
         Ok(attachment_id)
     }
 
