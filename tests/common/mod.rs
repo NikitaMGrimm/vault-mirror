@@ -39,8 +39,8 @@ pub async fn sandbox() -> Option<Sandbox> {
         |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_string());
     let sandbox = Sandbox {
         http: build_http_client(&ClientOptions::default()).expect("http client"),
-        source_url: env("VAULT_MIRROR_SANDBOX_SOURCE", "http://127.0.0.1:18081"),
-        dest_url: env("VAULT_MIRROR_SANDBOX_DEST", "http://127.0.0.1:18082"),
+        source_url: env("VAULT_MIRROR_SANDBOX_SOURCE", "http://127.0.0.1:18091"),
+        dest_url: env("VAULT_MIRROR_SANDBOX_DEST", "http://127.0.0.1:18092"),
         dest_tls_url: env("VAULT_MIRROR_SANDBOX_DEST_TLS", "https://127.0.0.1:18444"),
         ca_file: env(
             "VAULT_MIRROR_SANDBOX_CA",

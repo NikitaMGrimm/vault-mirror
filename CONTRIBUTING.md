@@ -49,6 +49,9 @@ cargo test                              # unit and end-to-end tests
 cargo run --example sandbox -- --seed   # prints a settings file for two new accounts with sample data
 ```
 
+The sandbox uses localhost ports 18091 and 18092, leaving Monero's default
+ports available.
+
 When the sandbox is not running, the end-to-end tests are skipped. CI requires
 them with `VAULT_MIRROR_REQUIRE_SANDBOX=1`. One test checks that a snapshot
 imports into the official Bitwarden CLI; set `VAULT_MIRROR_BW` to a `bw`

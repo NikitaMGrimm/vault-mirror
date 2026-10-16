@@ -2,8 +2,9 @@
 # a mirror destination. Data lives in tmpfs, so `down` discards everything.
 #
 # Start it with `sandbox/up.sh`, which first creates the test certificate the
-# TLS proxy serves. The servers answer on plain HTTP (18081, 18082) and behind
+# TLS proxy serves. The servers answer on plain HTTP (18091, 18092) and behind
 # TLS (18443, 18444); the official Bitwarden CLI only talks to the latter.
+# Keep Monero's default RPC and ZMQ ports, 18081 and 18082, free.
 # `sandbox/up.sh --official` adds Bitwarden's own server on 18085 and, behind
 # TLS, 18445.
 name: vault-mirror-sandbox
@@ -35,16 +36,16 @@ services:
     <<: *vaultwarden
     environment:
       <<: *environment
-      DOMAIN: "http://127.0.0.1:18081"
+      DOMAIN: "http://127.0.0.1:18091"
     ports:
-      - "127.0.0.1:18081:80"
+      - "127.0.0.1:18091:80"
   dest:
     <<: *vaultwarden
     environment:
       <<: *environment
-      DOMAIN: "http://127.0.0.1:18082"
+      DOMAIN: "http://127.0.0.1:18092"
     ports:
-      - "127.0.0.1:18082:80"
+      - "127.0.0.1:18092:80"
   tls:
     image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
     volumes:

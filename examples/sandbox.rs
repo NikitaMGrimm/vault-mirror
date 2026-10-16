@@ -24,9 +24,9 @@ use vault_mirror::{
 
 #[derive(Parser)]
 struct Args {
-    #[arg(long, default_value = "http://127.0.0.1:18081")]
+    #[arg(long, default_value = "http://127.0.0.1:18091")]
     source: String,
-    #[arg(long, default_value = "http://127.0.0.1:18082")]
+    #[arg(long, default_value = "http://127.0.0.1:18092")]
     dest: String,
     /// Fill the source vault with sample items.
     #[arg(long)]
