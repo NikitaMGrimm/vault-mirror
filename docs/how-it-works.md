@@ -44,8 +44,9 @@ destination.
   Your edit is in that run's destination backup.
 - If you delete a copy's marker, the item is no longer a copy, and the next run
   makes a new one next to it.
-- If you clone a copy, runs warn that the clone still has the marker. Remove its
-  `vault-mirror` field to keep it.
+- If you clone a copy and change the clone, runs warn that it still has the
+  marker. Remove its `vault-mirror` field to keep it. An unchanged clone is
+  removed as a duplicate.
 
 ### After an outage
 
