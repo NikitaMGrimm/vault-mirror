@@ -13,19 +13,12 @@ reviewed for safety first and features second.
 - Security problems are reported privately; see [SECURITY.md](SECURITY.md).
 
 Small pull requests are welcome without asking first: typo and documentation
-fixes, and bug fixes with a test. Anything substantial needs the maintainer's
-approval in an issue or discussion **before** you open a pull request. That
-includes new features, new settings, behaviour changes, new dependencies, and
-refactors. Pull requests for substantial changes without prior approval are
-closed.
+fixes, and bug fixes with a test. Anything else, such as a feature, setting,
+behaviour change, dependency or refactor, needs the maintainer's approval in an
+issue or discussion **before** you open a pull request.
 
-The approval step, the one-change rule and the description check below are
-for contributions from outside. The maintainer and collaborators skip them,
-and the required CI checks still apply to everyone.
-
-The project aims to stay small. A feature that most users would not need, or
-that other tools already do well, will probably be declined. Remote storage
-for backups is an example: point rclone or restic at the backup directory.
+The project stays small. A feature that most users would not need, or that
+other tools already do well, will probably be declined.
 
 ## AI-assisted contributions
 
@@ -49,9 +42,6 @@ cargo test                              # unit and end-to-end tests
 cargo run --example sandbox -- --seed   # prints a settings file for two new accounts with sample data
 ```
 
-The sandbox uses localhost ports 18091 and 18092, leaving Monero's default
-ports available.
-
 When the sandbox is not running, the end-to-end tests are skipped. CI requires
 them with `VAULT_MIRROR_REQUIRE_SANDBOX=1`. One test checks that a snapshot
 imports into the official Bitwarden CLI; set `VAULT_MIRROR_BW` to a `bw`
@@ -60,10 +50,8 @@ binary to run it.
 ### Bitwarden's own server
 
 `sandbox/up.sh --official` also starts Bitwarden's self-hosted server, from a
-2.7 GB image. It runs entirely locally and never contacts Bitwarden. Like
-Bitwarden's cloud, it stores attachments in Azure blob storage, here the
-Azurite emulator. The sandbox makes every account premium, because
-attachments need premium. Point the tests at it by URL:
+2.7 GB image, with attachments in the Azurite blob storage emulator and every
+account premium. Point the tests at it by URL:
 
 ```sh
 VAULT_MIRROR_SANDBOX_SOURCE=http://127.0.0.1:18085 cargo test
@@ -72,8 +60,7 @@ VAULT_MIRROR_SANDBOX_DEST=http://127.0.0.1:18085 VAULT_MIRROR_SANDBOX_DEST_TLS=h
 
 Changes to how vaults are read or written should pass with Vaultwarden and
 with Bitwarden's server on each side. Re-run `sandbox/up.sh --official` after
-restarting its containers; it reinstalls the database settings the tests rely
-on. Stop everything with:
+restarting its containers. Stop everything with:
 
 ```sh
 docker compose -f sandbox/compose.yaml --profile official down
@@ -86,9 +73,8 @@ of 2000 items. Set `VAULT_MIRROR_SCALE_ITEMS` to change the size.
 
 ## Design rules
 
-These rules keep the tool predictable for people and for scripts. Follow them
-in code, output and documentation. To change a rule, change it here in the
-same pull request and give the reason.
+Follow these in code, output and documentation. To change a rule, change it
+here in the same pull request.
 
 ### Terminal output
 
@@ -123,7 +109,9 @@ same pull request and give the reason.
 
 - Write for someone setting vault-mirror up for the first time: plain
   English, addressed to "you", with short sentences and an example where one
-  helps. Say why as well as what.
+  helps.
+- Say what a user does and what happens. Leave out the reasons behind design
+  decisions, rare edge cases, and anything an error message already says.
 - Use one term for one meaning: source, destination, run, snapshot, copy (a
   destination item that vault-mirror made), marker (the `vault-mirror` field),
   settings file (`vault-mirror.env`).
@@ -137,52 +125,26 @@ same pull request and give the reason.
 ## Pull requests
 
 - Keep each pull request to one change, with a test that fails without it.
-- Fill in the template: the problem, the change, and how you verified it. A
-  check fails until the description has these sections and the AI disclosure
-  line. Show before and after for changes to output or documentation as
-  text: a fenced block of terminal output, or a quoted excerpt. Use a
-  screenshot or a short recording only when text cannot show the change,
-  such as colour, layout or motion. Upload media to the pull request; do not
-  commit it.
+- Fill in the template: the problem, the change, how you verified it, and the
+  AI disclosure line. A check fails until it has them. Show changes to output
+  or documentation as text, before and after.
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
   `cargo test` with the sandbox running.
-- CI skips the build and tests when a change only touches Markdown files,
-  `docs/` or `assets/`. Otherwise it runs the tests against Vaultwarden and
-  against Bitwarden's own server.
 - Update the README or `docs/` when behaviour or configuration changes.
-- The maintainer turns on auto-merge after review. A pull request merges as
-  soon as the required checks pass. Fix a problem found later in a new pull
-  request. Dependabot's patch and minor updates merge on their own the same
-  way; major updates wait for the maintainer.
 - Title the pull request as a [Conventional Commit](https://www.conventionalcommits.org),
   for example `fix: keep archive state on edit`. Pull requests are squashed,
-  and the release notes are generated from these titles: `feat`, `fix` and
-  `perf` appear in them, other types do not. A check holds every pull request
-  to this, including the maintainer's.
+  and `feat`, `fix` and `perf` titles become the release notes.
+
+CI runs the tests against Vaultwarden and against Bitwarden's own server, and
+skips them when a change only touches Markdown, `docs/` or `assets/`.
 
 ## Releases
 
-[Release-plz](https://release-plz.dev) keeps a release pull request open
-with the next version and its changelog. The maintainer rewrites the
-changelog there for users, and merges it with the ruleset bypass: pull
-requests that release-plz opens don't start CI, and CI runs on `main` after
-the merge. Release-plz waits for that commit's push CI run to succeed before
-publishing. Manual CI runs and pull request runs do not satisfy the gate.
-The gate waits up to two hours. If CI fails and then passes on a rerun,
-rerun Release-plz's failed jobs too. Release pull requests must be squash-merged
-so the commit being published is the one that passed CI.
-
-Pushed tags and manual releases with a tag use the same push-to-main CI gate
-for the commit the tag resolves to. All release builds use that resolved
-commit, even when the manual workflow started from another commit. Manual
-builds without a tag do not publish and do not wait for this gate.
-
-The verified release publishes the crate to crates.io, tags the
-version, and runs the release workflow, which builds static binaries for
-x86-64 and arm64 Linux and native binaries for both macOS architectures,
-publishes the container image, and attaches build provenance to all of them.
-Last, it records the terminal demo in the README from `assets/demo.tape`
-against the sandbox, and publishes it to the `assets` branch.
+[Release-plz](https://release-plz.dev) keeps a release pull request open with
+the next version and its changelog. The maintainer edits the changelog for
+users and squash-merges it. Once CI passes on `main`, release-plz publishes the
+crate and tags the version, and the release workflow builds the binaries and
+container image with build provenance, then records the README demo.
 
 ## License
 

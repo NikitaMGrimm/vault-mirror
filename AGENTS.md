@@ -15,7 +15,8 @@ vaults, so its priorities are fixed, in this order:
 
 Keep the tool small. The smallest change that does the job is the right one,
 and deleting code is welcome. A new dependency, setting or command needs a reason
-a user would recognize.
+a user would recognize. Don't add code, settings or docs for edge cases nobody
+has hit, and don't write the reasoning behind a decision into the docs.
 
 ## Words
 
