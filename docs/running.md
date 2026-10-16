@@ -18,10 +18,6 @@
 Every command takes `--env-file PATH` to read a [settings
 file](configuration.md#the-settings-file), and `--help` to describe its options.
 
-Status-file and notification failures are warnings. A successful vault operation
-does not prove that either monitoring channel worked. Monitor the process exit
-status or logs too, and use an external missing-heartbeat alert if needed.
-
 ## Output
 
 At a terminal, each step is one line: a coloured verb, then what happened. Long
@@ -53,24 +49,15 @@ server-side ids, but never item names, passwords or other vault content.
 
 ## Scheduling
 
-The simplest way is the container's `daemon` command, as in
-[Getting started](getting-started.md). If you'd rather use your own scheduler,
-have it start `vault-mirror run`.
+The container's `daemon` command runs at the times `SCHEDULE` names, not at
+startup. The image's health check gives the first run 26 hours. To use your
+own scheduler instead, have it start `vault-mirror run`.
 
-Only one run or restore can use a backup directory at a time. If another one is
-already running, the new one stops straight away without changing anything.
+Only one command at a time can use a backup directory. Another one stops
+straight away without changing anything.
 
-A cron schedule waits for its next named time, including after startup. An
-interval starts with an immediate run. With the default daily cron schedule,
-the first run can be almost 24 hours away. The image gives health checks a
-26-hour startup grace period. It becomes healthy after the first successful
-run. Adjust the grace period and maximum status age for longer schedules.
-
-The generated Compose file gives the daemon five minutes to stop. Docker can
-kill it after that even while it is finishing a run. Rate limiting can make one
-request wait for 15 minutes. Increase `stop_grace_period` before stopping a
-slow or large run, and check the logs afterward. Backups made before changes
-remain the recovery path if a run is interrupted.
+The generated `compose.yaml` gives a run five minutes to finish when the
+container stops. Raise `stop_grace_period` for large vaults.
 
 ### systemd
 

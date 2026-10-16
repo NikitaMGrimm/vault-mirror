@@ -12,61 +12,31 @@ vault-mirror needs each vault's API key and master password, because it has to
 decrypt items to compare and copy them.
 
 > [!WARNING]
-> Anyone who can read vault-mirror's settings can open your vaults. Protect the
-> settings file, and any secret files, as carefully as the vaults themselves.
+> Anyone who can read vault-mirror's settings or control its process can open
+> both vaults. Two-step login doesn't protect API keys. Run it on a host you
+> trust, and protect the settings file and any secret files like the vaults
+> themselves.
 
 Environment variables can be visible to other processes on the same host. To
-keep secrets out of them, put each one in a file and point to it with
-`NAME_FILE`, for example with Docker secrets or systemd credentials. See
-[Secrets in files](docs/configuration.md#secrets-in-files).
+keep secrets out of them, use [secret files](docs/configuration.md#secrets-in-files).
 
 vault-mirror writes to the source only when you run `restore --to source` or
 `run --pull`. A normal run changes and deletes only the copies it made in the
 destination.
 
-## How automation changes your vault's security
-
-An unattended mirror needs to unlock both vaults without you present. The
-machine running it becomes another place an attacker could obtain your vault
-content. Anyone who controls that machine or the vault-mirror process can read
-the master passwords, use the API keys, and capture decrypted items and
-attachments from both vaults. Folder and collection filters limit copying,
-but backups and account access cover the whole configured scope.
-
-API-key login does not ask for your interactive two-step login. Keep two-step
-login enabled for your normal clients, but do not expect it to protect stored
-automation credentials. The master passwords are used locally to decrypt the
-vaults. They do not make a compromised runner safe.
-
-Secrets in files reduce exposure through environment variables and container
-inspection. They remain readable by the process that needs them and by an
-administrator. Use a trusted, maintained host and protect access to both
-accounts. Copying a password into a second account also gives anyone who can
-unlock that account access to the password.
-
-Use a separate backup passphrase. Keep a recoverable copy of `key.age` as well
-as its passphrase. This protects encrypted backups if the disk or runner is stolen,
-but a compromised running process can still capture the vault it decrypts.
-
 ## What it stores
 
 | File | Contents | Protection |
 | --- | --- | --- |
-| `key.age` | The backup key. | Encrypted with your passphrase, using scrypt. |
-| `*/<snapshot>/vault.json.age` | Complete vault exports, secrets included. | Encrypted with age. |
-| `*/<snapshot>/attachments/*.age` | Attachment content. | Encrypted with age. |
+| `key.age` | The backup key. | Encrypted with `BACKUP_PASSPHRASE`, using scrypt. |
+| `*/<snapshot>/vault.json.age` | Complete vault exports, secrets included. | Encrypted to the backup key with age. |
+| `*/<snapshot>/attachments/*.age` | Attachment content. | Encrypted to the backup key with age. |
 | `last-run.json` | Time, result and counts of the last run. | None. No vault content. |
 | `state.json` | The device ids vault-mirror logs in with. | None. |
-| `run.lock` | Nothing. It's locked while a run or restore is using the directory. | None. |
-| `unfinished-pull` | Nothing. It's there while a pull has not finished. | None. |
+| `run.lock`, `unfinished-pull` | Nothing. | None. |
 
-On Unix, backup and state files are readable only by their owner. Snapshots
-and attachments are encrypted to the backup key in `key.age`.
-
-> [!WARNING]
-> You need both `key.age` and `BACKUP_PASSPHRASE` to read the backups. The passphrase cannot
-> recreate a lost `key.age`. Keep recovery material somewhere other than the
-> backup disk.
+On Unix, these files are readable only by their owner. Backups cover the whole
+vault, whatever the folder and collection filters.
 
 ## What leaves the machine
 
@@ -79,24 +49,16 @@ point it to, and, if you configure them, your notification URLs.
 | Attachment storage named by those servers, such as the Azure storage that Bitwarden's cloud uses | Encrypted attachment files. |
 | `NOTIFY_SUCCESS_URL` and `NOTIFY_FAILURE_URL`, if set | A one-line summary of the run, with counts and error messages. No vault content. |
 
-Error messages and logs never include request URLs, because attachment download
-URLs contain access tokens. Server error responses are cut down to their message,
-with URLs and the credentials that were sent removed. Attachment storage errors
-omit the response body, which could echo a signed token. HTTP redirects are
-refused. Configure each server's final address.
+Logs and errors never include request URLs, which can carry access tokens, and
+reduce server error responses to their message. HTTP redirects are refused, so
+configure each server's final address.
 
-Server-supplied key derivation costs are bounded before use. Supported ranges
-are 5,000 to 2,000,000 PBKDF2 iterations, or Argon2id with 2 to 10 iterations,
-16 to 1,024 MiB of memory, and parallelism of 1 to 16. These include legacy
-PBKDF2 accounts and Bitwarden's configurable ranges.
+vault-mirror refuses key derivation settings outside Bitwarden's ranges: 5,000
+to 2,000,000 PBKDF2 iterations, or Argon2id with 2 to 10 iterations, 16 to
+1,024 MiB of memory and parallelism of 1 to 16.
 
 ## The marker on each copy
 
-Every copy carries a marker: a custom field called `vault-mirror`, of
-Bitwarden's **Hidden** type, so apps show it masked until you reveal it. It
-holds the source item's id and hashes of the item's content and of both items'
-attachments.
-
-The marker is encrypted with the destination's keys like any other field, so
-only people who can open the destination can read it. What it adds to what they
-can already see is the source item's id.
+Every copy carries a [marker](docs/how-it-works.md#how-copies-are-recognized):
+a hidden custom field, encrypted like any other. It adds only the source item's
+id to what someone who can open the destination already sees.

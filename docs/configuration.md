@@ -17,10 +17,6 @@ spaces, and dollar signs stay part of the password:
 SOURCE_PASSWORD=it's "quoted" and $not a variable
 ```
 
-Each setting occupies one line. To supply a password containing a newline,
-set the environment variable directly. Secret files preserve internal newlines
-but trim trailing newline characters.
-
 How each tool reads it:
 
 | Program | How to use the settings file |
@@ -36,11 +32,7 @@ A variable set in the environment wins over the same name in the settings file.
 To keep a secret out of the settings file, put it in a file of its own and set
 `NAME_FILE` to that file's path, for example
 `SOURCE_PASSWORD_FILE=/run/secrets/source_password`. This works with Docker
-secrets and systemd credentials.
-
-Passwords and passphrases are used exactly as given, including spaces at the
-ends. API keys and URLs are trimmed, and so is a trailing newline in a secret
-file.
+secrets and systemd credentials. A trailing newline in the file is ignored.
 
 ## Variables
 
@@ -76,21 +68,17 @@ file.
 | --- | --- | --- |
 | `SCHEDULE` | | When `daemon` runs, as a cron expression such as `0 3 * * *`. |
 | `TZ` | UTC | The time zone `SCHEDULE` is read in, such as `Europe/Berlin`. |
-| `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After each run, `POST` a one-line summary here. Works with [ntfy](https://ntfy.sh), [healthchecks.io](https://healthchecks.io), Gotify and anything else that accepts a plain-text `POST`. The summary has counts and error messages, never vault content. A delivery failure is a warning. |
-| `CA_CERT_FILE` | | A PEM file of extra certificate authorities to trust, for a server with a private CA. |
-
-In Docker, mount the certificate into the container and set `CA_CERT_FILE` to
-its path there.
+| `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After each run, `POST` a one-line summary here, such as to [ntfy](https://ntfy.sh) or [healthchecks.io](https://healthchecks.io). It holds counts and errors, never vault content. |
+| `CA_CERT_FILE` | | A PEM file of extra certificate authorities to trust. In Docker, mount it into the container and give its path there. |
 
 ## Setting up by hand
 
-If you can't run `init`, for example because there's no terminal:
+Instead of `init`:
 
 1. Write `vault-mirror.env` with the required variables above,
    `BACKUP_PASSPHRASE`, and `SCHEDULE`.
 
-2. In the same directory, create `backups` and `compose.yaml`. The container
-   runs as you, so it can write to `backups`.
+2. In the same directory, create `backups` and `compose.yaml`:
 
    ```sh
    mkdir -p backups
@@ -111,8 +99,7 @@ If you can't run `init`, for example because there's no terminal:
    EOF
    ```
 
-3. Check the logins and see what the first run would do. This doesn't change
-   either vault.
+3. Check the logins and see what the first run would do:
 
    ```sh
    docker compose run --rm vault-mirror check
@@ -130,9 +117,8 @@ To mirror one organization into another, set both `SOURCE_ORGANIZATION_ID` and
 `DEST_ORGANIZATION_ID`. An organization's id is in the web vault's address bar
 while the organization is open.
 
-The account must see everything in each organization. Otherwise hidden items
-would look deleted, so vault-mirror stops. On Bitwarden's servers, that means,
-for both organizations:
+The account must see everything in each organization, or vault-mirror stops.
+On Bitwarden's servers, that means, for both organizations:
 
 1. Give the account the **Owner** or **Admin** role.
 2. Assign the account to every collection, with **Can manage** permission.
@@ -154,11 +140,9 @@ EXCLUDE_FOLDERS=Work/Private
 
 - A name includes the folders nested in it: `Work` also selects `Work/Infra`.
 - With `INCLUDE_FOLDERS`, items that aren't in any folder are left out.
-- A name that matches no folder gives a warning, so a typo doesn't quietly
-  select nothing.
-- If you change the filter, copies that it no longer selects are deleted on the
-  next run, subject to the [safety checks](how-it-works.md#safety-checks).
-- Backups always cover the whole vault, whatever the filter.
+- A name that matches no folder gives a warning.
+- Copies the filter no longer selects are deleted on the next run.
+- Backups always cover the whole vault.
 
 `INCLUDE_COLLECTIONS` and `EXCLUDE_COLLECTIONS` work the same way for an
 organization. An item in an excluded collection is left out even if it's also in

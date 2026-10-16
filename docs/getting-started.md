@@ -17,8 +17,8 @@ sync with it, is the **destination**.
   vault-mirror only changes the copies it makes there. Everything else in the
   account stays as it is.
 
-If the destination is a free Bitwarden cloud account, attachments aren't copied,
-because Bitwarden only accepts them from Premium accounts. Everything else is.
+A free Bitwarden cloud account can't hold attachments. As a destination, it
+gets everything else.
 
 ## Step 1: Get the API keys
 
@@ -60,18 +60,15 @@ note: keep BACKUP_PASSPHRASE outside the backups and vault. After the first run,
 
 Nothing has been changed yet. The "Would" line is the plan.
 
+- `vault-mirror.env` holds every setting, secrets included.
+  [Configuration](configuration.md) describes each one.
+- `compose.yaml` runs vault-mirror on your schedule and keeps backups in
+  `./backups`.
+
 > [!IMPORTANT]
 > Keep `BACKUP_PASSPHRASE` somewhere you can reach without either vault.
-> After the first run, keep a separate copy of `backups/key.age` there too.
-> Recovery needs both. The passphrase cannot recreate a lost key file.
-
-The two files:
-
-- `vault-mirror.env` holds every setting, secrets included. On Unix, only its
-  owner can read it. On Windows, restrict the directory and check the file's
-  access permissions. [Configuration](configuration.md) describes each setting.
-- `compose.yaml` runs vault-mirror on your schedule, keeps backups in `./backups`,
-  and restarts it after a reboot.
+> After the first run, keep a copy of `backups/key.age` there too. Recovery
+> needs both.
 
 ## Step 3: Start it
 
@@ -105,11 +102,8 @@ A first run prints:
 Your items are now in the destination. Each copy has an extra hidden field,
 `vault-mirror`, which links it to its source item. Leave that field in place.
 
-[How it works](how-it-works.md) explains each step of a run.
-
-Copy `backups/key.age` to your separate recovery location now. Test recovery
-with [export](backups.md#restore-with-vault-mirror) before relying on the backups.
-Check the exported items and attachments, then delete the unencrypted output.
+Copy `backups/key.age` to your recovery location now, and try an
+[export](backups.md#restore-with-vault-mirror) once.
 
 ## Step 4: Check that it keeps working
 
@@ -131,10 +125,9 @@ To see what the last runs did:
 docker compose logs --tail 20
 ```
 
-To get a message after each run, set `NOTIFY_FAILURE_URL`, and optionally
-`NOTIFY_SUCCESS_URL`, in `vault-mirror.env`. Any service that accepts a plain
-`POST` works, such as [ntfy](https://ntfy.sh) or
-[healthchecks.io](https://healthchecks.io). Then apply the change:
+To get a message when a run fails, set `NOTIFY_FAILURE_URL` in
+`vault-mirror.env`, for example to an [ntfy](https://ntfy.sh) topic. Then apply
+the change:
 
 ```sh
 docker compose up -d
@@ -142,19 +135,9 @@ docker compose up -d
 
 ## If a run stops
 
-vault-mirror stops before it changes anything when the plan looks like a mistake.
-The error names the reason and, if there is one, the flag that allows the run.
-
-| Error | Likely cause | If you're sure |
-| --- | --- | --- |
-| The run would delete every item it mirrored before | The source looks empty or like another vault. | `run --allow-mass-delete` |
-| Items in the source are copies of destination items | The source and destination are swapped. | Fix the settings, or `run --reverse` if you switched them on purpose. |
-
-A flag applies to one run. For example:
-
-```sh
-docker compose run --rm vault-mirror run --allow-mass-delete
-```
+vault-mirror stops before it changes anything when the plan looks like a
+mistake, such as swapped vaults or an empty source. The error names the reason
+and the flag that allows the run. See [safety checks](how-it-works.md#safety-checks).
 
 ## Next steps
 

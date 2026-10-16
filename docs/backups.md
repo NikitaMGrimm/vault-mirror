@@ -3,9 +3,8 @@
 [← Documentation](README.md)
 
 Every run backs up the whole source and destination before changing either
-vault. Folder and collection filters limit copying, not backups. The files use
-the standard [age](https://age-encryption.org) format, so recovery needs neither
-vault-mirror nor either server.
+vault. The files use the standard [age](https://age-encryption.org) format, so
+recovery needs neither vault-mirror nor either server.
 
 ## What's in the backup directory
 
@@ -26,9 +25,8 @@ backups/
 ```
 
 A **snapshot** is a full vault export without the trash, with its own copy of
-every attachment. A run skips the snapshot when the vault hasn't changed since
-the newest one and that one still opens. Each snapshot stores the attachments
-again, so ten snapshots of a vault with 1 GiB of attachments take about 10 GiB.
+every attachment, so ten snapshots of a vault with 1 GiB of attachments take
+about 10 GiB. An unchanged vault gets no new snapshot.
 
 Snapshots are kept like this:
 
@@ -39,10 +37,9 @@ Snapshots are kept like this:
 ## Keep the key
 
 The first run creates a random backup key and stores it in `key.age`, encrypted
-with `BACKUP_PASSPHRASE`. You need **both** to read the backups. The passphrase
-can't recreate a lost `key.age`, so keep copies of both somewhere other than
-the backup disk. If `key.age` goes missing from a directory with snapshots, runs
-stop until you put it back or choose an empty `BACKUPS_DIR`.
+with `BACKUP_PASSPHRASE`. You need **both** to read the backups, so keep copies
+of both somewhere other than the backup disk. If `key.age` goes missing, runs
+stop until you put it back.
 
 ## Restore with vault-mirror
 
@@ -73,9 +70,6 @@ Or restore the newest source snapshot straight into the destination:
 docker compose run --rm vault-mirror restore --to dest
 ```
 
-Restore reads every attachment from the backup before it writes anything, and
-checks every restored item afterwards. Items the server wouldn't show, and
-attachments a free Bitwarden account can't hold, are left out with a warning.
 Restored items are not copies, so a run into a restored destination copies the
 source next to them. To rebuild a lost destination, mirror into an empty one
 instead.
