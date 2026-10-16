@@ -340,13 +340,8 @@ pub async fn pull(
             update.changed_in_dest() && !resumed.contains(dest_vault.items[update.dest].id.as_str())
         })
         .collect();
-    let both = changed
-        .iter()
-        .filter(|update| {
-            let entry = &plan.entries[update.entry];
-            plan::marker_of(&dest_vault.items[update.dest])
-                .is_some_and(|marker| marker.content != entry.marker.content)
-        })
+    let both = (changed.iter())
+        .filter(|update| plan.changed_in_both(update, dest_vault))
         .count();
     if both > 0 {
         let kept = match backed_up {

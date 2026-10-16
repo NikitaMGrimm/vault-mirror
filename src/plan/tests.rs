@@ -990,6 +990,40 @@ fn an_attachment_added_to_a_copy_counts_as_a_change_in_the_destination() {
 }
 
 #[test]
+fn only_the_same_change_on_both_sides_counts_as_changed_in_both() {
+    let mut source = vault(vec![
+        login("s1", "One", "pw1"),
+        login("s2", "Two", "pw2"),
+        login("s3", "Three", "pw3"),
+    ]);
+    for item in &mut source.items {
+        item.attachments = vec![attachment(&format!("{}-a", item.id), "scan.pdf", 100)];
+    }
+    let mut dest = mirrored(&source, Mode::Personal);
+    // A file replaced on both sides.
+    source.items[0].attachments = vec![attachment("s1-b", "scan.pdf", 120)];
+    dest.items[0].attachments = vec![attachment("d1-b", "scan.pdf", 130)];
+    // A file replaced in the destination, the notes edited in the source.
+    source.items[1]
+        .content
+        .insert("notes".into(), text("edited in the source"));
+    dest.items[1].attachments = vec![attachment("d2-b", "scan.pdf", 140)];
+    // The notes edited on both sides.
+    source.items[2]
+        .content
+        .insert("notes".into(), text("edited in the source"));
+    dest.items[2]
+        .content
+        .insert("notes".into(), text("edited in the destination"));
+
+    let plan = plan(&source, &dest, Mode::Personal);
+    let both: Vec<bool> = (plan.updates.iter())
+        .map(|update| plan.changed_in_both(update, &dest))
+        .collect();
+    assert_eq!(both, [true, false, true]);
+}
+
+#[test]
 fn what_vault_mirror_did_not_make_is_left_alone() {
     let source = numbered(3);
     let mut dest = vault(vec![login("existing", "Already here", "pw")]);
