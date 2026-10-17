@@ -193,6 +193,76 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_copy_stays_in_the_folder_its_member_put_it_in() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, source_scope, source_org) = organization(&sandbox, &sandbox.source_url).await?;
+    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
+    let team = source.create_collection(&source_org, "Team", None).await?;
+    for name in ["GitHub", "Visa"] {
+        let draft = Draft {
+            content: fixtures::named(name).content,
+            folder_id: None,
+            collection_ids: vec![team.id.clone()],
+        };
+        source.create_item(&source_scope, &draft).await?;
+    }
+    let options = MirrorOptions::default();
+    let run = || {
+        run_scoped(
+            &source,
+            source_scope.clone(),
+            &dest,
+            dest_scope.clone(),
+            &options,
+        )
+    };
+    run().await?;
+
+    // A folder is the member's own, not part of the organization.
+    let mine = dest.create_folder("Mine").await?;
+    for copy in dest.load(&dest_scope).await?.items {
+        let filed = Draft {
+            content: copy.content.clone(),
+            folder_id: Some(mine.id.clone()),
+            collection_ids: copy.collection_ids.clone(),
+        };
+        dest.update_item(&dest_scope, &copy, &filed).await?;
+    }
+    assert!(!run().await?.changed);
+
+    let vault = source.load(&source_scope).await?;
+    let github = by_name(&vault, "GitHub");
+    let mut edited = Draft {
+        content: github.content.clone(),
+        folder_id: None,
+        collection_ids: github.collection_ids.clone(),
+    };
+    edited
+        .content
+        .insert("notes".into(), Node::secret("edited"));
+    let github = source.update_item(&source_scope, github, &edited).await?;
+    source
+        .upload_attachment(&source_scope, &github, "codes.txt", b"1234")
+        .await?;
+    let visa = by_name(&vault, "Visa");
+    source
+        .set_archived(std::slice::from_ref(&visa.id), true)
+        .await?;
+
+    assert_eq!(run().await?.summary.items_updated, 2);
+    let copies = dest.load(&dest_scope).await?;
+    for copy in &copies.items {
+        assert_eq!(copy.folder_id.as_ref(), Some(&mine.id), "{}", copy.name());
+    }
+    assert_eq!(by_name(&copies, "GitHub").attachments.len(), 1);
+    assert!(by_name(&copies, "Visa").archived);
+    assert!(!run().await?.changed);
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_individual_vault_cannot_be_mirrored_into_an_organization() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());

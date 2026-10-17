@@ -642,6 +642,15 @@ impl<'a> Run<'a> {
                 files,
             )
         };
+        // What replaces `item`, in its own archive state. In an organization
+        // a folder is each member's own and not mirrored, so it stays.
+        let replacement = |entry_index: usize, item: &Item, files: Option<&[_]>| {
+            let mut draft = draft(entry_index, item.archived, files)?;
+            if mode == Mode::Organization {
+                draft.folder_id = item.folder_id.clone();
+            }
+            anyhow::Ok(draft)
+        };
         let has_files = |entry_index: usize| {
             !source_vault.items[plan.entries[entry_index].source]
                 .attachments
@@ -676,13 +685,13 @@ impl<'a> Run<'a> {
         let created = written.len();
 
         let updated: Vec<(usize, Item)> = stream::iter(plan.updates.iter().map(|update| {
-            let (draft, writes) = (&draft, &writes);
+            let (replacement, writes) = (&replacement, &writes);
             async move {
                 let existing = &dest_vault.items[update.dest];
                 let draft = if update.sync_attachments {
-                    draft(update.entry, existing.archived, None)?
+                    replacement(update.entry, existing, None)?
                 } else if update.write_content {
-                    draft(update.entry, existing.archived, Some(&existing.attachments))?
+                    replacement(update.entry, existing, Some(&existing.attachments))?
                 } else {
                     return anyhow::Ok((update.entry, existing.clone()));
                 };
@@ -738,14 +747,14 @@ impl<'a> Run<'a> {
         );
         let copied: Vec<(usize, usize, Item)> =
             stream::iter(transfers.into_iter().map(|(entry_index, dest_item, old)| {
-                let (draft, uploads) = (&draft, &uploads);
+                let (replacement, uploads) = (&replacement, &uploads);
                 async move {
                     let source_item = &source_vault.items[plan.entries[entry_index].source];
                     let (stored, copied) =
                         copy_attachments((source_files, source_item), (dest, dest_item), old, mode)
                             .await?;
                     uploads.add(copied);
-                    let draft = draft(entry_index, stored.archived, Some(&stored.attachments))?;
+                    let draft = replacement(entry_index, &stored, Some(&stored.attachments))?;
                     let finished = dest
                         .account
                         .update_item(&dest.scope, &stored, &draft)
@@ -807,10 +816,10 @@ impl<'a> Run<'a> {
         // so a run that stops before the state is set takes no copy for
         // changed by hand. Now the state is set, the marker follows.
         stream::iter(changing.into_iter().map(|(entry_index, item)| {
-            let draft = &draft;
+            let replacement = &replacement;
             async move {
                 let stored = reread(dest, item, mode).await?;
-                let draft = draft(*entry_index, stored.archived, Some(&stored.attachments))?;
+                let draft = replacement(*entry_index, &stored, Some(&stored.attachments))?;
                 (dest.account.update_item(&dest.scope, &stored, &draft).await)
                     .with_context(|| format!("updating destination item {}", item.id))?;
                 anyhow::Ok(())
