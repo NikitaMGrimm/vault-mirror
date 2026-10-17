@@ -251,10 +251,8 @@ async fn log_in(env: &HashMap<String, String>, prefix: &str, role: &str) -> Resu
             .as_ref()
             .ok_or_else(|| anyhow!("no destination settings"))?,
     };
-    if prefix == "DEST"
-        && vault.server == config.source.server
-        && vault.client_id == config.source.client_id
-    {
+    // A personal API key's client id names its account on any server address.
+    if prefix == "DEST" && vault.client_id == config.source.client_id {
         bail!("this is the source account; the destination must be another account");
     }
     let http = app::http_client(&config)?;
