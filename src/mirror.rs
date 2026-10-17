@@ -229,8 +229,8 @@ fn listed(ids: &[&str]) -> String {
 /// and nothing is deleted.
 ///
 /// Each item is checked in the source once written, and its destination item
-/// then becomes the copy of it, so the mirror after the pull leaves it as it
-/// is.
+/// then becomes the copy of it, so the mirror after the pull doesn't copy it
+/// back.
 pub async fn pull(
     source: &Endpoint<'_>,
     dest: &Endpoint<'_>,
@@ -751,10 +751,6 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
-    fn mode(&self) -> Result<Mode> {
-        mode(&self.source.scope, &self.dest.scope)
-    }
-
     /// Removes source items the destination could not hold, with a warning.
     fn leave_out(&mut self, source: &mut Vault, unfit: impl Fn(&Item) -> bool, reason: &str) {
         let left_out = source
@@ -816,7 +812,7 @@ impl Run<'_> {
     }
 
     async fn execute(&mut self) -> Result<bool> {
-        let mode = self.mode()?;
+        let mode = mode(&self.source.scope, &self.dest.scope)?;
         let loaded = self.dest_vault.take();
         let (source_vault, dest_vault) = tokio::try_join!(
             async {
@@ -872,7 +868,6 @@ impl Run<'_> {
             );
         }
 
-        self.stage = "planning";
         let plan = plan::plan_with(&source_vault, &dest_vault, mode, self.copy_attachments);
         check_source_shows(&plan, &dest_vault, &source_traits)?;
         if plan.attachments_withheld > 0 {
@@ -1184,6 +1179,10 @@ impl Run<'_> {
             if !ids.is_empty() {
                 dest.account.trash_items(&ids).await?;
                 self.reporter.status("Deleted", &count(ids.len(), "item"));
+            }
+            // Items already gone were not deleted by this run.
+            if let Some(summary) = &mut self.summary {
+                summary.items_deleted = ids.len();
             }
         }
         if plan.folders_to_delete.is_empty() && plan.collections_to_delete.is_empty() {

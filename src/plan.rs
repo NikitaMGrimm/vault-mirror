@@ -306,16 +306,10 @@ impl Entry {
         folder_ids: &HashMap<String, String>,
         collection_ids: &HashMap<String, String>,
     ) -> Result<Draft, PlanError> {
-        let item = &source.items[self.source];
-        let mut content = item.content.clone();
-        let mut fields: Vec<Node> = item
-            .fields()
-            .iter()
-            .filter(|field| !is_mirror_marker(field))
-            .cloned()
-            .collect();
-        fields.push(marker.to_field());
-        content.insert("fields".to_string(), Node::List(fields));
+        let mut content = unmarked(&source.items[self.source]);
+        if let Some(Node::List(fields)) = content.get_mut("fields") {
+            fields.push(marker.to_field());
+        }
 
         let folder_id = match &self.folder {
             Some(name) => Some(
@@ -888,10 +882,9 @@ pub struct Safety {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SafetyViolation {
     #[error(
-        "{} in the source {} copies of destination items, so the source and destination look \
-         swapped. If you are switching them on purpose, run once with --reverse",
-        count(*.0, "item"),
-        if *.0 == 1 { "is" } else { "are" }
+        "the source holds {} copied from destination items, so the source and destination \
+         look swapped. If you are switching them on purpose, run once with --reverse",
+        count(*.0, "item")
     )]
     Reversed(usize),
     #[error(
