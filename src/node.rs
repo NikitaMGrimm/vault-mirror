@@ -1,9 +1,10 @@
 //! A decrypted JSON tree that remembers which strings were ciphertext.
 //!
-//! Vault items are handled without a schema: every string that is an encrypted
-//! value becomes a [`Node::Secret`], everything else is kept as is. Writing an
-//! item back encrypts exactly the secrets again. A new item type or field that
-//! a server introduces is therefore mirrored without a code change.
+//! The caller names the slots it knows to be encrypted. Elsewhere, every
+//! string that has the shape of an encrypted value becomes a
+//! [`Node::Secret`], and everything else is kept as is. Writing an item back
+//! encrypts exactly the secrets again, so a field that a server introduces is
+//! mirrored without a code change.
 
 use std::{collections::BTreeMap, fmt};
 
@@ -44,14 +45,24 @@ impl Node {
         Self::Secret(value.into())
     }
 
-    /// Errors name the JSON pointer of the failing string within `value`.
-    pub fn decrypt(value: &Value, key: &SymKey) -> Result<Self, CryptoError> {
-        fn walk(value: &Value, key: &SymKey, path: &mut String) -> Result<Node, CryptoError> {
+    /// `encrypted` says by JSON pointer where `value` holds an encrypted
+    /// value. A nonempty string there must decrypt, and anything else but
+    /// null is an error. Errors name the JSON pointer, never the value.
+    pub fn decrypt(
+        value: &Value,
+        key: &SymKey,
+        encrypted: &dyn Fn(&str) -> bool,
+    ) -> Result<Self, CryptoError> {
+        fn walk(
+            value: &Value,
+            key: &SymKey,
+            encrypted: &dyn Fn(&str) -> bool,
+            path: &mut String,
+        ) -> Result<Node, CryptoError> {
             Ok(match value {
                 Value::Null => Node::Null,
-                Value::Bool(b) => Node::Bool(*b),
-                Value::Number(n) => Node::Number(n.clone()),
-                Value::String(s) if looks_encrypted(s) => {
+                Value::String(s) if s.is_empty() => Node::Text(String::new()),
+                Value::String(s) if encrypted(path) || looks_encrypted(s) => {
                     Node::Secret(key.decrypt_str(s).map_err(|error| match error {
                         CryptoError::Malformed { .. } => {
                             CryptoError::MalformedValue { path: path.clone() }
@@ -59,6 +70,11 @@ impl Node {
                         _ => CryptoError::DecryptValue { path: path.clone() },
                     })?)
                 }
+                _ if encrypted(path) => {
+                    return Err(CryptoError::MalformedValue { path: path.clone() });
+                }
+                Value::Bool(b) => Node::Bool(*b),
+                Value::Number(n) => Node::Number(n.clone()),
                 Value::String(s) => Node::Text(s.clone()),
                 Value::Array(items) => Node::List(
                     items
@@ -67,7 +83,7 @@ impl Node {
                         .map(|(index, item)| {
                             let length = path.len();
                             path.push_str(&format!("/{index}"));
-                            let node = walk(item, key, path);
+                            let node = walk(item, key, encrypted, path);
                             path.truncate(length);
                             node
                         })
@@ -79,7 +95,7 @@ impl Node {
                             let length = path.len();
                             path.push('/');
                             path.push_str(&k.replace('~', "~0").replace('/', "~1"));
-                            let node = walk(v, key, path);
+                            let node = walk(v, key, encrypted, path);
                             path.truncate(length);
                             Ok((k.clone(), node?))
                         })
@@ -87,7 +103,7 @@ impl Node {
                 ),
             })
         }
-        walk(value, key, &mut String::new())
+        walk(value, key, encrypted, &mut String::new())
     }
 
     pub fn encrypt(&self, key: &SymKey) -> Result<Value, CryptoError> {
@@ -320,7 +336,7 @@ mod tests {
                 "uris": [{"uri": key.encrypt_str("https://github.com").unwrap(), "match": null}],
             },
         });
-        let node = Node::decrypt(&raw, &key).unwrap();
+        let node = Node::decrypt(&raw, &key, &|_| false).unwrap();
         let expected = map(vec![
             ("name", Node::secret("GitHub")),
             ("type", Node::Number(1.into())),
@@ -351,20 +367,42 @@ mod tests {
         let source = SymKey::generate();
         let dest = SymKey::generate();
         let raw = json!({"name": source.encrypt_str("n").unwrap(), "date": "2026-01-02T03:04:05Z", "n": 3});
-        let node = Node::decrypt(&raw, &source).unwrap();
+        let node = Node::decrypt(&raw, &source, &|_| false).unwrap();
 
         let reencrypted = node.encrypt(&dest).unwrap();
         assert_ne!(reencrypted["name"], raw["name"]);
         assert_eq!(reencrypted["date"], raw["date"]);
-        assert_eq!(Node::decrypt(&reencrypted, &dest).unwrap(), node);
-        assert!(Node::decrypt(&reencrypted, &source).is_err());
+        assert_eq!(
+            Node::decrypt(&reencrypted, &dest, &|_| false).unwrap(),
+            node
+        );
+        assert!(Node::decrypt(&reencrypted, &source, &|_| false).is_err());
     }
 
     #[test]
     fn a_value_that_looks_encrypted_but_does_not_decrypt_is_an_error() {
         let raw = json!({"name": SymKey::generate().encrypt_str("n").unwrap()});
-        let error = Node::decrypt(&raw, &SymKey::generate()).unwrap_err();
+        let error = Node::decrypt(&raw, &SymKey::generate(), &|_| false).unwrap_err();
         assert_eq!(error.to_string(), "could not decrypt the value at /name");
+    }
+
+    #[test]
+    fn an_encrypted_slot_never_reads_as_text() {
+        let key = SymKey::generate();
+        let slot = |pointer: &str| pointer == "/secret";
+        for value in [json!("2.AAAA"), json!("plain"), json!(1), json!({})] {
+            let raw = json!({"secret": value, "other": "2.AAAA"});
+            let error = Node::decrypt(&raw, &key, &slot).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "the encrypted value at /secret is malformed or in an unsupported format"
+            );
+        }
+        for value in [Value::Null, json!("")] {
+            let raw = json!({"secret": value, "other": "2.AAAA"});
+            let node = Node::decrypt(&raw, &key, &slot).unwrap();
+            assert_eq!(node.as_map().unwrap()["other"], Node::Text("2.AAAA".into()));
+        }
     }
 
     #[test]
@@ -377,7 +415,7 @@ mod tests {
             "name": enc,
             "login": {"uris": [{"uri": unsupported, "match": 3}]},
         });
-        let error = Node::decrypt(&raw, &key).unwrap_err();
+        let error = Node::decrypt(&raw, &key, &|_| false).unwrap_err();
         let message = error.to_string();
         assert_eq!(
             message,
@@ -385,7 +423,7 @@ mod tests {
         );
         assert!(!message.contains(&unsupported[2..10]));
         assert_eq!(
-            Node::decrypt(&json!(unsupported), &key)
+            Node::decrypt(&json!(unsupported), &key, &|_| false)
                 .unwrap_err()
                 .to_string(),
             "the encrypted value is malformed or in an unsupported format"
@@ -407,7 +445,7 @@ mod tests {
             "favorite": true,
             "notes": null,
         });
-        let node = Node::decrypt(&raw, &key).unwrap();
+        let node = Node::decrypt(&raw, &key, &|_| false).unwrap();
         assert_eq!(
             node.plain_string_paths(),
             [
