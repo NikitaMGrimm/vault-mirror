@@ -17,7 +17,7 @@ use crate::{
     config::{Config, VaultConfig},
     mirror::{Endpoint, MirrorOptions, Reporter, mirror},
     plan::{Safety, Summary},
-    store::{self, Keys, Store},
+    store::{self, FolderReceipts, Keys, Store},
     text::count,
     vault::{Account, Scope},
 };
@@ -274,7 +274,18 @@ async fn execute(
     };
     let options = mirror_options(config, flags);
     progress.stage = "mirror";
-    match mirror(&source, &dest, &source_read, &dest_read, &options, reporter).await {
+    let folders = FolderReceipts::new(&config.backups_dir);
+    let mirrored = mirror(
+        &source,
+        &dest,
+        &source_read,
+        &dest_read,
+        &options,
+        &folders,
+        reporter,
+    )
+    .await;
+    match mirrored {
         Ok(outcome) => {
             progress.status.mirror = Some(SummaryRecord {
                 changed: outcome.changed,
@@ -327,11 +338,12 @@ pub fn describe(status: &Status) -> String {
     }) = &status.mirror
     {
         parts.push(format!(
-            "{} created, {} updated, {} deleted, {} unchanged",
+            "{} created, {} updated, {} deleted, {} unchanged, {} deleted",
             count(mirror.items_created, "item"),
             mirror.items_updated,
             mirror.items_deleted,
-            mirror.items_unchanged
+            mirror.items_unchanged,
+            count(mirror.folders_deleted, "folder")
         ));
     }
     if let Some(snapshot) = status
@@ -531,7 +543,8 @@ mod tests {
     fn descriptions_are_one_line_summaries() {
         assert_eq!(
             describe(&success()),
-            "vault-mirror succeeded; 2 items created, 0 updated, 0 deleted, 40 unchanged"
+            "vault-mirror succeeded; 2 items created, 0 updated, 0 deleted, 40 unchanged, 0 \
+             folders deleted"
         );
         let failed = Status {
             status: RunResult::Failed,

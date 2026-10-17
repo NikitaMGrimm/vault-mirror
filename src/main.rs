@@ -20,7 +20,7 @@ use vault_mirror::{
     mirror::{self, Endpoint},
     schedule::Timetable,
     snapshot,
-    store::{self, Keys, Snapshot, Store},
+    store::{self, FolderReceipts, Keys, Snapshot, Store},
     text::count,
 };
 
@@ -232,11 +232,12 @@ fn finished(status: &app::Status) -> String {
         Some(app::SummaryRecord {
             summary: mirror, ..
         }) => format!(
-            "{} created, {} updated, {} deleted, {} unchanged in {seconds:.1}s",
+            "{} created, {} updated, {} deleted, {} unchanged, {} deleted in {seconds:.1}s",
             mirror.items_created,
             mirror.items_updated,
             mirror.items_deleted,
-            mirror.items_unchanged
+            mirror.items_unchanged,
+            count(mirror.folders_deleted, "folder")
         ),
         None => format!("backup in {seconds:.1}s"),
     }
@@ -390,6 +391,7 @@ async fn check_config(config: &Config, flags: RunFlags, report_logins: bool) -> 
         &source_vault,
         &dest_vault,
         &options,
+        &FolderReceipts::new(&config.backups_dir),
         &Console,
     )
     .await?;

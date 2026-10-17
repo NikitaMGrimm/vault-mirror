@@ -4,16 +4,17 @@
 //! <backups>/key.age                                      backup key, protected by the passphrase
 //! <backups>/<role>/<id>/vault.json.age                   a snapshot
 //! <backups>/<role>/<id>/attachments/<attachment id>.age  its attachment files
+//! <backups>/folders/<owner>/<folder id>.<stamp>           a folder a run created
 //! ```
 //!
 //! A snapshot's id is the UTC time it was made, such as `20261014T030000Z`,
 //! with a counter for a second snapshot in the same second. A snapshot is
 //! written into a temporary directory and renamed into place, so one that is
-//! there is complete. Everything is encrypted with [age](https://age-encryption.org),
+//! there is complete. Vault content is encrypted with [age](https://age-encryption.org),
 //! so a backup can be read with the stock `age` tool and no part of this program.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs, io,
     io::{Read, Write},
     iter,
@@ -29,13 +30,17 @@ use time::{
     macros::format_description,
 };
 
-use crate::snapshot::{self, is_path_component};
+use crate::{
+    plan::Receipt,
+    snapshot::{self, is_path_component},
+};
 
 const KEY_FILE: &str = "key.age";
 const DOCUMENT_FILE: &str = "vault.json.age";
 const ATTACHMENTS_DIR: &str = "attachments";
 const TEMP_PREFIX: &str = ".tmp-";
 const ROLES: [&str; 2] = ["source", "dest"];
+const FOLDERS_DIR: &str = "folders";
 /// The time in a snapshot's id, in UTC.
 const ID_TIME: &[BorrowedFormatItem<'_>] =
     format_description!("[year][month][day]T[hour][minute][second]Z");
@@ -439,6 +444,103 @@ impl SnapshotWriter<'_> {
     }
 }
 
+/// Records personal folders created by a mirror, grouped by vault pair and
+/// destination. Empty files are named by IDs and ciphertext hashes, never
+/// plaintext names.
+pub struct FolderReceipts {
+    directory: PathBuf,
+}
+
+impl FolderReceipts {
+    /// Creates nothing until a receipt is recorded.
+    pub fn new(backups: &Path) -> Self {
+        Self {
+            directory: backups.join(FOLDERS_DIR),
+        }
+    }
+
+    pub(crate) fn of(&self, owner: &str) -> Receipts {
+        Receipts {
+            directory: self.directory.join(owner),
+        }
+    }
+}
+
+/// The receipts of one owner.
+pub(crate) struct Receipts {
+    directory: PathBuf,
+}
+
+impl Receipts {
+    /// Every receipt. Other names grant nothing and are ignored, but a
+    /// receipt's name on anything other than an empty file is an error.
+    pub(crate) fn list(&self) -> Result<BTreeSet<Receipt>> {
+        let entries = match fs::read_dir(&self.directory) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+            entries => entries.with_context(|| format!("listing {}", self.directory.display()))?,
+        };
+        let mut found = BTreeSet::new();
+        for entry in entries {
+            let entry = entry.with_context(|| format!("listing {}", self.directory.display()))?;
+            let Some(receipt) = entry.file_name().to_str().and_then(parse_receipt) else {
+                continue;
+            };
+            let metadata = fs::symlink_metadata(entry.path())
+                .with_context(|| format!("reading {}", entry.path().display()))?;
+            if !metadata.is_file() || metadata.len() != 0 {
+                bail!("{} is not an empty file", entry.path().display());
+            }
+            found.insert(receipt);
+        }
+        Ok(found)
+    }
+
+    pub(crate) fn record(&self, receipt: &Receipt) -> Result<()> {
+        let path = self.path(receipt)?;
+        create_private_dir(&self.directory)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        match options.open(&path) {
+            Ok(file) => file.sync_all()?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error).with_context(|| format!("writing {}", path.display())),
+        }
+        sync_dir(&self.directory)
+    }
+
+    pub(crate) fn forget(&self, receipt: &Receipt) -> Result<()> {
+        let path = self.path(receipt)?;
+        match fs::remove_file(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            removed => removed.with_context(|| format!("removing {}", path.display()))?,
+        }
+        sync_dir(&self.directory)
+    }
+
+    fn path(&self, receipt: &Receipt) -> Result<PathBuf> {
+        let name = format!("{}.{}", receipt.folder_id, receipt.stamp);
+        if parse_receipt(&name).as_ref() != Some(receipt) {
+            bail!("refusing to use {name:?} as a file name");
+        }
+        Ok(self.directory.join(name))
+    }
+}
+
+fn parse_receipt(name: &str) -> Option<Receipt> {
+    let (folder_id, stamp) = name.split_once('.')?;
+    let valid = is_path_component(folder_id)
+        && stamp.len() == 64
+        && stamp
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    valid.then(|| Receipt {
+        folder_id: folder_id.to_string(),
+        stamp: stamp.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -551,6 +653,66 @@ mod tests {
         assert!(Keys::from_key_file(&backups, "p").is_err());
         assert_eq!(list(&backups, "source").unwrap(), Vec::<String>::new());
         assert!(!backups.exists());
+    }
+
+    #[test]
+    fn folder_receipts_are_private_empty_files_of_one_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let backups = dir.path().join("backups");
+        let receipt = |id: &str, stamp: char| Receipt {
+            folder_id: id.into(),
+            stamp: stamp.to_string().repeat(64),
+        };
+        let folders = FolderReceipts::new(&backups);
+        let (mine, theirs) = (folders.of(&"a".repeat(64)), folders.of(&"b".repeat(64)));
+        assert!(mine.list().unwrap().is_empty());
+        assert!(!backups.exists(), "reading created the directory");
+
+        mine.record(&receipt("folder-1", 'c')).unwrap();
+        mine.record(&receipt("folder-1", 'c')).unwrap();
+        mine.record(&receipt("folder-2", 'd')).unwrap();
+        assert!(mine.record(&receipt("../key", 'c')).is_err());
+        assert!(mine.record(&receipt("folder.1", 'c')).is_err());
+        assert!(
+            mine.record(&Receipt {
+                folder_id: "folder-3".into(),
+                stamp: "e".repeat(63),
+            })
+            .is_err()
+        );
+        let both = BTreeSet::from([receipt("folder-1", 'c'), receipt("folder-2", 'd')]);
+        assert_eq!(mine.list().unwrap(), both);
+        assert!(theirs.list().unwrap().is_empty());
+        for path in files_under(&backups) {
+            assert_eq!(fs::metadata(&path).unwrap().len(), 0, "{}", path.display());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&path).unwrap().permissions().mode();
+                assert_eq!(mode & 0o077, 0, "{}", path.display());
+            }
+        }
+
+        // Names that are no receipt grant nothing.
+        for foreign in ["notes.txt", ".tmp-x", "folder-4", "folder-4.ABC", "a.b.c"] {
+            fs::write(mine.directory.join(foreign), b"").unwrap();
+        }
+        assert_eq!(mine.list().unwrap(), both);
+
+        mine.forget(&receipt("folder-1", 'c')).unwrap();
+        mine.forget(&receipt("folder-1", 'c')).unwrap();
+        assert_eq!(
+            mine.list().unwrap(),
+            BTreeSet::from([receipt("folder-2", 'd')])
+        );
+
+        // A receipt's name on anything but an empty file is not evidence.
+        let damaged = mine.path(&receipt("folder-5", 'f')).unwrap();
+        fs::write(&damaged, b"x").unwrap();
+        assert!(mine.list().is_err());
+        fs::remove_file(&damaged).unwrap();
+        fs::create_dir(&damaged).unwrap();
+        assert!(mine.list().is_err());
     }
 
     #[test]

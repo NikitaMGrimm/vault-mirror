@@ -16,6 +16,7 @@ vault-mirror makes one vault, the **destination**, match another, the
    update items, copy attachments out of the source snapshot, then move
    removed copies to the trash.
 5. **Verify.** It reads the destination back and compares it with the source.
+   Then it deletes the [folders it no longer needs](#folders).
 6. **Report.** It writes the result to `last-run.json` and to your notification
    URL, if you set one.
 
@@ -33,7 +34,7 @@ a copy here.
 
 Items without a marker aren't copies. vault-mirror never changes or deletes
 them, so you can keep your own items in the destination. It never deletes
-folders or collections either; delete an empty one yourself.
+collections, or folders it didn't make; delete an empty one yourself.
 
 - If you change a copy's content, attachments, archive state, folder in a
   personal vault or collections in an organization, the next run stops before
@@ -47,6 +48,19 @@ folders or collections either; delete an empty one yourself.
 - A clone keeps the copy's marker. Remove its `vault-mirror` field to keep
   it independent. Runs delete duplicates only when both copies are complete,
   unchanged, and record the same source version.
+
+### Folders
+
+A run deletes a personal destination folder only if it created it for this pair.
+No selected source folder may have that name, and no item may refer to it,
+including items in the trash.
+It keeps folders that were there before, folders you renamed, and folders that
+hold anything. While the destination account is in an organization, or its
+server doesn't show every item type, obsolete folders stay with a warning. `check`
+shows how many folders a run would delete.
+
+Runs record the folders they create in `folders/` in the backup directory.
+Without that record, they delete no folder.
 
 ### After an outage
 

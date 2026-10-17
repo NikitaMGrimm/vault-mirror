@@ -6,6 +6,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use reqwest::Method;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::{
     api::{self, ApiCredentials, ServerUrls, Session},
@@ -117,6 +118,9 @@ impl Scope {
 pub struct Folder {
     pub id: String,
     pub name: String,
+    /// SHA-256 of the encrypted server name. Reencrypting a name changes
+    /// this value even when its plaintext stays the same.
+    pub(crate) stamp: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -327,11 +331,37 @@ impl Account {
         Ok(Folder {
             id: required_str(&created, "id", "created folder")?,
             name: name.to_string(),
+            stamp: optional_str(&created, "name")
+                .as_deref()
+                .map(encrypted_name_hash),
         })
     }
 
-    pub async fn delete_folder(&self, id: &str) -> Result<()> {
-        self.delete(&format!("/folders/{id}")).await
+    /// Deletes a folder. Returns false if it was already gone. Not retried
+    /// once the request may have arrived: a folder has no revision, so a
+    /// repeat could delete one that was meanwhile changed.
+    pub async fn delete_folder(&self, id: &str) -> Result<bool> {
+        match (self.session)
+            .send_once(Method::DELETE, &format!("/folders/{id}"), None)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error) if error.status() == Some(reqwest::StatusCode::NOT_FOUND) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Reads the personal vault for folder cleanup. Requires an explicitly empty
+    /// organization list, no known hidden item types, unique folder IDs, and
+    /// well-formed folder references.
+    pub(crate) async fn load_folder_contents(&self) -> Result<Vault> {
+        let (profile, config, sync) = tokio::try_join!(
+            self.session.get("/accounts/profile"),
+            self.session.get("/config"),
+            self.session.get("/sync?excludeDomains=true"),
+        )?;
+        check_folder_contents(&profile, &server_traits(&config), &sync)?;
+        read_vault(&sync, &Scope::Personal, &self.keys.user)
     }
 
     pub async fn create_collection(
@@ -725,6 +755,37 @@ fn sync_list(sync: &Value, name: &str) -> Result<Vec<Value>> {
         .ok_or_else(|| anyhow!("the server's sync response has no {name} list"))
 }
 
+/// Rejects known visibility gaps and malformed folder references before
+/// parsing. A personal Vault does not preserve malformed references or
+/// establish organization visibility.
+fn check_folder_contents(profile: &Value, traits: &ServerTraits, sync: &Value) -> Result<()> {
+    match profile.get("organizations") {
+        Some(Value::Array(list)) if list.is_empty() => {}
+        Some(Value::Array(_)) => {
+            bail!("the account is in an organization, whose items can be in its folders unseen")
+        }
+        _ => bail!("the account profile does not list the account's organizations"),
+    }
+    if !traits.hidden_item_types.is_empty() {
+        bail!("the server does not show every item type, so folders may hold items unseen");
+    }
+    let mut ids = HashSet::new();
+    for folder in sync_list(sync, "folders")? {
+        let id = required_str(&folder, "id", "folder")?;
+        if !ids.insert(id.clone()) {
+            bail!("the server lists folder {id} more than once");
+        }
+    }
+    for cipher in sync_list(sync, "ciphers")? {
+        match cipher.get("folderId") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(id)) if !id.is_empty() => {}
+            Some(_) => bail!("an item has a malformed folderId"),
+        }
+    }
+    Ok(())
+}
+
 /// Fails when the organization holds collections or items this account
 /// cannot see. Bitwarden's server shows an owner only the collections the
 /// owner is assigned to, and no item that is in no collection. Hidden items
@@ -806,6 +867,10 @@ fn required_str(value: &Value, name: &str, what: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{what} has no {name}"))
 }
 
+fn encrypted_name_hash(encrypted: &str) -> String {
+    hex::encode(Sha256::digest(encrypted.as_bytes()))
+}
+
 fn optional_str(value: &Value, name: &str) -> Option<String> {
     value
         .get(name)
@@ -820,11 +885,11 @@ fn read_vault(sync: &Value, scope: &Scope, scope_key: &SymKey) -> Result<Vault> 
     match scope {
         Scope::Personal => {
             for folder in list("folders")? {
+                let name = required_str(&folder, "name", "folder")?;
                 vault.folders.push(Folder {
                     id: required_str(&folder, "id", "folder")?,
-                    name: scope_key
-                        .decrypt_str(&required_str(&folder, "name", "folder")?)
-                        .context("decrypting a folder name")?,
+                    name: (scope_key.decrypt_str(&name)).context("decrypting a folder name")?,
+                    stamp: Some(encrypted_name_hash(&name)),
                 });
             }
         }
@@ -1123,6 +1188,70 @@ mod tests {
                 assert!(message.contains("malformed"), "{message}");
             }
         }
+    }
+
+    #[test]
+    fn folders_count_as_empty_only_where_the_read_shows_every_item() {
+        let shown = server_traits(&json!({"server": {"name": "Vaultwarden"}}));
+        let hidden = server_traits(&json!({"server": null, "featureStates": {}}));
+        let profile = |organizations: Option<Value>| match organizations {
+            Some(list) => json!({"id": "user", "organizations": list}),
+            None => json!({"id": "user"}),
+        };
+        let sync = |folders: Value, folder_id: Value| json!({"folders": folders, "ciphers": [{"id": "item-1", "folderId": folder_id}]});
+        let folders = json!([{"id": "f1", "name": "2.x"}, {"id": "f2", "name": "2.y"}]);
+        let complete = sync(folders.clone(), json!("f1"));
+        let empty = profile(Some(json!([])));
+        assert!(check_folder_contents(&empty, &shown, &complete).is_ok());
+        assert!(check_folder_contents(&empty, &shown, &sync(folders.clone(), Value::Null)).is_ok());
+
+        let refused = [
+            (
+                profile(Some(json!([{"id": "org"}]))),
+                &shown,
+                complete.clone(),
+            ),
+            (profile(Some(Value::Null)), &shown, complete.clone()),
+            (profile(Some(json!({}))), &shown, complete.clone()),
+            (profile(None), &shown, complete.clone()),
+            (empty.clone(), &hidden, complete.clone()),
+            (empty.clone(), &shown, sync(folders.clone(), json!(7))),
+            (empty.clone(), &shown, sync(folders.clone(), json!(""))),
+            (empty.clone(), &shown, sync(folders.clone(), json!(["f1"]))),
+            (
+                empty.clone(),
+                &shown,
+                sync(json!([{"id": "f1"}, {"id": "f1"}]), Value::Null),
+            ),
+            (
+                empty.clone(),
+                &shown,
+                json!({"folders": folders, "ciphers": null}),
+            ),
+        ];
+        for (profile, traits, sync) in refused {
+            assert!(
+                check_folder_contents(&profile, traits, &sync).is_err(),
+                "{profile} {sync}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_read_is_stamped_with_its_encrypted_name() {
+        let key = SymKey::generate();
+        let (first, second) = (
+            key.encrypt_str("Work").unwrap(),
+            key.encrypt_str("Work").unwrap(),
+        );
+        let sync = json!({
+            "folders": [{"id": "f1", "name": first}, {"id": "f2", "name": second}],
+            "ciphers": [],
+        });
+        let vault = read_vault(&sync, &Scope::Personal, &key).unwrap();
+        assert_eq!(vault.folders[0].stamp, Some(encrypted_name_hash(&first)));
+        assert_ne!(vault.folders[0].stamp, vault.folders[1].stamp);
+        assert_eq!(vault.folders[0].name, vault.folders[1].name);
     }
 
     #[test]

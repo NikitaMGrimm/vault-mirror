@@ -230,6 +230,7 @@ pub fn parse(document: &Value) -> Result<Restorable> {
                 .map(|f| Folder {
                     id: f.id,
                     name: f.name,
+                    stamp: None,
                 })
                 .collect();
             (folders, Vec::new())
@@ -430,6 +431,7 @@ mod tests {
             folders: vec![Folder {
                 id: "folder-1".into(),
                 name: "Work".into(),
+                stamp: None,
             }],
             items: vec![item("item-1", "GitHub"), trashed],
             ..Vault::default()

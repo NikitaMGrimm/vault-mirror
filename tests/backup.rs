@@ -83,7 +83,16 @@ async fn a_backup_holds_the_whole_vault() -> Result<()> {
 
     let (backed_up, snapshot) = latest(&store)?;
     let original = source.load(&PERSONAL).await?;
-    assert_eq!(backed_up.folders(), original.folders);
+    // A backup holds what a folder can be restored from; a read also
+    // identifies the encrypted name, which a backup has no use for.
+    let folders = |list: &[vault_mirror::vault::Folder]| {
+        let mut pairs: Vec<(String, String)> = (list.iter())
+            .map(|f| (f.id.clone(), f.name.clone()))
+            .collect();
+        pairs.sort();
+        pairs
+    };
+    assert_eq!(folders(backed_up.folders()), folders(&original.folders));
     assert_eq!(backed_up.items().len(), original.items.len());
     for item in &original.items {
         let copy = (backed_up.items().iter())

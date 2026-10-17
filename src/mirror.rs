@@ -10,8 +10,11 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    plan::{self, DeleteReason, Mode, Plan, Safety, Summary, comparable, differing_paths},
-    store::Snapshot,
+    plan::{
+        self, DeleteReason, FolderCleanup, Mode, Plan, Receipt, Safety, Summary, comparable,
+        differing_paths,
+    },
+    store::{FolderReceipts, Receipts, Snapshot},
     text::{count, listed},
     vault::{Account, Item, Scope, ServerTraits, Vault, WRITES_AT_ONCE},
 };
@@ -175,9 +178,10 @@ pub async fn mirror(
     source_read: &Protected<'_>,
     dest_read: &Protected<'_>,
     options: &MirrorOptions,
+    folders: &FolderReceipts,
     reporter: &dyn Reporter,
 ) -> Result<Outcome, MirrorError> {
-    let mut run = Run::new(source, dest, options, reporter);
+    let mut run = Run::new(source, dest, options, folders, reporter);
     let result = run
         .execute(
             &source_read.vault,
@@ -196,14 +200,16 @@ pub async fn check(
     source_vault: &Vault,
     dest_vault: &Vault,
     options: &MirrorOptions,
+    folders: &FolderReceipts,
     reporter: &dyn Reporter,
 ) -> Result<Outcome, MirrorError> {
-    let mut run = Run::new(source, dest, options, reporter);
+    let mut run = Run::new(source, dest, options, folders, reporter);
     let result = run.execute(source_vault, dest_vault, None).await;
     run.finish(result)
 }
 
-/// Identifies one side for markers: its server, account and scope.
+/// Identifies one side for markers and folder receipts: its server, account
+/// and scope.
 fn vault_key(endpoint: &Endpoint<'_>) -> String {
     // Host names are case-insensitive, and a URL parses to one spelling.
     let url = reqwest::Url::parse(endpoint.account.api_url())
@@ -449,6 +455,7 @@ struct Run<'a> {
     source: &'a Endpoint<'a>,
     dest: &'a Endpoint<'a>,
     options: &'a MirrorOptions,
+    folders: &'a FolderReceipts,
     reporter: &'a dyn Reporter,
     stage: &'static str,
     summary: Option<Summary>,
@@ -460,12 +467,14 @@ impl<'a> Run<'a> {
         source: &'a Endpoint<'a>,
         dest: &'a Endpoint<'a>,
         options: &'a MirrorOptions,
+        folders: &'a FolderReceipts,
         reporter: &'a dyn Reporter,
     ) -> Self {
         Self {
             source,
             dest,
             options,
+            folders,
             reporter,
             stage: "planning",
             summary: None,
@@ -565,10 +574,25 @@ impl<'a> Run<'a> {
             self.dest.account.premium,
             mode,
         )?;
-        let summary = plan.summary(&source_vault);
-        self.summary = Some(summary);
+        // Only an individual vault's folders are mirrored, and its own.
+        let receipts = (mode == Mode::Personal)
+            .then(|| self.folders.of(&plan::owner(&pair, &vault_key(self.dest))));
+        let mut cleanup = match &receipts {
+            Some(receipts) => {
+                self.plan_cleanup(receipts, &plan, &source_vault, dest_vault)
+                    .await
+            }
+            None => FolderCleanup::default(),
+        };
+        let mut summary = plan.summary(&source_vault);
+        summary.folders_deleted = cleanup.obsolete.len();
         let (verb, plan_text) = describe_plan(&summary, source_files.is_none());
         self.reporter.status(verb, &plan_text);
+        // A run reports the folders it deleted, not the ones it planned to.
+        if source_files.is_some() {
+            summary.folders_deleted = 0;
+        }
+        self.summary = Some(summary);
         if plan.reversed > 0 && plan.untracked > 0 {
             self.warn(format!(
                 "The destination has {} that no source item was copied from. Runs leave them as \
@@ -603,17 +627,143 @@ impl<'a> Run<'a> {
         let Some(source_files) = source_files else {
             return Ok(false);
         };
-        if !plan.has_changes() {
-            return Ok(false);
+        if let Some(receipts) = &receipts
+            && let Err(error) = cleanup.stale.iter().try_for_each(|r| receipts.forget(r))
+        {
+            self.unrecorded(&error);
+            cleanup.obsolete.clear();
         }
-
-        self.apply(&plan, &source_vault, dest_vault, source_files, mode)
+        let wrote = if plan.has_changes() {
+            self.apply(
+                &plan,
+                &source_vault,
+                dest_vault,
+                source_files,
+                receipts.as_ref(),
+                mode,
+            )
             .await?;
+            self.stage = "verifying the destination";
+            self.verify(&source_vault, &pair, mode).await?;
+            self.reporter.status("Verified", "the destination");
+            true
+        } else if cleanup.obsolete.is_empty() {
+            return Ok(false);
+        } else {
+            // Only folders are left to delete, which can wait for the next
+            // run, so a failed read fails nothing.
+            if let Err(error) = self.verify(&source_vault, &pair, mode).await {
+                self.keep_folders(&cleanup.obsolete, &format!("{error:#}"));
+                return Ok(false);
+            }
+            false
+        };
+        let deleted = match &receipts {
+            Some(receipts) if !cleanup.obsolete.is_empty() => {
+                self.delete_folders(&cleanup.obsolete, &source_vault, receipts)
+                    .await
+            }
+            _ => 0,
+        };
+        Ok(wrote || deleted > 0)
+    }
 
-        self.stage = "verifying the destination";
-        self.verify(&source_vault, &pair, mode).await?;
-        self.reporter.status("Verified", "the destination");
-        Ok(true)
+    /// The folders runs made that this run would delete, from the read it
+    /// plans with. Any doubt keeps them, with a warning.
+    async fn plan_cleanup(
+        &mut self,
+        receipts: &Receipts,
+        plan: &Plan,
+        source_vault: &Vault,
+        dest_vault: &Vault,
+    ) -> FolderCleanup {
+        let made = match receipts.list() {
+            Ok(made) => made,
+            Err(error) => {
+                self.warn(format!(
+                    "Could not read which folders vault-mirror made, so runs keep them: {error:#}"
+                ));
+                return FolderCleanup::default();
+            }
+        };
+        let mut cleanup = plan::folder_cleanup(&made, source_vault, dest_vault, Some(plan));
+        if !cleanup.obsolete.is_empty()
+            && let Err(error) = self.dest.account.load_folder_contents().await
+        {
+            self.keep_folders(&cleanup.obsolete, &format!("{error:#}"));
+            cleanup.obsolete.clear();
+        }
+        cleanup
+    }
+
+    fn unrecorded(&mut self, error: &anyhow::Error) {
+        self.warn(format!(
+            "Could not update the record of the folders vault-mirror made, so this run deletes \
+             no more of them: {error:#}"
+        ));
+    }
+
+    fn keep_folders(&mut self, obsolete: &[Receipt], reason: &str) {
+        if obsolete.is_empty() {
+            return;
+        }
+        self.warn(format!(
+            "Kept {} vault-mirror made that nothing is mirrored into: {reason}",
+            count(obsolete.len(), "folder")
+        ));
+    }
+
+    /// Deletes the `obsolete` folders that are still as they were planned,
+    /// one by one, each after reading the destination again. Never fails:
+    /// a folder kept is the safe outcome. Returns how many it deleted.
+    async fn delete_folders(
+        &mut self,
+        obsolete: &[Receipt],
+        source_vault: &Vault,
+        receipts: &Receipts,
+    ) -> usize {
+        let account = self.dest.account;
+        let mut deleted = 0;
+        for (index, receipt) in obsolete.iter().enumerate() {
+            let left = &obsolete[index..];
+            let now = match account.load_folder_contents().await {
+                Ok(now) => now,
+                Err(error) => {
+                    self.keep_folders(left, &format!("{error:#}"));
+                    break;
+                }
+            };
+            let made = BTreeSet::from([receipt.clone()]);
+            let cleanup = plan::folder_cleanup(&made, source_vault, &now, None);
+            if cleanup.stale.is_empty() {
+                if cleanup.obsolete.is_empty() {
+                    // Something was put in it, or its name selected, meanwhile.
+                    continue;
+                }
+                match account.delete_folder(&receipt.folder_id).await {
+                    Ok(gone) => {
+                        deleted += usize::from(gone);
+                    }
+                    Err(error) => {
+                        // The request may have arrived, so the receipt stays
+                        // until a run sees the folder gone.
+                        self.keep_folders(left, &format!("{error:#}"));
+                        break;
+                    }
+                }
+            }
+            if let Err(error) = receipts.forget(receipt) {
+                self.unrecorded(&error);
+                break;
+            }
+        }
+        if deleted > 0 {
+            self.reporter.status("Deleted", &count(deleted, "folder"));
+        }
+        if let Some(summary) = &mut self.summary {
+            summary.folders_deleted = deleted;
+        }
+        deleted
     }
 
     async fn apply(
@@ -622,15 +772,40 @@ impl<'a> Run<'a> {
         source_vault: &Vault,
         dest_vault: &Vault,
         source_files: &Snapshot<'_>,
+        receipts: Option<&Receipts>,
         mode: Mode,
     ) -> Result<()> {
         let dest = self.dest;
 
         self.stage = "creating folders and collections";
         let mut folder_ids = plan.folder_ids.clone();
+        let mut unrecorded = Vec::new();
         for name in &plan.folders_to_create {
             let folder = dest.account.create_folder(name).await?;
+            // Recorded before anything else is written, so that a run that
+            // stops later still knows the folder is its own.
+            if let Some(receipts) = receipts {
+                let recorded = (folder.stamp.clone())
+                    .context("the server did not return its name")
+                    .and_then(|stamp| {
+                        receipts.record(&Receipt {
+                            folder_id: folder.id.clone(),
+                            stamp,
+                        })
+                    });
+                if let Err(error) = recorded {
+                    unrecorded.push(format!("folder {}: {error:#}", folder.id));
+                }
+            }
             folder_ids.insert(folder.name, folder.id);
+        }
+        if !unrecorded.is_empty() {
+            self.warn(format!(
+                "Could not record {} vault-mirror made, so runs will keep {}: {}",
+                count(unrecorded.len(), "folder"),
+                if unrecorded.len() == 1 { "it" } else { "them" },
+                unrecorded.join("; ")
+            ));
         }
         let mut collection_ids = plan.collection_ids.clone();
         if let Scope::Organization(org) = &dest.scope {
@@ -961,6 +1136,7 @@ fn describe_plan(summary: &Summary, check: bool) -> (&'static str, String) {
         (summary.items_updated, "update", "item"),
         (summary.items_deleted, "delete", "item"),
         (summary.folders_created, "create", "folder"),
+        (summary.folders_deleted, "delete", "folder"),
         (summary.collections_created, "create", "collection"),
         (summary.attachments_copied, "copy", "attachment"),
     ]
@@ -1083,10 +1259,12 @@ mod tests {
             items_created: 9,
             items_unchanged: 1,
             folders_created: 1,
+            folders_deleted: 2,
             attachments_copied: 4,
             ..Summary::default()
         };
-        let changes = "create 9 items, create 1 folder, copy 4 attachments; 1 item unchanged";
+        let changes = "create 9 items, create 1 folder, delete 2 folders, copy 4 attachments; 1 \
+                       item unchanged";
         assert_eq!(
             describe_plan(&summary, false),
             ("Planned", format!("to {changes}"))
@@ -1117,6 +1295,7 @@ mod tests {
                 .map(|name| Folder {
                     id: name.to_string(),
                     name: name.to_string(),
+                    stamp: None,
                 })
                 .collect(),
             items: vec![

@@ -111,8 +111,9 @@ here in the same pull request.
 ### Safety checks
 
 - Change and delete only copies whose marker names this pair of vaults. An
-  item without one belongs to the user. Never delete folders or collections,
-  and never write to the source.
+  item without one belongs to the user. Never delete collections or folders
+  this pair didn't create. Before deleting a folder, verify that it holds no
+  items. Never write to the source.
 - Refuse only a state that is almost never intended: swapped vaults, one
   vault twice, copies changed in the destination, or a run that deletes more
   than half of the copies.

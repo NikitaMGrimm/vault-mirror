@@ -107,6 +107,90 @@ pub fn pair(one: &str, other: &str) -> String {
     hash(&json!(vaults))
 }
 
+/// Names the vaults of a mirror and which of them is the destination, for
+/// the folders runs create there. Unlike [`pair`], the order matters: after
+/// the vaults switch roles, the other one's folders are not this one's.
+pub(crate) fn owner(pair: &str, dest: &str) -> String {
+    hash(&json!([pair, dest]))
+}
+
+/// A personal folder a run created, with the stamp its name had then.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Receipt {
+    pub folder_id: String,
+    pub stamp: String,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct FolderCleanup {
+    /// Folders nothing needs any more, in folder id order.
+    pub obsolete: Vec<Receipt>,
+    /// Receipts for absent folders or folders whose encrypted-name stamps changed.
+    pub stale: Vec<Receipt>,
+}
+
+/// Decides which folders runs created can go, from `made`. A folder can go
+/// when its encrypted-name stamp still matches its receipt, no selected source folder
+/// has that name, and no destination item is in it, not even in the trash or
+/// in an organization. Given the `plan` for `source` and `dest`, a copy the
+/// plan rewrites counts as in the folder the plan moves it to.
+pub(crate) fn folder_cleanup(
+    made: &BTreeSet<Receipt>,
+    source: &Vault,
+    dest: &Vault,
+    plan: Option<&Plan>,
+) -> FolderCleanup {
+    let wanted: BTreeSet<&str> = source.folders.iter().map(|f| f.name.as_str()).collect();
+    // The folder each copy the plan rewrites ends up in. A folder the plan
+    // creates has no id yet, and is none that runs made before.
+    let moves: HashMap<usize, Option<&str>> = (plan.into_iter())
+        .flat_map(|plan| {
+            (plan.updates.iter())
+                .filter(|update| update.write_content || update.sync_attachments)
+                .map(|update| {
+                    let name = plan.entries[update.entry].folder.as_ref();
+                    let id = name.and_then(|name| plan.folder_ids.get(name));
+                    (update.dest, id.map(String::as_str))
+                })
+        })
+        .collect();
+    let mut cleanup = FolderCleanup::default();
+    for receipt in made {
+        let mut found = dest.folders.iter().filter(|f| f.id == receipt.folder_id);
+        let folder = match (found.next(), found.next()) {
+            (None, _) => {
+                cleanup.stale.push(receipt.clone());
+                continue;
+            }
+            (Some(folder), None) => folder,
+            // Ambiguous: neither gone nor known to be empty.
+            (Some(_), Some(_)) => continue,
+        };
+        match &folder.stamp {
+            Some(stamp) if *stamp == receipt.stamp => {}
+            Some(_) => {
+                cleanup.stale.push(receipt.clone());
+                continue;
+            }
+            None => continue,
+        }
+        let used = (dest.items.iter().enumerate()).any(|(index, item)| {
+            let at = moves
+                .get(&index)
+                .copied()
+                .unwrap_or(item.folder_id.as_deref());
+            at == Some(folder.id.as_str())
+        });
+        if !wanted.contains(folder.name.as_str())
+            && !used
+            && !dest.folders_used_elsewhere.contains(&folder.id)
+        {
+            cleanup.obsolete.push(receipt.clone());
+        }
+    }
+    cleanup
+}
+
 fn field_marker(field: &Node) -> Option<Marker> {
     let map = field.as_map()?;
     if map.get("name")?.as_str()? != MARKER_FIELD {
@@ -229,6 +313,9 @@ pub struct Summary {
     pub items_deleted: usize,
     pub items_unchanged: usize,
     pub folders_created: usize,
+    /// Folders a run made that nothing needs any more. A check reports how
+    /// many a run would delete, a run how many it deleted.
+    pub folders_deleted: usize,
     pub collections_created: usize,
     pub attachments_copied: usize,
 }
@@ -250,6 +337,7 @@ impl Plan {
             items_deleted: self.deletes.len(),
             items_unchanged: self.unchanged,
             folders_created: self.folders_to_create.len(),
+            folders_deleted: 0,
             collections_created: self.collections_to_create.len(),
             attachments_copied: (self.creates.iter().copied())
                 .chain(

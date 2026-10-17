@@ -94,7 +94,7 @@ A first run prints this, with a timestamp and a level before each line:
      Created 152 items
       Copied 3 attachments
     Verified the destination
-    Finished 152 created, 0 updated, 0 deleted, 0 unchanged in 41.3s
+    Finished 152 created, 0 updated, 0 deleted, 0 unchanged, 0 folders deleted in 41.3s
 ```
 
 Your items are now in the destination. Each copy has a hidden field called

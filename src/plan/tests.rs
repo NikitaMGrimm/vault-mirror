@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::json;
 
@@ -63,6 +63,7 @@ fn folder(id: &str, name: &str) -> Folder {
     Folder {
         id: id.to_string(),
         name: name.to_string(),
+        stamp: None,
     }
 }
 
@@ -436,7 +437,7 @@ fn items_in_the_source_trash_are_not_mirrored() {
 }
 
 #[test]
-fn folders_and_collections_are_never_deleted() {
+fn unowned_folders_and_collections_are_left_alone() {
     let mut source = vault(vec![login("s1", "One", "pw1")]);
     source.folders = vec![folder("f1", "Old")];
     source.items[0].folder_id = Some("f1".into());
@@ -1289,4 +1290,134 @@ fn differences_are_reported_as_paths_without_values() {
     );
     assert!(differing_paths(&left, &left).is_empty());
     assert_eq!(differing_paths(&json!([1]), &json!([1, 2])), ["<root>"]);
+}
+
+const STAMP: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+
+fn made(ids: &[&str]) -> BTreeSet<Receipt> {
+    (ids.iter())
+        .map(|id| Receipt {
+            folder_id: id.to_string(),
+            stamp: STAMP.into(),
+        })
+        .collect()
+}
+
+fn stamped(id: &str, name: &str) -> Folder {
+    Folder {
+        stamp: Some(STAMP.into()),
+        ..folder(id, name)
+    }
+}
+
+fn filed(id: &str, folder: &str) -> Item {
+    Item {
+        folder_id: Some(folder.into()),
+        ..login(id, id, "pw")
+    }
+}
+
+fn ids(receipts: &[Receipt]) -> Vec<&str> {
+    receipts.iter().map(|r| r.folder_id.as_str()).collect()
+}
+
+#[test]
+fn folder_receipts_name_the_destination_as_well_as_the_pair() {
+    assert_ne!(owner(PAIR, "a"), owner(PAIR, "b"));
+    assert_ne!(owner(PAIR, "a"), owner(OTHER_PAIR, "a"));
+}
+
+#[test]
+fn only_empty_unselected_folders_a_run_made_can_go() {
+    let source = Vault {
+        folders: vec![folder("s1", "Work"), folder("s2", "Empty")],
+        ..Vault::default()
+    };
+    let mut trashed = filed("trashed", "in-trash");
+    trashed.in_trash = true;
+    let mut archived = filed("archived", "in-archive");
+    archived.archived = true;
+    let dest = Vault {
+        folders: vec![
+            stamped("old-b", "Old"),
+            stamped("old-a", "Old"),
+            stamped("theirs", "Old"),
+            stamped("selected", "Work"),
+            stamped("empty", "Empty"),
+            stamped("used", "Used"),
+            stamped("in-trash", "Trash"),
+            stamped("in-archive", "Archive"),
+            stamped("elsewhere", "Organization"),
+            Folder {
+                stamp: Some("4".repeat(64)),
+                ..folder("renamed", "Renamed")
+            },
+            folder("unknown", "From a snapshot"),
+            stamped("twice", "Twice"),
+            stamped("twice", "Twice"),
+        ],
+        items: vec![filed("own", "used"), trashed, archived],
+        folders_used_elsewhere: BTreeSet::from(["elsewhere".to_string()]),
+        ..Vault::default()
+    };
+    let receipts = made(&[
+        "old-b",
+        "old-a",
+        "selected",
+        "empty",
+        "used",
+        "in-trash",
+        "in-archive",
+        "elsewhere",
+        "renamed",
+        "unknown",
+        "twice",
+        "gone",
+    ]);
+    let cleanup = folder_cleanup(&receipts, &source, &dest, None);
+    // A same-name folder vault-mirror didn't make stays, and the order is
+    // the receipts', whatever the server's.
+    assert_eq!(ids(&cleanup.obsolete), ["old-a", "old-b"]);
+    assert_eq!(ids(&cleanup.stale), ["gone", "renamed"]);
+}
+
+#[test]
+fn copies_the_plan_moves_leave_a_folder_and_copies_it_trashes_do_not() {
+    let original = Vault {
+        folders: vec![folder("s1", "Old")],
+        items: vec![filed("a", "s1"), filed("b", "s1")],
+        ..Vault::default()
+    };
+    let mut dest = apply(&original, &Vault::default(), Mode::Personal);
+    for folder in &mut dest.folders {
+        folder.stamp = Some(STAMP.into());
+    }
+    let receipts = made(&[dest.folders[0].id.as_str()]);
+    let renamed = |items: Vec<Item>| Vault {
+        folders: vec![folder("s1", "New")],
+        items,
+        ..Vault::default()
+    };
+
+    let moved = renamed(original.items.clone());
+    let planned = plan(&moved, &dest, Mode::Personal);
+    assert_eq!(planned.updates.len(), 2);
+    assert_eq!(planned.folders_to_create, ["New"]);
+    let cleanup = folder_cleanup(&receipts, &moved, &dest, Some(&planned));
+    assert_eq!(cleanup.obsolete.len(), 1);
+    // Until the copies are moved, a read shows them in the folder.
+    assert!(
+        folder_cleanup(&receipts, &moved, &dest, None)
+            .obsolete
+            .is_empty()
+    );
+
+    let one_deleted = renamed(vec![original.items[0].clone()]);
+    let planned = plan(&one_deleted, &dest, Mode::Personal);
+    assert_eq!(planned.deletes.len(), 1);
+    let cleanup = folder_cleanup(&receipts, &one_deleted, &dest, Some(&planned));
+    assert!(
+        cleanup.obsolete.is_empty(),
+        "the trashed copy is still in it"
+    );
 }

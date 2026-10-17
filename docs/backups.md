@@ -14,6 +14,7 @@ backups/
 ├── last-run.json              # the last run's outcome
 ├── state.json                 # login device ids
 ├── run.lock                   # held while a command uses the directory
+├── folders/                   # ids of the folders runs created
 ├── source/
 │   └── 20261014T030000Z/      # one snapshot
 │       ├── vault.json.age
@@ -62,8 +63,8 @@ docker compose run --rm vault-mirror export --output /data/recovered
 
 Import `export.json` with any Bitwarden client, then attach the files from
 `attachments/<attachment id>/` to their items. Delete the output when done.
-Imported items are not copies, so to rebuild a lost destination, mirror into an
-empty one instead.
+The export leaves out the hidden `vault-mirror` fields, so imported items are
+not copies. To rebuild a lost destination, mirror into an empty one instead.
 
 | Option | Effect |
 | --- | --- |

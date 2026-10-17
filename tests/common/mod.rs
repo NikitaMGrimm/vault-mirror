@@ -16,7 +16,7 @@ use vault_mirror::{
     mirror::{self, Endpoint, MirrorOptions, Outcome, Protected, Reporter},
     node::Node,
     plan::is_mirror_marker,
-    store::{Keys, Store},
+    store::{FolderReceipts, Keys, Store},
     vault::{Account, Draft, Item, Scope, Vault},
 };
 
@@ -210,6 +210,12 @@ static BACKUPS: LazyLock<(tempfile::TempDir, Keys)> = LazyLock::new(|| {
     (dir, keys)
 });
 
+/// The record of the folders runs created, shared by a test binary's runs.
+/// Each pair of test accounts has its own part of it.
+pub fn folders() -> FolderReceipts {
+    FolderReceipts::new(BACKUPS.0.path())
+}
+
 /// Reads `account`'s vault and backs it up, as a run does before it mirrors.
 pub async fn protect(account: &Account, scope: &Scope) -> Result<Protected<'static>> {
     let (dir, keys) = &*BACKUPS;
@@ -249,8 +255,20 @@ pub async fn run_protected(
     source_scope: Scope,
     dest: &Account,
     dest_scope: Scope,
+    reads: (&Protected<'_>, &Protected<'_>),
+    options: &MirrorOptions,
+) -> Result<Outcome> {
+    let endpoints = ((source, source_scope), (dest, dest_scope));
+    run_recorded(endpoints, reads, options, &folders()).await
+}
+
+/// Mirrors from reads backed up before, with `folders` as the record of the
+/// folders runs created.
+pub async fn run_recorded(
+    ((source, source_scope), (dest, dest_scope)): ((&Account, Scope), (&Account, Scope)),
     (source_read, dest_read): (&Protected<'_>, &Protected<'_>),
     options: &MirrorOptions,
+    folders: &FolderReceipts,
 ) -> Result<Outcome> {
     let source = Endpoint {
         account: source,
@@ -266,6 +284,7 @@ pub async fn run_protected(
         source_read,
         dest_read,
         options,
+        folders,
         &Capture::default(),
     )
     .await?)
@@ -291,6 +310,7 @@ pub async fn check(source: &Account, dest: &Account, options: &MirrorOptions) ->
         &source_vault,
         &dest_vault,
         options,
+        &folders(),
         &Capture::default(),
     )
     .await?)
