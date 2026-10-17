@@ -8,7 +8,7 @@
 | --- | --- |
 | `vault-mirror init [--dir DIR]` | Asks for the accounts, checks the logins, writes `vault-mirror.env` and `compose.yaml`, and shows what the first run would do. |
 | `vault-mirror run` | Does one run. `--allow-overwrite`, `--allow-mass-delete` and `--reverse` get past a [safety check](how-it-works.md#safety-checks) for this run. |
-| `vault-mirror daemon` | Runs once when it starts, then on `SCHEDULE`. On `SIGTERM` or Ctrl-C it lets a run in progress finish, then stops. |
+| `vault-mirror daemon` | Runs once when it starts, then on `SCHEDULE`. On Ctrl-C, or `SIGTERM` on Unix, it lets a run in progress finish, then stops. |
 | `vault-mirror check` | Logs in, counts what's in each vault, and shows what a run would do. It never changes either vault. It takes the same flags as `run`. |
 | `vault-mirror snapshots` | Lists the backup snapshots. |
 | `vault-mirror export --output DIR` | Decrypts a snapshot and its attachments into a new directory. |
