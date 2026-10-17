@@ -63,8 +63,8 @@ docker compose run --rm vault-mirror check --allow-overwrite
 docker compose run --rm vault-mirror run --allow-overwrite
 ```
 
-The destination backups hold every version of your changes; see [Backups and
-restoring](backups.md).
+Before replacing destination changes, a run backs up their current state.
+See [Backups and restoring](backups.md).
 
 ### Switching the source and destination
 
