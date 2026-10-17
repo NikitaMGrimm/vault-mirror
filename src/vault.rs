@@ -46,8 +46,9 @@ const SCALAR_CONTENT_KEYS: &[&str] = &["type", "name", "notes", "favorite", "rep
 const LIST_CONTENT_KEYS: &[&str] = &["fields", "passwordHistory"];
 
 /// Content that is encrypted at rest. A string there is ciphertext or an
-/// error, whatever it looks like. `*` stands for any key or list index.
-/// Other content strings are told apart by their shape.
+/// error, whatever it looks like. `*` stands for any key, or, followed by
+/// more parts, any entry of a list of objects. Other content strings are told
+/// apart by their shape.
 const ENCRYPTED_SLOTS: &[&str] = &[
     "name",
     "notes",
@@ -747,18 +748,27 @@ fn check_organization_visible(
         all_items.with_context(context)?,
     );
     let hidden = |name: &str, all: &Value, synced: &[Value]| -> Result<usize> {
-        let all = all.get("data").and_then(Value::as_array).ok_or_else(|| {
-            anyhow!("the server's list of all {name} in organization {org} is malformed")
-        })?;
-        let visible: HashSet<&str> = synced
-            .iter()
-            .filter_map(|entry| entry.get("id").and_then(Value::as_str))
-            .collect();
-        Ok(all
-            .iter()
-            .filter_map(|entry| entry.get("id").and_then(Value::as_str))
-            .filter(|id| !visible.contains(id))
-            .count())
+        let malformed =
+            || anyhow!("the server's list of all {name} in organization {org} is malformed");
+        let all = all
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(malformed)?;
+        // Only what `read_vault` keeps is visible.
+        let mut visible = HashSet::new();
+        for entry in synced {
+            if organization_of(entry, &format!("an entry of the synced {name}"))? == Some(org) {
+                visible.extend(entry.get("id").and_then(Value::as_str));
+            }
+        }
+        let mut hidden = 0;
+        for entry in all {
+            let id = (entry.get("id").and_then(Value::as_str))
+                .filter(|id| !id.is_empty())
+                .ok_or_else(malformed)?;
+            hidden += usize::from(!visible.contains(id));
+        }
+        Ok(hidden)
     };
     let collections = hidden("collections", &all_collections, synced_collections)?;
     let items = hidden("items", &all_items, synced_items)?;
@@ -889,9 +899,10 @@ fn is_type_block(name: &str) -> bool {
         })
 }
 
-/// A list of an item that may be missing or null, but nothing else.
+/// A list at `name`, a path within an item, that may be missing or null, but
+/// nothing else.
 fn optional_list<'a>(cipher: &'a Value, name: &str) -> Result<&'a [Value]> {
-    match cipher.get(name) {
+    match cipher.pointer(&format!("/{name}")) {
         None | Some(Value::Null) => Ok(&[]),
         Some(Value::Array(list)) => Ok(list),
         Some(_) => bail!("the item's {name} is not a list"),
@@ -909,6 +920,19 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
         && serde_json::from_str::<Map<String, Value>>(data).is_err()
     {
         bail!("the item is stored as an encrypted data blob, a format that is not supported yet");
+    }
+    // Content in a list of another shape would be left out of the copy, or
+    // skip the checks of its encrypted slots.
+    for list in ENCRYPTED_SLOTS
+        .iter()
+        .filter_map(|slot| slot.split_once("/*/").map(|(list, _)| list))
+    {
+        if !optional_list(cipher, list)?
+            .iter()
+            .all(|entry| entry.is_object() || entry.is_null())
+        {
+            bail!("the item's {list} holds an entry that is not an object");
+        }
     }
     let wrapped_key = optional_str(cipher, "key");
     let own_key = wrapped_key
@@ -1020,7 +1044,7 @@ mod tests {
 
     #[test]
     fn an_organization_this_account_cannot_list_fully_is_refused() {
-        let synced = [json!({ "id": "c1" })];
+        let synced = [json!({ "id": "c1", "organizationId": "org" })];
         let all = || Ok(json!({ "data": [{ "id": "c1" }] }));
         let check = |collections, items| {
             check_organization_visible("org", collections, items, &synced, &synced)
@@ -1035,6 +1059,67 @@ mod tests {
             Ok(json!({ "data": [{ "id": "c1" }, { "id": "i2" }] })),
         );
         assert!(format!("{:#}", hidden.unwrap_err()).contains("1 item"));
+    }
+
+    #[test]
+    fn only_entries_the_read_keeps_count_as_visible() {
+        let key = SymKey::generate();
+        let org = Scope::Organization("org-1".into());
+        let inventory = |id: &str| Ok(json!({ "data": [{ "id": id }] }));
+        for owner in [
+            None,
+            Some(Value::Null),
+            Some(json!("org-2")),
+            Some(json!("org-1")),
+        ] {
+            let mut cipher = full_cipher(&key);
+            let mut collection = json!({"id": "c1", "name": key.encrypt_str("Shared").unwrap()});
+            if let Some(owner) = &owner {
+                cipher["organizationId"] = owner.clone();
+                collection["organizationId"] = owner.clone();
+            }
+            let sync = json!({"collections": [collection], "ciphers": [cipher]});
+            let (collections, items) =
+                (sync_list(&sync, "collections"), sync_list(&sync, "ciphers"));
+            let visible = check_organization_visible(
+                "org-1",
+                inventory("c1"),
+                inventory("item-1"),
+                &collections.unwrap(),
+                &items.unwrap(),
+            );
+            let read = read_vault(&sync, &org, &key).unwrap();
+            let kept = (read.collections.len(), read.items.len());
+            match visible {
+                Ok(()) => assert_eq!(kept, (1, 1), "{owner:?}"),
+                Err(error) => {
+                    assert_eq!(kept, (0, 0), "{owner:?}");
+                    let message = format!("{error:#}");
+                    assert!(message.contains("1 collection and 1 item"), "{message}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_organization_inventory_row_without_an_id_is_an_error() {
+        let synced = [json!({ "id": "c1", "organizationId": "org" })];
+        for row in [
+            json!({}),
+            json!({ "id": null }),
+            json!({ "id": 7 }),
+            json!("c1"),
+        ] {
+            let all = || Ok(json!({ "data": [{ "id": "c1" }, row.clone()] }));
+            let check = |collections, items| {
+                check_organization_visible("org", collections, items, &synced, &synced)
+            };
+            let ok = || Ok(json!({ "data": [{ "id": "c1" }] }));
+            for result in [check(all(), ok()), check(ok(), all())] {
+                let message = format!("{:#}", result.unwrap_err());
+                assert!(message.contains("malformed"), "{message}");
+            }
+        }
     }
 
     #[test]
@@ -1306,6 +1391,45 @@ mod tests {
                 let mut cipher = full_cipher(&key);
                 cipher[block] = value;
                 decrypt_item(&cipher, &key).unwrap_or_else(|error| panic!("{block}: {error:#}"));
+            }
+        }
+    }
+
+    #[test]
+    fn item_lists_of_the_wrong_shape_are_errors_not_empty() {
+        let key = SymKey::generate();
+        let field = json!({"name": "2.AAAA", "value": "sentinel"});
+        for (pointer, value) in [
+            ("/fields", field.clone()),
+            ("/fields", json!("sentinel")),
+            ("/fields", json!(["sentinel"])),
+            ("/fields", json!([field, 5])),
+            ("/passwordHistory", json!({"password": "sentinel"})),
+            ("/passwordHistory", json!([["sentinel"]])),
+            ("/login/uris", json!({"uri": "sentinel"})),
+            ("/login/uris", json!(["sentinel"])),
+            ("/login/fido2Credentials", json!("sentinel")),
+            ("/login/fido2Credentials", json!([true])),
+        ] {
+            let mut cipher = full_cipher(&key);
+            *cipher.pointer_mut(pointer).unwrap() = value.clone();
+            let Err(error) = decrypt_item(&cipher, &key) else {
+                panic!("{pointer} = {value} was read as an item list");
+            };
+            let message = format!("{error:#}");
+            assert!(message.contains(&pointer[1..]), "{message}");
+            assert!(!message.contains("sentinel") && !message.contains("AAAA"));
+        }
+        for pointer in [
+            "/fields",
+            "/passwordHistory",
+            "/login/uris",
+            "/login/fido2Credentials",
+        ] {
+            for value in [Value::Null, json!([])] {
+                let mut cipher = full_cipher(&key);
+                *cipher.pointer_mut(pointer).unwrap() = value;
+                decrypt_item(&cipher, &key).unwrap_or_else(|error| panic!("{pointer}: {error:#}"));
             }
         }
     }
