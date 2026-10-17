@@ -17,7 +17,7 @@ use time::OffsetDateTime;
 use vault_mirror::{
     app::{self, RunFlags},
     config::{self, Config},
-    mirror::{Endpoint, MirrorOptions, mirror},
+    mirror::{self, Endpoint},
     schedule::Timetable,
     snapshot,
     store::{self, Keys, Snapshot, Store},
@@ -39,14 +39,19 @@ struct Cli {
     command: Command,
 }
 
+/// Each lets one run past one safety check. `check` takes them too, to show
+/// what such a run would do.
 #[derive(Args, Clone, Copy)]
 struct RunArgs {
-    /// Let this run delete every earlier copy.
+    /// Let this run delete more than half of the copies.
     #[arg(long)]
     allow_mass_delete: bool,
     /// Let this run take over copies made the other way round, after you switched the source and destination.
     #[arg(long)]
     reverse: bool,
+    /// Let this run replace or delete copies changed in the destination. The destination backup keeps the changes.
+    #[arg(long)]
+    allow_overwrite: bool,
 }
 
 #[derive(Subcommand)]
@@ -62,7 +67,7 @@ enum Command {
     /// Keep running on SCHEDULE.
     Daemon,
     /// Log in to the configured vaults and report what a run would do, without changing them.
-    Check,
+    Check(RunArgs),
     /// List the snapshots in the backup directory.
     Snapshots {
         /// Whose backups to list.
@@ -192,7 +197,7 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Init { dir } => wizard::init(&dir).await,
         Command::Run(args) => run(args).await,
         Command::Daemon => daemon().await,
-        Command::Check => check().await,
+        Command::Check(args) => check(args).await,
         Command::Snapshots { from } => snapshots(from),
         Command::Export { snapshot, output } => export(snapshot, &output),
         Command::Healthcheck { max_age_hours } => healthcheck(max_age_hours),
@@ -203,6 +208,7 @@ fn flags(args: RunArgs) -> RunFlags {
     RunFlags {
         allow_mass_delete: args.allow_mass_delete,
         reverse: args.reverse,
+        allow_overwrite: args.allow_overwrite,
     }
 }
 
@@ -307,8 +313,8 @@ impl Terminate {
     }
 }
 
-async fn check() -> Result<ExitCode> {
-    check_config(&config()?, true).await?;
+async fn check(args: RunArgs) -> Result<ExitCode> {
+    check_config(&config()?, flags(args), true).await?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -332,18 +338,19 @@ fn describe_vault(vault: &vault_mirror::vault::Vault) -> String {
 
 /// Logs in to the configured vaults and reports what a run would do.
 /// `init` has reported the logins already.
-async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
+async fn check_config(config: &Config, flags: RunFlags, report_logins: bool) -> Result<()> {
     let started = Instant::now();
     let http = app::http_client(config)?;
     let source = app::open_account(&config.backups_dir, &http, &config.source, "source").await?;
-    let source_scope = app::scope_of(&config.source);
+    let source = Endpoint {
+        account: &source,
+        scope: app::scope_of(&config.source),
+    };
+    let source_vault = source.account.load(&source.scope).await?;
     if report_logins {
         Console::status(
             "Logged in",
-            &format!(
-                "to the source: {}",
-                describe_vault(&source.load(&source_scope).await?)
-            ),
+            &format!("to the source: {}", describe_vault(&source_vault)),
         );
     }
     let Some(dest_config) = &config.dest else {
@@ -352,31 +359,28 @@ async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
         return Ok(());
     };
     let dest = app::open_account(&config.backups_dir, &http, dest_config, "dest").await?;
-    let dest_scope = app::scope_of(dest_config);
+    let dest = Endpoint {
+        account: &dest,
+        scope: app::scope_of(dest_config),
+    };
+    let dest_vault = dest.account.load(&dest.scope).await?;
     if report_logins {
         Console::status(
             "Logged in",
-            &format!(
-                "to the destination: {}",
-                describe_vault(&dest.load(&dest_scope).await?)
-            ),
+            &format!("to the destination: {}", describe_vault(&dest_vault)),
         );
     }
 
-    let options = MirrorOptions {
-        dry_run: true,
-        filter: config.filter.clone(),
-        ..MirrorOptions::default()
-    };
-    let source = Endpoint {
-        account: &source,
-        scope: source_scope,
-    };
-    let dest = Endpoint {
-        account: &dest,
-        scope: dest_scope,
-    };
-    let outcome = mirror(&source, &dest, &options, &Console).await?;
+    let options = app::mirror_options(config, flags);
+    let outcome = mirror::check(
+        &source,
+        &dest,
+        &source_vault,
+        &dest_vault,
+        &options,
+        &Console,
+    )
+    .await?;
     Console::finished(&checked(started), !outcome.warnings.is_empty());
     Ok(())
 }

@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    mirror::{Reporter, Tally},
+    mirror::{Protected, Reporter, Tally},
     snapshot,
     store::Store,
     text::count,
-    vault::{Account, Scope, Vault},
+    vault::{Account, Scope},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -28,39 +28,31 @@ pub struct BackupOptions {
     pub now: OffsetDateTime,
 }
 
-pub async fn backup(
+/// Reads the vault and backs up exactly what it read. Returns that read
+/// with the snapshot that holds it, a new one or, for an unchanged vault,
+/// the newest.
+pub async fn backup<'k>(
     account: &Account,
     scope: &Scope,
-    store: &Store<'_>,
+    store: &Store<'k>,
     options: &BackupOptions,
     reporter: &dyn Reporter,
-) -> Result<BackupReport> {
+) -> Result<(BackupReport, Protected<'k>)> {
     let vault = account.load(scope).await.context("reading the vault")?;
-    backup_loaded(account, scope, &vault, store, options, reporter).await
-}
-
-/// Backs up `vault`, as just read from `account`.
-pub async fn backup_loaded(
-    account: &Account,
-    scope: &Scope,
-    vault: &Vault,
-    store: &Store<'_>,
-    options: &BackupOptions,
-    reporter: &dyn Reporter,
-) -> Result<BackupReport> {
     let live: Vec<_> = vault.items.iter().filter(|item| !item.in_trash).collect();
-    let document = snapshot::build(vault, scope)?;
+    let document = snapshot::build(&vault, scope)?;
     let mut report = BackupReport {
         items: live.len(),
         ..BackupReport::default()
     };
     // An attachment's content never changes under one id, so the document
     // tells whether the newest snapshot holds this vault before any download.
-    if store.unchanged(&document)? {
+    let id = if store.unchanged(&document)? {
         reporter.status(
             "Skipped",
             "a new snapshot; the vault is unchanged since the newest one",
         );
+        store.list()?.pop().context("the newest snapshot is gone")?
     } else {
         let writer = store.begin(options.now)?;
         let files: Vec<_> = (live.iter())
@@ -93,13 +85,16 @@ pub async fn backup_loaded(
             "Saved",
             &format!("snapshot {id} with {}", count(live.len(), "item")),
         );
-        report.snapshot = Some(id);
+        report.snapshot = Some(id.clone());
         report.attachments_downloaded = files.len();
-    }
+        id
+    };
 
+    // The newest snapshot, the one just used, always stays.
     report.snapshots_pruned = store.prune(options.retention_days, options.now)?;
     if report.snapshots_pruned > 0 {
         reporter.status("Pruned", &count(report.snapshots_pruned, "snapshot"));
     }
-    Ok(report)
+    let snapshot = store.snapshot(&id);
+    Ok((report, Protected { vault, snapshot }))
 }

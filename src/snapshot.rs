@@ -2,9 +2,8 @@
 //! one extra block of bookkeeping.
 //!
 //! Any Bitwarden client can import the document as it is. The extra
-//! `vaultMirror` block lets this tool restore it exactly: which strings were
-//! stored unencrypted, and the attachments, which the official format has no
-//! place for.
+//! `vaultMirror` block records what the official format has no place for:
+//! which strings were stored unencrypted, and the attachments.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -111,8 +110,8 @@ pub fn build(vault: &Vault, scope: &Scope) -> Result<Value> {
         }),
     );
     let document = Value::Object(document);
-    // A snapshot that restore refuses is no backup. Better to fail now, while
-    // the vault itself can still be read.
+    // A snapshot that cannot be read back is no backup. Better to fail now,
+    // while the vault itself can still be read.
     parse(&document).context("checking the new snapshot")?;
     Ok(document)
 }
@@ -215,7 +214,7 @@ fn list<T: DeserializeOwned>(document: &Value, name: &str) -> Result<Vec<T>> {
 }
 
 /// Reads a backup document. Anything malformed is an error: read as empty, a
-/// damaged list would restore a vault with parts silently missing.
+/// damaged list would export a vault with parts silently missing.
 pub fn parse(document: &Value) -> Result<Restorable> {
     let block: Block = Block::deserialize(
         document
@@ -267,7 +266,7 @@ pub fn parse(document: &Value) -> Result<Restorable> {
                 unreachable!("an object reads as a map")
             };
             // In an organization's document the folder is the account's
-            // own, which the document doesn't list and a restore doesn't set.
+            // own, which the document doesn't list.
             let folder_id = match record.folder_id {
                 Some(id) if !organization => {
                     if !known_folders.contains(&id) {
@@ -357,7 +356,11 @@ mod tests {
             ("name".to_string(), Node::secret(MARKER_FIELD)),
             (
                 "value".to_string(),
-                Node::secret(format!("source-id {} - -", "ab".repeat(32))),
+                Node::secret(format!(
+                    "{} source-id {} 0 - -",
+                    "cd".repeat(32),
+                    "ab".repeat(32)
+                )),
             ),
             ("type".to_string(), Node::Number(1.into())),
         ]))
@@ -478,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn a_document_restores_to_the_same_content_without_mirror_markers() {
+    fn a_document_reads_back_as_the_same_content_without_mirror_markers() {
         let vault = vault();
         let document = build(&vault, &Scope::Personal).unwrap();
         assert_eq!(document, build(&vault, &Scope::Personal).unwrap());
@@ -576,7 +579,7 @@ mod tests {
         assert_eq!(restorable.items[0].folder_id, None);
 
         vault.items[0].collection_ids.push("gone".into());
-        assert!(build(&vault, &scope).is_err(), "it would not restore");
+        assert!(build(&vault, &scope).is_err(), "it would not read back");
     }
 
     #[test]

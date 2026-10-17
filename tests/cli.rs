@@ -201,6 +201,9 @@ fn a_misspelt_setting_in_the_settings_file_is_refused() {
             stderr.contains(&format!("line 2 sets {named}, which is not a setting")),
             "{stderr}"
         );
-        assert!(!stderr.contains("hunter2") && !stderr.contains("Work"), "{stderr}");
+        assert!(
+            !stderr.contains("hunter2") && !stderr.contains("Work"),
+            "{stderr}"
+        );
     }
 }

@@ -13,9 +13,9 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     api::{ApiCredentials, ClientOptions, ServerUrls, build_http_client},
-    backup::{BackupOptions, BackupReport, backup_loaded},
+    backup::{BackupOptions, BackupReport, backup},
     config::{Config, VaultConfig},
-    mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto},
+    mirror::{Endpoint, MirrorOptions, Reporter, mirror},
     plan::{Safety, Summary},
     store::{self, Keys, Store},
     text::count,
@@ -30,6 +30,7 @@ const LOCK_FILE: &str = "run.lock";
 pub struct RunFlags {
     pub allow_mass_delete: bool,
     pub reverse: bool,
+    pub allow_overwrite: bool,
 }
 
 /// The record of a run, written to `last-run.json`. It holds counts, times
@@ -135,6 +136,17 @@ pub fn http_client(config: &Config) -> Result<reqwest::Client> {
     Ok(build_http_client(&options)?)
 }
 
+pub fn mirror_options(config: &Config, flags: RunFlags) -> MirrorOptions {
+    MirrorOptions {
+        safety: Safety {
+            allow_mass_delete: flags.allow_mass_delete,
+            allow_reverse: flags.reverse,
+            allow_overwrite: flags.allow_overwrite,
+        },
+        filter: config.filter.clone(),
+    }
+}
+
 pub fn scope_of(vault: &VaultConfig) -> Scope {
     match &vault.organization_id {
         Some(id) => Scope::Organization(id.clone()),
@@ -233,21 +245,9 @@ async fn execute(
     progress.stage = "source backup";
     reporter.status("Backing up", "the source vault");
     let store = Store::new(&config.backups_dir, "source", &keys);
-    let source_vault = source
-        .load(&source_scope)
-        .await
-        .context("reading the vault")?;
-    progress.status.source_backup = Some(
-        backup_loaded(
-            &source,
-            &source_scope,
-            &source_vault,
-            &store,
-            &backup_options,
-            reporter,
-        )
-        .await?,
-    );
+    let (report, source_read) =
+        backup(&source, &source_scope, &store, &backup_options, reporter).await?;
+    progress.status.source_backup = Some(report);
 
     let Some(dest_config) = &config.dest else {
         return Ok(());
@@ -257,24 +257,12 @@ async fn execute(
     let dest_scope = scope_of(dest_config);
     // Attachment content is stored on this side too. A destination file can
     // be the only copy: one the source never had, one changed in the
-    // destination, or one in a vault this tool did not fill. The mirror is
-    // about to delete or replace such files.
+    // destination, or one in a vault this tool did not fill.
     progress.stage = "destination backup";
     reporter.status("Backing up", "the destination vault");
     let store = Store::new(&config.backups_dir, "dest", &keys);
-    // The mirror changes only what this backup holds.
-    let dest_vault = dest.load(&dest_scope).await.context("reading the vault")?;
-    progress.status.dest_backup = Some(
-        backup_loaded(
-            &dest,
-            &dest_scope,
-            &dest_vault,
-            &store,
-            &backup_options,
-            reporter,
-        )
-        .await?,
-    );
+    let (report, dest_read) = backup(&dest, &dest_scope, &store, &backup_options, reporter).await?;
+    progress.status.dest_backup = Some(report);
 
     let source = Endpoint {
         account: &source,
@@ -284,17 +272,9 @@ async fn execute(
         account: &dest,
         scope: dest_scope,
     };
-    let options = MirrorOptions {
-        dry_run: false,
-        safety: Safety {
-            allow_mass_delete: flags.allow_mass_delete,
-            allow_reverse: flags.reverse,
-        },
-        filter: config.filter.clone(),
-    };
-
+    let options = mirror_options(config, flags);
     progress.stage = "mirror";
-    match mirror_onto(&source, &dest, Some(dest_vault), &options, reporter).await {
+    match mirror(&source, &dest, &source_read, &dest_read, &options, reporter).await {
         Ok(outcome) => {
             progress.status.mirror = Some(SummaryRecord {
                 changed: outcome.changed,

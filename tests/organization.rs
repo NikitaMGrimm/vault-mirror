@@ -93,8 +93,6 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
     assert!(first.warnings.is_empty(), "{:?}", first.warnings);
     assert_eq!(first.summary.items_created, 3);
     assert_eq!(first.summary.collections_created, 3);
-    // Both organizations start with the collection the server creates.
-    assert_eq!(first.summary.collections_deleted, 0);
     assert_eq!(first.summary.attachments_copied, 2);
 
     let vault = dest.load(&dest_scope).await?;
@@ -138,7 +136,7 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
         .changed
     );
 
-    // Move an item to another collection, edit one, and drop a collection.
+    // Move an item to another collection, edit one, and delete a collection.
     let source_vault = source.load(&source_scope).await?;
     let github = by_name(&source_vault, "GitHub");
     let moved = Draft {
@@ -173,7 +171,6 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
     )
     .await?;
     assert_eq!(second.summary.items_updated, 2);
-    assert_eq!(second.summary.collections_deleted, 1);
     let vault = dest.load(&dest_scope).await?;
     assert_eq!(collections_of(&vault, "GitHub"), ["Team B"]);
     assert_eq!(
@@ -185,7 +182,8 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
         by_name(&vault, "Passkey login").content["notes"].as_str(),
         Some("edited in the organization")
     );
-    assert!(vault.collections.iter().all(|c| c.name != "Empty team"));
+    // Collections are left for you to delete.
+    assert!(vault.collections.iter().any(|c| c.name == "Empty team"));
     assert!(
         !run_scoped(&source, source_scope, &dest, dest_scope, &options)
             .await?
@@ -392,32 +390,27 @@ async fn items_in_no_collection_are_never_lost_silently() -> Result<()> {
 
     source.create_item(&source_scope, &note(vec![])).await?;
     let options = MirrorOptions::default();
-    let first = run_scoped(
-        &source,
-        source_scope.clone(),
-        &dest,
-        dest_scope.clone(),
-        &options,
-    )
-    .await?;
+    let run = || {
+        run_scoped(
+            &source,
+            source_scope.clone(),
+            &dest,
+            dest_scope.clone(),
+            &options,
+        )
+    };
     if dest.server_traits().await?.items_need_collections {
-        assert_eq!(first.summary.items_created, 0);
+        let error = run().await.unwrap_err();
         assert!(
-            first
-                .warnings
-                .iter()
-                .any(|w| w.contains("in no collection")),
-            "{:?}",
-            first.warnings
+            format!("{error:#}").contains("1 item of the source is in no collection"),
+            "{error:#}"
         );
+        assert!(dest.load(&dest_scope).await?.items.is_empty());
     } else {
+        let first = run().await?;
         assert_eq!(first.summary.items_created, 1);
         assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+        assert!(!run().await?.changed);
     }
-    assert!(
-        !run_scoped(&source, source_scope, &dest, dest_scope, &options)
-            .await?
-            .changed
-    );
     Ok(())
 }

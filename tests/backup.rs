@@ -10,7 +10,7 @@ use vault_mirror::{
     backup::{BackupOptions, backup},
     config::Config,
     node::Node,
-    plan::{self, marker_of},
+    plan,
     snapshot::{self, Restorable},
     store::{Keys, Snapshot, Store},
     vault::{Draft, Scope, Vault},
@@ -58,7 +58,6 @@ fn contents(vault: &Vault) -> HashMap<String, Summary> {
         .collect()
 }
 
-/// The newest snapshot in `store`, read back.
 fn latest<'a>(store: &Store<'a>) -> Result<(Restorable, Snapshot<'a>)> {
     let snapshot = store.snapshot(&store.list()?.pop().expect("a snapshot"));
     Ok((snapshot::parse(&snapshot.document()?)?, snapshot))
@@ -77,7 +76,7 @@ async fn a_backup_holds_the_whole_vault() -> Result<()> {
     let keys = keys(dir.path());
     let store = Store::new(dir.path(), "source", &keys);
 
-    let report = backup(&source, &PERSONAL, &store, &options(), &Capture::default()).await?;
+    let (report, _) = backup(&source, &PERSONAL, &store, &options(), &Capture::default()).await?;
     assert_eq!(report.items, fixtures::samples().len());
     assert_eq!(report.attachments_downloaded, 4);
     assert!(report.snapshot.is_some());
@@ -128,11 +127,14 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
     let quiet = Capture::default();
 
     backup(&source, &PERSONAL, &store, &options(), &quiet).await?;
-    let unchanged = backup(&source, &PERSONAL, &store, &options(), &quiet).await?;
+    let (unchanged, read) = backup(&source, &PERSONAL, &store, &options(), &quiet).await?;
     assert_eq!(
         (unchanged.snapshot, unchanged.attachments_downloaded),
         (None, 0)
     );
+    // The run's read is in the newest snapshot all the same.
+    let (newest, _) = latest(&store)?;
+    assert_eq!(newest.items().len(), read.vault.items.len());
 
     let vault = source.load(&PERSONAL).await?;
     source
@@ -143,7 +145,7 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
             b"front and back",
         )
         .await?;
-    let third = backup(&source, &PERSONAL, &store, &options(), &quiet).await?;
+    let (third, _) = backup(&source, &PERSONAL, &store, &options(), &quiet).await?;
     assert!(third.snapshot.is_some());
     assert_eq!(third.attachments_downloaded, 5);
     assert_eq!(store.list()?.len(), 2);
@@ -156,7 +158,7 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
         retention_days: 30,
         now: OffsetDateTime::now_utc() + time::Duration::days(60),
     };
-    let fourth = backup(&source, &PERSONAL, &store, &later, &quiet).await?;
+    let (fourth, _) = backup(&source, &PERSONAL, &store, &later, &quiet).await?;
     assert_eq!(fourth.snapshots_pruned, 2);
     assert_eq!(store.list()?.len(), 1);
     Ok(())
@@ -292,7 +294,12 @@ async fn a_failed_run_is_recorded_with_its_stage_and_changes_nothing() -> Result
     assert!(refused.error.as_deref().unwrap().contains("swapped"));
     let original = source.load(&PERSONAL).await?;
     assert_eq!(original.items.len(), fixtures::samples().len());
-    assert!(original.items.iter().all(|item| marker_of(item).is_none()));
+    assert!(
+        original
+            .items
+            .iter()
+            .all(|item| copied_from(item).is_none())
+    );
     // The destination was still backed up before the refusal.
     assert_eq!(
         refused.dest_backup.as_ref().unwrap().items,
@@ -340,11 +347,19 @@ async fn destination_attachments_are_backed_up_before_the_mirror_deletes_them() 
     dest.upload_attachment(&PERSONAL, &copy, "only-copy.txt", b"the only copy")
         .await?;
 
-    let status = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
+    let refused = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
+    assert!(!refused.succeeded());
+    assert!(refused.error.unwrap().contains("--allow-overwrite"));
+    let overwrite = RunFlags {
+        allow_overwrite: true,
+        ..RunFlags::default()
+    };
+    let status = app::run_once(&config, overwrite, &Capture::default()).await;
     assert!(status.succeeded(), "{status:?}");
     assert!(dest.load(&PERSONAL).await?.items[0].attachments.is_empty());
+    // The refused run backed it up already.
     assert_eq!(
-        status.dest_backup.as_ref().unwrap().attachments_downloaded,
+        refused.dest_backup.as_ref().unwrap().attachments_downloaded,
         1
     );
 
@@ -355,6 +370,75 @@ async fn destination_attachments_are_backed_up_before_the_mirror_deletes_them() 
     assert_eq!(
         snapshot.attachment(&attachment.attachment_id)?,
         b"the only copy"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unreadable_attachment_stops_runs_and_the_last_snapshot_stays() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    let item = source
+        .create_item(
+            &PERSONAL,
+            &Draft {
+                content: fixtures::named("Visa").content,
+                folder_id: None,
+                collection_ids: vec![],
+            },
+        )
+        .await?;
+    source
+        .upload_attachment(&PERSONAL, &item, "card.txt", b"front and back")
+        .await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
+    assert!(
+        app::run_once(&config, RunFlags::default(), &Capture::default())
+            .await
+            .succeeded()
+    );
+    let keys = keys(dir.path());
+    let store = Store::new(dir.path(), "source", &keys);
+    let complete = store.list()?;
+
+    let broken =
+        provision::register_attachment_without_file(&sandbox.http, &source_account, &item.id)
+            .await?;
+    for _ in 0..2 {
+        let refused = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
+        assert_eq!(refused.failure_stage.as_deref(), Some("source backup"));
+        let error = refused.error.unwrap();
+        assert!(
+            error.contains(&broken) && error.contains(&item.id),
+            "{error}"
+        );
+    }
+    let copies = dest.load(&PERSONAL).await?.items;
+    assert_eq!(copies.len(), 1);
+    assert_eq!(copies[0].attachments.len(), 1);
+
+    // Long past retention, a refused backup still prunes nothing.
+    let later = BackupOptions {
+        retention_days: 1,
+        now: OffsetDateTime::now_utc() + time::Duration::days(60),
+    };
+    assert!(
+        backup(&source, &PERSONAL, &store, &later, &Capture::default())
+            .await
+            .is_err()
+    );
+    assert_eq!(store.list()?, complete);
+    let (backed_up, snapshot) = latest(&store)?;
+    let attachment = &backed_up.items()[0].attachments[0];
+    assert_eq!(
+        snapshot.attachment(&attachment.attachment_id)?,
+        b"front and back"
     );
     Ok(())
 }
