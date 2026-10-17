@@ -39,8 +39,8 @@ another account.
 
 - Copies every item type, custom field, passkey, password history, folder,
   collection and attachment, within [server limits](docs/limitations.md).
-- Saves backups in Bitwarden's export format, readable with `age` and any
-  Bitwarden app.
+- Saves backups as encrypted Bitwarden exports, which you can decrypt with
+  `age` and import into any Bitwarden app.
 - Stops before runs that look like a mistake, such as swapped vaults or an empty
   source. See [safety checks](docs/how-it-works.md#safety-checks).
 - Runs as one binary or a container, without the `bw` CLI or Node.js.
@@ -107,12 +107,14 @@ xattr -d com.apple.quarantine vault-mirror
 ## Documentation
 
 - [Getting started](docs/getting-started.md): a first setup, step by step.
-- [How it works](docs/how-it-works.md): what a run does, and the safety checks.
-- [Configuration](docs/configuration.md): every setting.
-- [Backups and restoring](docs/backups.md)
-- [Commands and scheduling](docs/running.md)
-- [Limitations](docs/limitations.md)
-- [Questions](docs/questions.md)
+- [How it works](docs/how-it-works.md): what a run does, copies, and the safety checks.
+- [Configuration](docs/configuration.md): every setting, organizations, and
+  mirroring part of a vault.
+- [Backups and restoring](docs/backups.md): the backup directory, and getting
+  data back out.
+- [Commands and scheduling](docs/running.md): every command, output, and systemd.
+- [Limitations](docs/limitations.md): what isn't copied, and server restrictions.
+- [Questions](docs/questions.md): short answers to common questions.
 - [Security](SECURITY.md): what vault-mirror can access and what it stores.
 
 ## Getting help

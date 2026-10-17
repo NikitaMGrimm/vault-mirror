@@ -38,16 +38,15 @@ last run copied. The next run that reaches the source catches up.
 
 ## Do backups pile up?
 
-No. Snapshots older than a day thin out to one a day and expire after
-`RETENTION_DAYS`, except the newest, and an unchanged vault gets no new
-snapshot. See
-[Backups and restoring](backups.md).
+No. An unchanged vault gets no new snapshot. Snapshots older than a day thin
+out to one a day and expire after `RETENTION_DAYS`, but the newest is always
+kept. See [Backups and restoring](backups.md).
 
 ## Where are my master passwords stored?
 
 In the settings file, `vault-mirror.env`. On Unix, `init` makes it readable only
 by you. To keep secrets out of it, use [secret files](configuration.md#secrets-in-files).
-Anyone who can read them can open your vaults; see [SECURITY.md](../SECURITY.md).
+Anyone who can read these files can open your vaults; see [SECURITY.md](../SECURITY.md).
 
 ## Does it work with two-step login?
 

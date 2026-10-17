@@ -25,14 +25,14 @@ with single sign-on and trusted devices or Key Connector can't be used.
 The destination's trash is left alone. The server empties it on its own
 schedule.
 
-## Fidelity
+## Names and damaged items
 
 Folders and collections are matched by name, so two with the same name in the
 source share one in the destination.
 
 A run stops if it can't decrypt an item, or if a destination attachment has no
-readable file, such as after a failed upload. The error names the item or
-attachment.
+readable file, such as after a failed upload. The error gives the id of the
+item or attachment.
 
 ## Server restrictions
 

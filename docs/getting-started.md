@@ -99,8 +99,9 @@ A first run prints:
     Finished 152 created, 0 updated, 0 deleted, 0 unchanged in 41.3s
 ```
 
-Your items are now in the destination. Each copy has an extra hidden field,
-`vault-mirror`, which links it to its source item. Leave that field in place.
+Your items are now in the destination. Each copy has a hidden field called
+`vault-mirror`, its **marker**, which links it to its source item. Leave the
+marker in place.
 
 Copy `backups/key.age` to your recovery location now, and try an
 [export](backups.md#restore-with-vault-mirror) once.
