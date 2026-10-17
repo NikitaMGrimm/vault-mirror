@@ -2,6 +2,15 @@
 
 mod common;
 
+use std::{
+    io::{Read, Write},
+    net::{Shutdown, TcpListener, TcpStream},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
 use anyhow::Result;
 use common::*;
 use reqwest::Method;
@@ -441,5 +450,163 @@ async fn an_account_in_an_organization_keeps_its_folders() -> Result<()> {
         );
     }
     assert!(names(&dest.load(&PERSONAL).await?).contains(&"Empty"));
+    Ok(())
+}
+
+/// Forwards requests to a server, one connection each, and drops the
+/// response to the first folder deletion the server carried out, as a lost
+/// connection does.
+struct DropFirstFolderDelete {
+    url: String,
+    /// Folder deletions forwarded.
+    deletes: Arc<AtomicUsize>,
+}
+
+impl DropFirstFolderDelete {
+    fn start(server: &str) -> Result<Self> {
+        let server = reqwest::Url::parse(server)?;
+        let address = format!(
+            "{}:{}",
+            server.host_str().unwrap(),
+            server.port_or_known_default().unwrap()
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let counted = deletes.clone();
+        std::thread::spawn(move || {
+            for client in listener.incoming().flatten() {
+                let (address, counted) = (address.clone(), counted.clone());
+                std::thread::spawn(move || forward(client, &address, &counted));
+            }
+        });
+        Ok(Self { url, deletes })
+    }
+}
+
+/// The header block of an HTTP message, without its blank line, and what
+/// follows it, reading from `stream` until the block is complete.
+fn read_head(stream: &mut TcpStream, mut data: Vec<u8>) -> std::io::Result<(String, Vec<u8>)> {
+    let mut buffer = [0; 8192];
+    loop {
+        if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&data[..end]).into_owned();
+            return Ok((head, data[end + 4..].to_vec()));
+        }
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        data.extend_from_slice(&buffer[..read]);
+    }
+}
+
+/// `head` with `Connection: close`, and the other headers `replace` names
+/// with their new values.
+fn closing(head: &str, replace: &[(&str, &str)]) -> String {
+    let mut lines: Vec<String> = (head.split("\r\n"))
+        .filter(|line| {
+            let name = line.split(':').next().unwrap_or("").trim();
+            !name.eq_ignore_ascii_case("connection")
+                && !replace.iter().any(|(n, _)| name.eq_ignore_ascii_case(n))
+        })
+        .map(str::to_string)
+        .collect();
+    lines.extend(
+        replace
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}")),
+    );
+    lines.push("Connection: close".into());
+    lines.join("\r\n") + "\r\n\r\n"
+}
+
+fn forward(mut client: TcpStream, address: &str, deletes: &AtomicUsize) -> std::io::Result<()> {
+    let (head, mut body) = read_head(&mut client, Vec::new())?;
+    let length: usize = (head.split("\r\n"))
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+        .map_or(0, |(_, value)| value.trim().parse().unwrap());
+    while body.len() < length {
+        let mut buffer = vec![0; length - body.len()];
+        let read = client.read(&mut buffer)?;
+        if read == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        body.extend_from_slice(&buffer[..read]);
+    }
+    let mut server = TcpStream::connect(address)?;
+    server.write_all(closing(&head, &[("Host", address)]).as_bytes())?;
+    server.write_all(&body)?;
+    let mut response = Vec::new();
+    server.read_to_end(&mut response)?;
+    let mut stream = server;
+    let (response_head, response_body) = read_head(&mut stream, response)?;
+    let applied = response_head
+        .split(' ')
+        .nth(1)
+        .is_some_and(|status| status.starts_with('2'));
+    if head.starts_with("DELETE /api/folders/")
+        && deletes.fetch_add(1, Ordering::SeqCst) == 0
+        && applied
+    {
+        return client.shutdown(Shutdown::Both);
+    }
+    client.write_all(closing(&response_head, &[]).as_bytes())?;
+    client.write_all(&response_body)?;
+    client.shutdown(Shutdown::Both)
+}
+
+/// A folder deletion that the server carried out but whose answer was lost
+/// is not counted or repeated, and is reported as uncertain. The next run
+/// finds the folder gone.
+#[tokio::test]
+async fn a_folder_deletion_without_an_answer_is_not_counted_or_repeated() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source = sandbox
+        .open(&sandbox.register(&sandbox.source_url).await?)
+        .await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let proxy = DropFirstFolderDelete::start(&dest_account.server)?;
+    let mut through_proxy = dest_account.clone();
+    through_proxy.server = proxy.url.clone();
+    let dest = sandbox.open(&through_proxy).await?;
+    let direct = sandbox.open(&dest_account).await?;
+    let old = source.create_folder("Old").await?;
+    run(&source, &dest, &options()).await?;
+    assert_eq!(names(&direct.load(&PERSONAL).await?), ["Old"]);
+
+    source.delete_folder(&old.id).await?;
+    let outcome = run(&source, &dest, &options()).await?;
+    assert_eq!(
+        proxy.deletes.load(Ordering::SeqCst),
+        1,
+        "a retried deletion"
+    );
+    assert!(direct.load(&PERSONAL).await?.folders.is_empty());
+    assert!(!outcome.changed);
+    assert_eq!(outcome.summary.folders_deleted, 0);
+    assert!(
+        (outcome.warnings.iter()).any(|w| w.contains("may have reached the server")),
+        "{:?}",
+        outcome.warnings
+    );
+    assert!(
+        !(outcome.warnings.iter()).any(|w| w.starts_with("Kept")),
+        "{:?}",
+        outcome.warnings
+    );
+
+    let again = run(&source, &dest, &options()).await?;
+    assert!(!again.changed);
+    assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+    assert_eq!(again.summary.folders_deleted, 0);
+    assert_eq!(
+        proxy.deletes.load(Ordering::SeqCst),
+        1,
+        "a repeated deletion"
+    );
     Ok(())
 }

@@ -747,7 +747,12 @@ impl<'a> Run<'a> {
                     Err(error) => {
                         // The request may have arrived, so the receipt stays
                         // until a run sees the folder gone.
-                        self.keep_folders(left, &format!("{error:#}"));
+                        self.warn(format!(
+                            "Could not confirm deletion of folder {}. The request may have \
+                             reached the server. The next run rechecks before deleting any \
+                             remaining folders: {error:#}",
+                            receipt.folder_id
+                        ));
                         break;
                     }
                 }
