@@ -99,15 +99,20 @@ impl Env<'_> {
     }
 
     /// A comma-separated list of folder or collection names.
-    fn names(&self, name: &str) -> Vec<String> {
-        self.get(name)
-            .map(|list| {
-                list.split(',')
-                    .map(|part| part.trim().trim_end_matches('/').to_string())
-                    .filter(|part| !part.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
+    fn names(&self, name: &str) -> Result<Vec<String>> {
+        let Some(list) = self.0.get(name) else {
+            return Ok(Vec::new());
+        };
+        let names: Vec<String> = list
+            .split(',')
+            .map(|part| part.trim().trim_end_matches('/').to_string())
+            .collect();
+        if names.iter().any(String::is_empty) {
+            return Err(ConfigError(format!(
+                "{name} must contain nonempty names separated by commas; unset it to remove this filter"
+            )));
+        }
+        Ok(names)
     }
 
     fn vault(&self, prefix: &str) -> Result<Option<VaultConfig>> {
@@ -163,12 +168,12 @@ impl Config {
         };
 
         let folders = Filter {
-            include: env.names("INCLUDE_FOLDERS"),
-            exclude: env.names("EXCLUDE_FOLDERS"),
+            include: env.names("INCLUDE_FOLDERS")?,
+            exclude: env.names("EXCLUDE_FOLDERS")?,
         };
         let collections = Filter {
-            include: env.names("INCLUDE_COLLECTIONS"),
-            exclude: env.names("EXCLUDE_COLLECTIONS"),
+            include: env.names("INCLUDE_COLLECTIONS")?,
+            exclude: env.names("EXCLUDE_COLLECTIONS")?,
         };
         let filter = match (source.organization_id.is_some(), folders, collections) {
             (false, folders, collections) if collections.is_empty() => folders,
@@ -212,6 +217,38 @@ pub fn backups_dir(env: &HashMap<String, String>) -> PathBuf {
 
 pub fn backup_passphrase(env: &HashMap<String, String>) -> Result<Option<String>> {
     Env(env).secret("BACKUP_PASSPHRASE")
+}
+
+/// Whether a name is supported in an explicit settings file.
+pub fn is_setting(name: &str) -> bool {
+    let secret = name.strip_suffix("_FILE").unwrap_or(name);
+    matches!(
+        secret,
+        "SOURCE_CLIENT_ID"
+            | "SOURCE_CLIENT_SECRET"
+            | "SOURCE_PASSWORD"
+            | "DEST_CLIENT_ID"
+            | "DEST_CLIENT_SECRET"
+            | "DEST_PASSWORD"
+            | "BACKUP_PASSPHRASE"
+            | "NOTIFY_SUCCESS_URL"
+            | "NOTIFY_FAILURE_URL"
+    ) || matches!(
+        name,
+        "SOURCE_SERVER"
+            | "SOURCE_ORGANIZATION_ID"
+            | "DEST_SERVER"
+            | "DEST_ORGANIZATION_ID"
+            | "BACKUPS_DIR"
+            | "RETENTION_DAYS"
+            | "INCLUDE_FOLDERS"
+            | "EXCLUDE_FOLDERS"
+            | "INCLUDE_COLLECTIONS"
+            | "EXCLUDE_COLLECTIONS"
+            | "CA_CERT_FILE"
+            | "SCHEDULE"
+            | "TZ"
+    )
 }
 
 pub fn vault_config(env: &HashMap<String, String>, prefix: &str) -> Result<VaultConfig> {
@@ -327,7 +364,7 @@ mod tests {
     #[test]
     fn filters_match_the_kind_of_vault() {
         let config = Config::from_env(&with(&[
-            ("INCLUDE_FOLDERS", "Work, Family/Shared/ ,"),
+            ("INCLUDE_FOLDERS", "Work, Family/Shared/ "),
             ("EXCLUDE_FOLDERS", "Work/Private"),
         ]))
         .unwrap();
@@ -349,6 +386,49 @@ mod tests {
             ))
             .contains("without folders")
         );
+    }
+
+    #[test]
+    fn a_present_filter_cannot_be_empty_or_have_empty_names() {
+        for setting in [
+            "INCLUDE_FOLDERS",
+            "EXCLUDE_FOLDERS",
+            "INCLUDE_COLLECTIONS",
+            "EXCLUDE_COLLECTIONS",
+        ] {
+            for value in ["", "  ", ",", "Work,", "Work,,Home", "/"] {
+                let message = error(with(&[(setting, value)]));
+                assert!(message.contains(setting));
+                assert!(!message.contains("Work") && !message.contains("Home"));
+            }
+        }
+    }
+
+    #[test]
+    fn settings_files_recognize_only_supported_names_and_secret_file_variants() {
+        for name in [
+            "SOURCE_SERVER",
+            "SOURCE_CLIENT_ID_FILE",
+            "DEST_PASSWORD_FILE",
+            "BACKUP_PASSPHRASE",
+            "BACKUP_PASSPHRASE_FILE",
+            "NOTIFY_FAILURE_URL_FILE",
+            "CA_CERT_FILE",
+            "TZ",
+        ] {
+            assert!(is_setting(name), "{name}");
+        }
+        for name in [
+            "SOUCRE_PASSWORD",
+            "SOURCE_SERVER_FILE",
+            "RETENTION_DAYS_FILE",
+            "BACKUP_PASSPHRASE_FILE_FILE",
+            "PATH",
+            "",
+        ] {
+            assert!(!is_setting(name), "{name}");
+        }
+        Config::from_env(&with(&[("PATH", "/bin"), ("UNRELATED_HOST_SETTING", "x")])).unwrap();
     }
 
     #[test]
