@@ -67,7 +67,6 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: python3 .github/scripts/test_release.py
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: python3 -m unittest discover -s .github/scripts -p test_demo.py
 
   test:
