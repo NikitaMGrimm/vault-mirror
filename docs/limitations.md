@@ -55,6 +55,14 @@ the source stops showing them, the run stops rather than delete their copies.
 **Organization items need a collection on Bitwarden.** When the destination is
 a Bitwarden server, a run stops while source items are in no collection.
 
+**Existing organization copies on Bitwarden cannot be updated safely.** Item
+updates can erase members' private folder, favorite and archive data, which
+the API does not expose for backup. A run that would update an existing copy
+stops before any vault changes, even with safety overrides. New copies are
+supported. Do not edit them until the run finishes. An interrupted copy that
+needs an update on retry also stops the run. Use a Vaultwarden destination
+for ongoing organization mirroring.
+
 **Archived items** need a destination that supports archiving. A run stops if
 the destination refuses to archive a copy.
 

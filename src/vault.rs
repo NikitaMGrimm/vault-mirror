@@ -1003,6 +1003,8 @@ pub struct ServerTraits {
     pub hidden_item_types: Vec<u64>,
     /// Whether an organization item must be in at least one collection.
     pub items_need_collections: bool,
+    /// Whether updates preserve organization members' private metadata.
+    pub organization_updates_safe: bool,
 }
 
 impl ServerTraits {
@@ -1027,6 +1029,7 @@ fn server_traits(config: &Value) -> ServerTraits {
             FLAGGED_ITEM_TYPES.to_vec()
         },
         items_need_collections: !vaultwarden,
+        organization_updates_safe: vaultwarden,
     }
 }
 
@@ -1135,6 +1138,7 @@ mod tests {
         let enabled = bitwarden(json!({"pm-32009-new-item-types": true}));
         assert!(enabled.hidden_item_types.is_empty());
         assert!(enabled.items_need_collections);
+        assert!(!enabled.organization_updates_safe);
 
         let vaultwarden = server_traits(&json!({
             "server": {"name": "Vaultwarden", "url": "https://github.com/dani-garcia/vaultwarden"},
@@ -1142,6 +1146,7 @@ mod tests {
         }));
         assert!(vaultwarden.hidden_item_types.is_empty());
         assert!(!vaultwarden.items_need_collections);
+        assert!(vaultwarden.organization_updates_safe);
     }
 
     #[test]

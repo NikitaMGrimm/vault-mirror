@@ -161,6 +161,19 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
         .unwrap();
     source.delete_collection(&source_org, &empty.id).await?;
 
+    if !dest.server_traits().await?.organization_updates_safe {
+        let before = dest.load(&dest_scope).await?;
+        let refused = run_scoped(&source, source_scope, &dest, dest_scope.clone(), &options)
+            .await
+            .unwrap_err();
+        assert!(
+            dest.load(&dest_scope).await? == before,
+            "a refused run changed the destination"
+        );
+        assert!(format!("{refused:#}").contains("cannot safely update organization copies"));
+        return Ok(());
+    }
+
     let second = run_scoped(
         &source,
         source_scope.clone(),
@@ -231,6 +244,10 @@ async fn a_copy_stays_in_the_folder_its_member_put_it_in() -> Result<()> {
     }
     assert!(!run().await?.changed);
 
+    for copy in dest.load(&dest_scope).await?.items {
+        assert_eq!(copy.folder_id.as_ref(), Some(&mine.id));
+    }
+
     let vault = source.load(&source_scope).await?;
     let github = by_name(&vault, "GitHub");
     let mut edited = Draft {
@@ -249,6 +266,47 @@ async fn a_copy_stays_in_the_folder_its_member_put_it_in() -> Result<()> {
     source
         .set_archived(std::slice::from_ref(&visa.id), true)
         .await?;
+
+    if !dest.server_traits().await?.organization_updates_safe {
+        source
+            .create_item(
+                &source_scope,
+                &Draft {
+                    content: fixtures::named("Visa").content,
+                    folder_id: None,
+                    collection_ids: vec![team.id.clone()],
+                },
+            )
+            .await?;
+        let before = (
+            source.load(&source_scope).await?,
+            dest.load(&dest_scope).await?,
+        );
+        let mut permitted = MirrorOptions::default();
+        permitted.safety.allow_overwrite = true;
+        permitted.safety.allow_mass_delete = true;
+        permitted.safety.allow_reverse = true;
+        for options in [&options, &permitted] {
+            let refused = run_scoped(
+                &source,
+                source_scope.clone(),
+                &dest,
+                dest_scope.clone(),
+                options,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                (
+                    source.load(&source_scope).await?,
+                    dest.load(&dest_scope).await?
+                ) == before,
+                "a refused run changed a vault"
+            );
+            assert!(format!("{refused:#}").contains("cannot safely update organization copies"));
+        }
+        return Ok(());
+    }
 
     assert_eq!(run().await?.summary.items_updated, 2);
     let copies = dest.load(&dest_scope).await?;

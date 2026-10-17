@@ -424,6 +424,15 @@ fn check_dest_holds(
             );
         }
     }
+    // Bitwarden can replace private member metadata that its API does not
+    // expose for backup. No safety override can recover those values.
+    if mode == Mode::Organization && !traits.organization_updates_safe && !plan.updates.is_empty() {
+        bail!(
+            "the destination server cannot safely update organization copies without removing \
+             members' private folder, favorite or archive data. Use a Vaultwarden organization \
+             as the destination for ongoing mirroring"
+        );
+    }
     // Organizations pay for attachments themselves.
     let files = plan.summary(source).attachments_copied;
     if mode == Mode::Personal && !premium && files > 0 {
@@ -1059,6 +1068,7 @@ mod tests {
         let traits = |hidden_item_types| ServerTraits {
             hidden_item_types,
             items_need_collections: false,
+            organization_updates_safe: true,
         };
         let refused = check_source_shows(&plan(DeleteReason::Stale), &dest, &traits(vec![6, 7, 8]));
         assert!(format!("{:#}", refused.unwrap_err()).contains("(copy)"));
