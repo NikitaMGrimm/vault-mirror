@@ -44,9 +44,9 @@ folders or collections either; delete an empty one yourself.
   stays there.
 - If you delete a copy's marker, the item is no longer a copy, and the next run
   makes a new one next to it.
-- If you clone a copy and change the clone, runs warn that it still has the
-  marker. Remove its `vault-mirror` field to keep it. An unchanged clone is
-  removed as a duplicate.
+- A clone keeps the copy's marker. Remove its `vault-mirror` field to keep
+  it independent. Runs delete duplicates only when both copies are complete,
+  unchanged, and record the same source version.
 
 ### After an outage
 

@@ -28,6 +28,7 @@ How each tool reads it:
 | vault-mirror binary | `vault-mirror --env-file vault-mirror.env <command>` |
 
 A variable set in the environment wins over the same name in the settings file.
+`--env-file` reports unknown setting names as errors.
 
 ### Secrets in files
 
