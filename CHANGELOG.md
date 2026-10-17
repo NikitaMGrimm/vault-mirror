@@ -4,6 +4,43 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.7.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.6.1...v0.7.0) - 2026-10-17
+
+### Changed
+
+- [**breaking**] Each snapshot is now one directory in the backup directory.
+  Backups made by older versions are no longer read; `key.age` still works.
+  Snapshots older than a day thin out to one a day and expire after
+  `RETENTION_DAYS`, except the newest. An unchanged vault gets no new snapshot.
+- [**breaking**] Attachments are always backed up and checked after upload.
+- [**breaking**] Old snapshots are always pruned.
+
+### Removed
+
+- [**breaking**] `MAX_DELETE_PERCENT`. A run still stops when it would delete
+  every copy or when the source and destination look swapped.
+- [**breaking**] `BACKUP_RECIPIENTS`, `--identity`, `run --dry-run`,
+  `INTERVAL` (use `SCHEDULE`), `CONCURRENCY`, `BITWARDEN_CLIENT_VERSION`,
+  `ENABLE_PRUNING`, `MIN_FILES`, the hold files after a failed pull or a
+  restore, and the warning about `http://` server addresses. After a stopped
+  `run --pull`, runs ask you to run it again. `init` no longer mounts
+  `CA_CERT_FILE` in `compose.yaml`.
+
+### Fixed
+
+- `run --pull` copies back only what changed in the destination, only items the
+  filter selects there, and removes only source attachments a backup holds. It
+  backs up the destination again afterwards, and refuses to run without a
+  destination.
+- Restore checks uploaded attachments by content.
+- Errors about a damaged snapshot no longer quote its content.
+- A run turned away because another one holds the lock no longer overwrites the
+  status file or sends a failure notification.
+- `init` recognizes the source account under any server address.
+- `check` no longer says your destination edits are backed up.
+
+([#55](https://github.com/NikitaMGrimm/vault-mirror/pull/55))
+
 ## [0.6.1](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.6.0...v0.6.1) - 2026-10-16
 
 ### Fixed
