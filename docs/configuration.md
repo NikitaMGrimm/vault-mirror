@@ -8,7 +8,9 @@ see [Setting up by hand](#setting-up-by-hand).
 
 ## The settings file
 
-Each line is `NAME=value`. Lines starting with `#` are comments.
+Each line is `NAME=value`. Lines starting with `#` are comments. A name that
+isn't one of the [variables](#variables) below stops every command, so a
+misspelt setting can't go unnoticed.
 
 Values are taken literally, without quote or `$VARIABLES` expansion. Quotes,
 spaces, and dollar signs stay part of the value:
@@ -139,7 +141,10 @@ EXCLUDE_FOLDERS=Work/Private
 
 - A name includes the folders nested in it: `Work` also selects `Work/Infra`.
 - With `INCLUDE_FOLDERS`, items that aren't in any folder are left out.
-- A name that matches no folder gives a warning.
+- A name that matches no folder in the source stops the run before it changes
+  anything.
+- Leave out a filter you don't use. An empty value, or an empty name such as a
+  trailing comma, is an error.
 - Copies the filter no longer selects are deleted on the next run.
 - Backups always cover the whole vault.
 

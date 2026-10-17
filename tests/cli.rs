@@ -177,3 +177,30 @@ fn a_variable_that_is_not_utf8_does_not_crash_the_command() {
     assert!(!stderr.contains("panicked"), "{stderr}");
     assert_eq!(output.status.code(), Some(1), "{stderr}");
 }
+
+#[test]
+fn a_misspelt_setting_in_the_settings_file_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("vault-mirror.env");
+    for (line, named) in [
+        ("INCLUDE_FOLDER=Work", "INCLUDE_FOLDER"),
+        ("SCHEDULE_FILE=/run/secrets/schedule", "SCHEDULE_FILE"),
+        ("pass word=hunter2", "a name"),
+    ] {
+        fs::write(&settings, format!("BACKUPS_DIR=backups\n{line}\n")).unwrap();
+        let output = vault_mirror()
+            .current_dir(dir.path())
+            .arg("--env-file")
+            .arg(&settings)
+            .arg("snapshots")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{line}");
+        assert!(
+            stderr.contains(&format!("line 2 sets {named}, which is not a setting")),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("hunter2") && !stderr.contains("Work"), "{stderr}");
+    }
+}

@@ -164,7 +164,18 @@ fn parse_env_file(text: &str) -> Result<HashMap<String, String>> {
         let (name, value) = line
             .split_once('=')
             .ok_or_else(|| anyhow!("line {} is not NAME=value", number + 1))?;
-        settings.insert(name.trim().to_string(), value.to_string());
+        let name = name.trim();
+        if !config::is_setting(name) {
+            // Only a plain name is repeated: anything else may be part of a
+            // secret that lost its line break.
+            let plain = name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            bail!(
+                "line {} sets {}, which is not a setting. Check the spelling",
+                number + 1,
+                if plain { name } else { "a name" }
+            );
+        }
+        settings.insert(name.to_string(), value.to_string());
     }
     Ok(settings)
 }
