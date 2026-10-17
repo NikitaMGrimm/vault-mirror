@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/NikitaMGrimm/vault-mirror/assets/demo.gif" alt="vault-mirror checks the vaults, copies items, and finds no changes on the second run" width="860">
+  <img src="https://raw.githubusercontent.com/NikitaMGrimm/vault-mirror/assets/demo.gif" alt="vault-mirror previews the changes, backs up both vaults, copies items, and verifies the destination" width="860">
 </p>
 
 vault-mirror copies your main vault, the **source**, into a second vault, the
