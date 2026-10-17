@@ -68,7 +68,8 @@ docker compose -f sandbox/compose.yaml --profile official down
 
 ### README demo
 
-With the sandbox running and the release binary and example built, run:
+With VHS v0.12.1 and FFmpeg installed, the sandbox running, and the release
+binary and example built, run:
 
 ```sh
 python3 .github/scripts/demo.py
