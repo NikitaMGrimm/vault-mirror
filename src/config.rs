@@ -1,13 +1,8 @@
 //! Configuration, read from environment variables.
 
-use std::{collections::HashMap, fs, path::PathBuf, str::FromStr, time::Duration};
+use std::{collections::HashMap, fs, path::PathBuf, str::FromStr};
 
-use crate::{
-    api::{ClientOptions, DEFAULT_CLIENT_VERSION},
-    mirror::Filter,
-    plan::Safety,
-    store::{Protection, Retention},
-};
+use crate::{api::ClientOptions, mirror::Filter};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("{0}")]
@@ -26,17 +21,8 @@ pub struct VaultConfig {
 
 #[derive(Clone)]
 pub struct BackupConfig {
-    pub protection: Protection,
-    pub attachments: bool,
-    /// `None` when pruning is switched off.
-    pub retention: Option<Retention>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Schedule {
-    /// A five- or six-field cron expression, evaluated in `timezone`.
-    Cron(String),
-    Every(Duration),
+    pub passphrase: String,
+    pub retention_days: u32,
 }
 
 #[derive(Clone)]
@@ -45,15 +31,12 @@ pub struct Config {
     /// Absent for a backup-only setup.
     pub dest: Option<VaultConfig>,
     pub backups_dir: PathBuf,
-    /// `None` when backups are switched off.
-    pub backup: Option<BackupConfig>,
-    pub safety: Safety,
-    pub concurrency: usize,
-    pub verify_attachments: bool,
+    pub backup: BackupConfig,
     pub filter: Filter,
-    pub client_version: String,
     pub ca_cert_file: Option<PathBuf>,
-    pub schedule: Option<Schedule>,
+    /// When `daemon` runs: a five- or six-field cron expression, evaluated in
+    /// `timezone`.
+    pub schedule: Option<String>,
     pub timezone: Option<String>,
     pub notify_success_url: Option<String>,
     pub notify_failure_url: Option<String>,
@@ -115,17 +98,6 @@ impl Env<'_> {
         }
     }
 
-    fn flag(&self, name: &str, default: bool) -> Result<bool> {
-        match self.get(name).map(|value| value.to_lowercase()).as_deref() {
-            None => Ok(default),
-            Some("true" | "1" | "yes" | "on") => Ok(true),
-            Some("false" | "0" | "no" | "off") => Ok(false),
-            Some(other) => Err(ConfigError(format!(
-                "{name} must be true or false, not {other}"
-            ))),
-        }
-    }
-
     /// A comma-separated list of folder or collection names.
     fn names(&self, name: &str) -> Vec<String> {
         self.get(name)
@@ -166,45 +138,9 @@ impl Env<'_> {
             organization_id,
         }))
     }
-
-    fn protection(&self) -> Result<Protection> {
-        let passphrase = self.secret("BACKUP_PASSPHRASE")?;
-        let recipients: Vec<String> = self
-            .get("BACKUP_RECIPIENTS")
-            .map(|list| {
-                list.split([',', ' ', '\n'])
-                    .filter(|part| !part.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        match (passphrase, recipients.is_empty()) {
-            (Some(_), false) => Err(ConfigError(
-                "set either BACKUP_PASSPHRASE or BACKUP_RECIPIENTS, not both".into(),
-            )),
-            (Some(passphrase), true) => Ok(Protection::Passphrase(passphrase)),
-            (None, false) => Ok(Protection::Recipients(recipients)),
-            (None, true) => Err(ConfigError(
-                "backups need BACKUP_PASSPHRASE or BACKUP_RECIPIENTS; set BACKUP_ENABLED=false to run without backups".into(),
-            )),
-        }
-    }
-
-    fn concurrency(&self) -> Result<usize> {
-        let concurrency = self.parse("CONCURRENCY", 4)?;
-        if !(1..=32).contains(&concurrency) {
-            return Err(ConfigError("CONCURRENCY must be between 1 and 32".into()));
-        }
-        Ok(concurrency)
-    }
 }
 
 impl Config {
-    /// The configured vaults with their roles: `source`, then `dest`.
-    pub fn vaults(&self) -> impl Iterator<Item = (&VaultConfig, &'static str)> {
-        std::iter::once((&self.source, "source")).chain(self.dest.iter().map(|dest| (dest, "dest")))
-    }
-
     pub fn from_env(env: &HashMap<String, String>) -> Result<Self> {
         let env = Env(env);
         let source = env.vault("SOURCE")?.ok_or_else(|| {
@@ -219,40 +155,13 @@ impl Config {
                 ));
         }
 
-        let backup = if env.flag("BACKUP_ENABLED", true)? {
-            let protection = env.protection()?;
-            let retention = if env.flag("ENABLE_PRUNING", true)? {
-                Some(Retention {
-                    days: env.parse("RETENTION_DAYS", 30)?,
-                    keep_at_least: env.parse("MIN_FILES", 10)?,
-                })
-            } else {
-                None
-            };
-            Some(BackupConfig {
-                protection,
-                attachments: env.flag("BACKUP_ATTACHMENTS", true)?,
-                retention,
-            })
-        } else {
-            None
+        let backup = BackupConfig {
+            passphrase: env
+                .secret("BACKUP_PASSPHRASE")?
+                .ok_or_else(|| ConfigError("BACKUP_PASSPHRASE is not set".into()))?,
+            retention_days: env.parse("RETENTION_DAYS", 30)?,
         };
-        if dest.is_none() && backup.is_none() {
-            return Err(ConfigError(
-                "nothing to do: no destination vault is configured and backups are switched off"
-                    .into(),
-            ));
-        }
 
-        let max_delete_percent: Option<u32> = env
-            .get("MAX_DELETE_PERCENT")
-            .map(|_| env.parse("MAX_DELETE_PERCENT", 0))
-            .transpose()?;
-        if max_delete_percent.is_some_and(|percent| percent > 100) {
-            return Err(ConfigError(
-                "MAX_DELETE_PERCENT must be between 0 and 100".into(),
-            ));
-        }
         let folders = Filter {
             include: env.names("INCLUDE_FOLDERS"),
             exclude: env.names("EXCLUDE_FOLDERS"),
@@ -275,36 +184,15 @@ impl Config {
                 ));
             }
         };
-        let concurrency = env.concurrency()?;
-
-        let schedule = match (env.get("SCHEDULE"), env.get("INTERVAL")) {
-            (Some(_), Some(_)) => {
-                return Err(ConfigError(
-                    "set either SCHEDULE or INTERVAL, not both".into(),
-                ));
-            }
-            (Some(cron), None) => Some(Schedule::Cron(cron)),
-            (None, Some(interval)) => Some(Schedule::Every(parse_interval(&interval)?)),
-            (None, None) => None,
-        };
 
         Ok(Self {
             source,
             dest,
             backups_dir: backups_dir(env.0),
             backup,
-            safety: Safety {
-                max_delete_percent,
-                ..Safety::default()
-            },
-            concurrency,
-            verify_attachments: env.flag("VERIFY_ATTACHMENTS", true)?,
             filter,
-            client_version: env
-                .get("BITWARDEN_CLIENT_VERSION")
-                .unwrap_or_else(|| DEFAULT_CLIENT_VERSION.into()),
             ca_cert_file: env.get("CA_CERT_FILE").map(PathBuf::from),
-            schedule,
+            schedule: env.get("SCHEDULE"),
             timezone: env.get("TZ"),
             notify_success_url: env.token("NOTIFY_SUCCESS_URL")?,
             notify_failure_url: env.token("NOTIFY_FAILURE_URL")?,
@@ -332,18 +220,9 @@ pub fn vault_config(env: &HashMap<String, String>, prefix: &str) -> Result<Vault
         .ok_or_else(|| ConfigError(format!("no {} vault is configured", prefix.to_lowercase())))
 }
 
-pub fn concurrency(env: &HashMap<String, String>) -> Result<usize> {
-    Env(env).concurrency()
-}
-
 pub fn client_options(env: &HashMap<String, String>) -> Result<ClientOptions> {
     let env = Env(env);
-    let mut options = ClientOptions {
-        client_version: env
-            .get("BITWARDEN_CLIENT_VERSION")
-            .unwrap_or_else(|| DEFAULT_CLIENT_VERSION.into()),
-        ..ClientOptions::default()
-    };
+    let mut options = ClientOptions::default();
     if let Some(path) = env.get("CA_CERT_FILE") {
         options.extra_root_certs.push(
             fs::read(&path)
@@ -351,28 +230,6 @@ pub fn client_options(env: &HashMap<String, String>) -> Result<ClientOptions> {
         );
     }
     Ok(options)
-}
-
-/// Parses an interval such as `90s`, `30m`, `6h` or `1d`.
-fn parse_interval(raw: &str) -> Result<Duration> {
-    let invalid = || ConfigError(format!("INTERVAL must look like 30m, 6h or 1d, not {raw}"));
-    let split = raw
-        .find(|c: char| !c.is_ascii_digit())
-        .ok_or_else(invalid)?;
-    let (number, unit) = raw.split_at(split);
-    let number: u64 = number.parse().map_err(|_| invalid())?;
-    let seconds = match unit.trim() {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86400,
-        _ => return Err(invalid()),
-    };
-    let total = number.checked_mul(seconds).ok_or_else(invalid)?;
-    if total < 60 {
-        return Err(ConfigError("INTERVAL must be at least one minute".into()));
-    }
-    Ok(Duration::from_secs(total))
 }
 
 #[cfg(test)]
@@ -424,20 +281,8 @@ mod tests {
         assert_eq!(config.source.server, "https://vault.bitwarden.com");
         assert_eq!(config.source.password, " source password ");
         assert_eq!(config.dest.as_ref().unwrap().client_id, "user.dest");
-        let backup = config.backup.unwrap();
-        assert!(
-            matches!(backup.protection, Protection::Passphrase(ref p) if p == "backup passphrase")
-        );
-        assert!(backup.attachments);
-        assert_eq!(
-            backup.retention,
-            Some(Retention {
-                days: 30,
-                keep_at_least: 10
-            })
-        );
-        assert_eq!(config.safety, Safety::default());
-        assert_eq!(config.concurrency, 4);
+        assert_eq!(config.backup.passphrase, "backup passphrase");
+        assert_eq!(config.backup.retention_days, 30);
         assert!(config.schedule.is_none());
         assert_eq!(config.backups_dir, PathBuf::from("backups"));
     }
@@ -452,14 +297,6 @@ mod tests {
         ]))
         .unwrap();
         assert!(config.dest.is_none());
-        let mut nothing = without(&[
-            "DEST_SERVER",
-            "DEST_CLIENT_ID",
-            "DEST_CLIENT_SECRET",
-            "DEST_PASSWORD",
-        ]);
-        nothing.insert("BACKUP_ENABLED".into(), "false".into());
-        assert!(error(nothing).contains("nothing to do"));
     }
 
     #[test]
@@ -552,30 +389,16 @@ mod tests {
             config.notify_failure_url.as_deref(),
             Some("https://ntfy.example.com/topic")
         );
-        assert!(
-            matches!(config.backup.unwrap().protection, Protection::Passphrase(ref p) if p == " backup passphrase\t")
-        );
+        assert_eq!(config.backup.passphrase, " backup passphrase\t");
         assert!(error(with(&[("DEST_PASSWORD", "")])).contains("DEST_PASSWORD is not set"));
     }
 
     #[test]
-    fn backups_need_exactly_one_kind_of_key() {
-        assert!(
-            error(without(&["BACKUP_PASSPHRASE"]))
-                .contains("BACKUP_PASSPHRASE or BACKUP_RECIPIENTS")
+    fn backups_need_a_passphrase() {
+        assert_eq!(
+            error(without(&["BACKUP_PASSPHRASE"])),
+            "BACKUP_PASSPHRASE is not set"
         );
-        assert!(error(with(&[("BACKUP_RECIPIENTS", "age1abc")])).contains("not both"));
-
-        let mut recipients = without(&["BACKUP_PASSPHRASE"]);
-        recipients.insert("BACKUP_RECIPIENTS".into(), "age1abc, age1def".into());
-        let config = Config::from_env(&recipients).unwrap();
-        assert!(
-            matches!(config.backup.unwrap().protection, Protection::Recipients(ref r) if r == &["age1abc", "age1def"])
-        );
-
-        let mut disabled = without(&["BACKUP_PASSPHRASE"]);
-        disabled.insert("BACKUP_ENABLED".into(), "false".into());
-        assert!(Config::from_env(&disabled).unwrap().backup.is_none());
     }
 
     #[test]
@@ -598,52 +421,12 @@ mod tests {
             Some("backup passphrase")
         );
         assert!(client_options(&values).is_ok());
-        assert_eq!(concurrency(&values).unwrap(), 4);
-        values.insert("CONCURRENCY".into(), "0".into());
-        assert!(concurrency(&values).is_err());
     }
 
     #[test]
     fn tuning_values_are_validated() {
-        let config = Config::from_env(&with(&[
-            ("ENABLE_PRUNING", "false"),
-            ("MAX_DELETE_PERCENT", "20"),
-            ("CONCURRENCY", "8"),
-            ("VERIFY_ATTACHMENTS", "no"),
-            ("BACKUP_ATTACHMENTS", "0"),
-        ]))
-        .unwrap();
-        let backup = config.backup.unwrap();
-        assert!(backup.retention.is_none() && !backup.attachments);
-        assert_eq!(config.safety.max_delete_percent, Some(20));
-        assert_eq!(config.concurrency, 8);
-        assert!(!config.verify_attachments);
-
-        assert!(error(with(&[("MAX_DELETE_PERCENT", "101")])).contains("between 0 and 100"));
-        assert!(error(with(&[("CONCURRENCY", "0")])).contains("between 1 and 32"));
+        let config = Config::from_env(&with(&[("RETENTION_DAYS", "7")])).unwrap();
+        assert_eq!(config.backup.retention_days, 7);
         assert!(error(with(&[("RETENTION_DAYS", "soon")])).contains("RETENTION_DAYS"));
-        assert!(error(with(&[("ENABLE_PRUNING", "maybe")])).contains("true or false"));
-    }
-
-    #[test]
-    fn schedules_are_a_cron_expression_or_an_interval() {
-        let cron =
-            Config::from_env(&with(&[("SCHEDULE", "0 3 * * *"), ("TZ", "Europe/Berlin")])).unwrap();
-        assert_eq!(cron.schedule, Some(Schedule::Cron("0 3 * * *".into())));
-        assert_eq!(cron.timezone.as_deref(), Some("Europe/Berlin"));
-        let every = Config::from_env(&with(&[("INTERVAL", "6h")])).unwrap();
-        assert_eq!(
-            every.schedule,
-            Some(Schedule::Every(Duration::from_secs(6 * 3600)))
-        );
-
-        assert!(error(with(&[("SCHEDULE", "0 3 * * *"), ("INTERVAL", "6h")])).contains("not both"));
-        assert!(error(with(&[("INTERVAL", "10s")])).contains("at least one minute"));
-        for invalid in ["6", "h", "6 hours", "-1h"] {
-            assert!(
-                error(with(&[("INTERVAL", invalid)])).contains("INTERVAL must look like"),
-                "{invalid}"
-            );
-        }
     }
 }

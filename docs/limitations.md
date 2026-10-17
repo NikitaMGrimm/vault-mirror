@@ -12,11 +12,8 @@ Either side can be any of these:
 
 ## Accounts
 
-vault-mirror logs in with an account's API key and unlocks the vault with its
-master password, like Bitwarden's own command-line client. An account without
-a master password can't be used: one in an organization that unlocks with
-single sign-on and trusted devices or Key Connector. Use an account that has a
-master password on that side.
+vault-mirror needs an account with a master password. An account that unlocks
+with single sign-on and trusted devices or Key Connector can't be used.
 
 ## What isn't copied
 
@@ -30,44 +27,23 @@ schedule.
 
 ## Fidelity
 
-Runs stop if a known encrypted item field contains unreadable data. Check that
-item in a trusted client or recover it from a backup before retrying.
+Folders and collections are matched by name, so two with the same name in the
+source share one in the destination.
 
-Folders and collections are matched by name. Two source containers with the
-same name can merge into one destination container. An existing collection's
-external ID is kept, even when the source uses another value. Organization
-permissions and membership are not reconstructed.
-
-Item data includes stored passkey fields. The tests check that those fields
-survive copying. They do not demonstrate a successful WebAuthn sign-in with a
-copied passkey. Test any recovery method you rely on with the relevant service
-and Bitwarden client.
-
-A run verifies item content and attachments that it transfers. It does not
-download every unchanged destination attachment for a complete content audit.
-
-An unsuccessful attachment upload keeps its new server registration because
-the file may have arrived despite the error. Old files stay in place. If the
-new registration has no readable file, the next run stops during backup before
-it can repair the mirror. The upload error names the allocated attachment and
-item IDs. Stop scheduling, inspect that registration in a trusted client, and
-preserve every readable file. Remove only a registration confirmed to be empty
-before retrying the run.
+A run stops if it can't decrypt an item, or if a destination attachment has no
+readable file, such as after a failed upload. The error names the item or
+attachment.
 
 ## Server restrictions
 
-**Attachments need Premium on Bitwarden.** If the destination is a free personal
-account, vault-mirror copies everything else and warns how many attachments it
-skipped. They follow once the account has Premium. Organizations don't need it.
+**Attachments need Premium on Bitwarden.** A free personal destination gets
+everything else, with a warning. Organizations don't need Premium.
 
 **Bank accounts, driver's licences and passports.** Bitwarden only shows these
 item types where it has turned them on. Until it does on the destination's
 server, vault-mirror leaves them out with a warning, and `run --pull` does the
-same for the source's server. Vaultwarden always shows them.
-
-If the source stops showing a type whose copies still exist, the run stops
-before removing those copies. Restore visibility on the source before
-reconciling them.
+same for the source's server. Vaultwarden always shows them. If the source
+stops showing them, the run stops rather than delete their copies.
 
 **Organization items need a collection on Bitwarden.** Source items in no
 collection are left out, with a warning, when the destination is a Bitwarden
@@ -78,10 +54,6 @@ copied unarchived, with a warning.
 
 ## Large vaults
 
-Bitwarden's cloud accepts about 60 new items a minute when they're created one
-at a time. vault-mirror imports new personal items in bulk and waits when the
-server asks it to, but a large first run can still take a while. New
-organization items are always created one at a time.
-
-Attachments are held in memory while they're copied, so a large attachment needs
-a few times its size in free memory.
+Bitwarden's cloud rate-limits new items, so a large first run can take a while,
+especially into an organization. Attachments are held in memory while they're
+copied, so a large one needs a few times its size in free memory.

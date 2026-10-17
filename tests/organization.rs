@@ -8,7 +8,7 @@ use vault_mirror::{
     mirror::{Endpoint, MirrorOptions, pull},
     node::Node,
     restore::{RestoreOptions, restore},
-    snapshot,
+    store::{Keys, Store},
     vault::{Account, Draft, Scope, Vault},
 };
 
@@ -468,7 +468,6 @@ async fn a_pull_leaves_out_items_in_no_collection_that_the_source_refuses() -> R
         &source_vault,
         &dest_vault,
         &MirrorOptions::default(),
-        true,
         &Capture::default(),
     )
     .await?;
@@ -496,21 +495,26 @@ async fn a_restore_leaves_out_items_the_target_would_hide() -> Result<()> {
         json!({"id": id, "type": 2, "name": name, "secureNote": {"type": 0},
             "collectionIds": collection_ids})
     };
-    let snapshot = snapshot::parse(&json!({
-        "collections": [{"id": "c1", "name": "Shared"}],
-        "items": [note("i1", "Loose note", &[]), note("i2", "Shared note", &["c1"])],
-    }))?;
+    let dir = tempfile::tempdir()?;
+    let keys = Keys::open(dir.path(), "test backup passphrase")?;
+    let store = Store::new(dir.path(), "source", &keys);
+    let id = store
+        .begin(time::OffsetDateTime::now_utc())?
+        .finish(&json!({
+            "encrypted": false,
+            "collections": [{"id": "c1", "name": "Shared"}],
+            "items": [note("i1", "Loose note", &[]), note("i2", "Shared note", &["c1"])],
+            "vaultMirror": {"scope": "organization", "plainStrings": {}, "attachments": []},
+        }))?;
     let capture = Capture::default();
     let report = restore(
         &Endpoint {
             account: &dest,
             scope: dest_scope.clone(),
         },
-        &snapshot,
-        None,
+        &store.snapshot(&id),
         &RestoreOptions {
             allow_non_empty: false,
-            concurrency: 1,
         },
         &capture,
     )

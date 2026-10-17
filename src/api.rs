@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 
 /// Sent as `Bitwarden-Client-Version`. Servers hide newer item types from
 /// clients that report an old version, so this has to track current releases.
-pub const DEFAULT_CLIENT_VERSION: &str = "2026.9.0";
+const CLIENT_VERSION: &str = "2026.9.0";
 
 /// The Linux CLI device type, the client this tool stands in for.
 const DEVICE_TYPE: &str = "25";
@@ -172,43 +172,6 @@ impl ServerUrls {
     }
 }
 
-/// Whether a server address uses plain `http://` for a host beyond this
-/// machine and the local network, which sends the API key and access tokens
-/// across the internet unencrypted. Docker service names, private addresses
-/// and Tailscale are where plain HTTP is common, so they don't count.
-pub fn is_plain_http_to_remote(server: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(server.trim()) else {
-        return false;
-    };
-    let Some(host) = url.host_str().filter(|_| url.scheme() == "http") else {
-        return false;
-    };
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    let local_v4 = |ip: std::net::Ipv4Addr| {
-        let tailscale = ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]);
-        ip.is_loopback() || ip.is_private() || ip.is_link_local() || tailscale
-    };
-    match host.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => !local_v4(ip),
-        Ok(std::net::IpAddr::V6(ip)) => match ip.to_ipv4_mapped() {
-            Some(ip) => !local_v4(ip),
-            None => !(ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()),
-        },
-        Err(_) => {
-            const LOCAL: [&str; 6] = [
-                ".localhost",
-                ".local",
-                ".internal",
-                ".lan",
-                ".home.arpa",
-                ".ts.net",
-            ];
-            let name = host.trim_end_matches('.').to_ascii_lowercase();
-            name.contains('.') && !LOCAL.iter().any(|suffix| name.ends_with(suffix))
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct ApiCredentials {
     pub client_id: String,
@@ -230,7 +193,6 @@ impl std::fmt::Debug for ApiCredentials {
 
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
-    pub client_version: String,
     pub timeout: Duration,
     /// Extra root certificates in PEM form, for servers behind a private CA.
     pub extra_root_certs: Vec<Vec<u8>>,
@@ -239,7 +201,6 @@ pub struct ClientOptions {
 impl Default for ClientOptions {
     fn default() -> Self {
         Self {
-            client_version: DEFAULT_CLIENT_VERSION.to_string(),
             timeout: Duration::from_secs(120),
             extra_root_certs: Vec::new(),
         }
@@ -256,7 +217,7 @@ pub fn build_http_client(options: &ClientOptions) -> Result<reqwest::Client> {
         }
     };
     header("bitwarden-client-name", "cli");
-    header("bitwarden-client-version", &options.client_version);
+    header("bitwarden-client-version", CLIENT_VERSION);
     header("device-type", DEVICE_TYPE);
     let mut builder = reqwest::Client::builder()
         .user_agent(concat!("vault-mirror/", env!("CARGO_PKG_VERSION")))
@@ -902,37 +863,6 @@ pub(crate) mod tests {
         let eu = ServerUrls::from_server("https://vault.bitwarden.eu/").unwrap();
         assert_eq!(eu.api, "https://api.bitwarden.eu");
         assert_eq!(eu.identity, "https://identity.bitwarden.eu");
-    }
-
-    #[test]
-    fn only_plain_http_beyond_the_local_network_counts_as_remote() {
-        for remote in [
-            "http://vault.example.com",
-            "http://vault.example.com:8080/bw",
-            "http://203.0.113.7",
-            "http://[2001:db8::1]",
-        ] {
-            assert!(is_plain_http_to_remote(remote), "{remote}");
-        }
-        for local in [
-            "https://vault.example.com",
-            "http://localhost:8080",
-            "http://vaultwarden",
-            "http://127.0.0.1:8080",
-            "http://192.168.1.20",
-            "http://10.0.0.5",
-            "http://172.20.0.3",
-            "http://100.101.102.103",
-            "http://[::1]:8080",
-            "http://[fd00::5]",
-            "http://[::ffff:127.0.0.1]",
-            "http://vault.lan",
-            "http://nas.local",
-            "http://vault.home.arpa",
-            "http://vault.tailnet-1234.ts.net",
-        ] {
-            assert!(!is_plain_http_to_remote(local), "{local}");
-        }
     }
 
     #[test]

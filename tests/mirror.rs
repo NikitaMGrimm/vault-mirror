@@ -1103,10 +1103,10 @@ async fn archived_items_with_attachments_stay_archived() -> Result<()> {
     Ok(())
 }
 
-/// A first run that creates more than a few items imports them in bulk, and
-/// the result is the same as creating them one by one.
+/// A first run that creates more items than are created one at a time
+/// mirrors them all.
 #[tokio::test]
-async fn many_new_items_are_imported_in_bulk() -> Result<()> {
+async fn a_first_run_with_many_new_items_mirrors_them_all() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };

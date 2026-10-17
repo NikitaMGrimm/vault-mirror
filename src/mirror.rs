@@ -1,7 +1,7 @@
 //! Makes a destination vault match a source vault.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -13,7 +13,7 @@ use crate::{
     api::ApiError,
     plan::{self, DeleteReason, Mode, Plan, Safety, Summary, comparable, differing_paths},
     text::count,
-    vault::{Account, Draft, Item, Scope, ServerTraits, Vault},
+    vault::{Account, Draft, Item, Scope, ServerTraits, Vault, WRITES_AT_ONCE},
 };
 
 /// Receives progress lines. Messages never contain vault content, only
@@ -60,21 +60,13 @@ impl<'a> Tally<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MirrorOptions {
     /// Work out and report the plan, but change nothing.
     pub dry_run: bool,
     pub safety: Safety,
-    /// How many item writes run at once.
-    pub concurrency: usize,
-    /// Download every copied attachment from the destination again and
-    /// compare it with what was read from the source.
-    pub verify_attachments: bool,
     /// The folders, or in an organization the collections, to mirror.
     pub filter: Filter,
-    /// A backup of the destination was saved before this mirror, so it holds
-    /// whatever the mirror replaces.
-    pub dest_backed_up: bool,
 }
 
 /// Names of folders, or of collections in an organization, that select what
@@ -145,19 +137,6 @@ impl Filter {
     }
 }
 
-impl Default for MirrorOptions {
-    fn default() -> Self {
-        Self {
-            dry_run: false,
-            safety: Safety::default(),
-            concurrency: 4,
-            verify_attachments: true,
-            filter: Filter::default(),
-            dest_backed_up: false,
-        }
-    }
-}
-
 /// One side of a mirror: an unlocked account and the part of it to work on.
 pub struct Endpoint<'a> {
     pub account: &'a Account,
@@ -170,9 +149,6 @@ pub struct Outcome {
     /// False for a dry run and for a run that found nothing to do.
     pub changed: bool,
     pub warnings: Vec<String>,
-    /// Full source states captured before the forward mirror, for guarded
-    /// marker cleanup after a pull.
-    pub cleanup_source_items: Vec<Item>,
 }
 
 /// A run that failed, with the phase it failed in for the status file.
@@ -205,27 +181,6 @@ pub async fn mirror_onto(
     options: &MirrorOptions,
     reporter: &dyn Reporter,
 ) -> Result<Outcome, MirrorError> {
-    mirror_after_pull(
-        source,
-        dest,
-        dest_vault,
-        options,
-        reporter,
-        &BTreeSet::new(),
-    )
-    .await
-}
-
-/// Mirrors after a successful pull, allowing only its verified source items
-/// to finish synchronizing their attachment markers.
-pub async fn mirror_after_pull(
-    source: &Endpoint<'_>,
-    dest: &Endpoint<'_>,
-    dest_vault: Option<Vault>,
-    options: &MirrorOptions,
-    reporter: &dyn Reporter,
-    verified_source_ids: &BTreeSet<String>,
-) -> Result<Outcome, MirrorError> {
     let mut run = Run {
         dest_vault,
         source,
@@ -237,15 +192,12 @@ pub async fn mirror_after_pull(
         warnings: Vec::new(),
         archive_unsupported: false,
         copy_attachments: true,
-        verified_source_ids: verified_source_ids.clone(),
-        cleanup_source_items: Vec::new(),
     };
     match run.execute().await {
         Ok(changed) => Ok(Outcome {
             summary: run.summary.unwrap_or_default(),
             changed,
             warnings: run.warnings,
-            cleanup_source_items: run.cleanup_source_items,
         }),
         Err(error) => Err(MirrorError {
             stage: run.stage,
@@ -260,60 +212,6 @@ pub async fn mirror_after_pull(
 pub struct Pulled {
     pub summary: Summary,
     pub warnings: Vec<String>,
-    /// The source items `unmark` may take the markers off once the mirror
-    /// after the pull has run: those this pull wrote, and those that an
-    /// earlier pull finished and the filter selects.
-    pub cleanup_source_ids: BTreeSet<String>,
-}
-
-/// Why a pull cannot bring back a destination item as it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Unpullable {
-    /// The filter leaves out the item or its source item, so the pull must not
-    /// write it, and the mirror after it would delete or replace it.
-    Filtered,
-    /// A copy whose source item is deleted or in the trash, so the mirror
-    /// after the pull would delete it.
-    SourceGone,
-    /// The source server would not show the item's type.
-    HiddenType,
-    /// The source server requires a collection, and the filter selects none.
-    NoCollection,
-    /// The source account cannot take its attachments.
-    NoPremium,
-}
-
-impl Unpullable {
-    fn reason(self, mode: Mode) -> &'static str {
-        match (self, mode) {
-            (Self::Filtered, Mode::Personal) => {
-                "INCLUDE_FOLDERS or EXCLUDE_FOLDERS leaves out them or their source items"
-            }
-            (Self::Filtered, Mode::Organization) => {
-                "INCLUDE_COLLECTIONS or EXCLUDE_COLLECTIONS leaves out them or their source items"
-            }
-            (Self::SourceGone, _) => "their source items are deleted or in the trash",
-            (Self::HiddenType, _) => {
-                "they are bank accounts, driver's licences or passports, which the source server \
-                 does not show yet"
-            }
-            (Self::NoCollection, _) => {
-                "they are in no collection the filter selects, which the source server requires"
-            }
-            (Self::NoPremium, _) => {
-                "they have attachments, and the source account has no premium subscription, \
-                 which Bitwarden requires for attachments"
-            }
-        }
-    }
-}
-
-fn refuse<'a>(
-    unpullable: &mut BTreeMap<Unpullable, Vec<&'a str>>,
-    why: Unpullable,
-    item: &'a Item,
-) {
-    unpullable.entry(why).or_default().push(&item.id);
 }
 
 /// Up to five ids, and how many more there are.
@@ -324,604 +222,314 @@ fn listed(ids: &[&str]) -> String {
     }
 }
 
-/// Copies into the source what changed in the destination since vault-mirror
-/// wrote it, for when the destination was used while the source was down.
-/// Edited copies replace their originals, and items vault-mirror didn't make
-/// are added. Nothing is deleted. The vaults are the ones backed up, and every
-/// write names the revision it replaces, so the server refuses to overwrite a
-/// source edit made since. `backed_up` says whether a backup holds what this
-/// replaces.
+/// Copies into the source what the mirror would otherwise overwrite or delete
+/// in the destination: copies changed there since vault-mirror wrote them,
+/// and items vault-mirror didn't make. This is for when the destination was
+/// used while the source was down. Only what the filter selects is pulled,
+/// and nothing is deleted.
 ///
-/// The filter bounds every write. Before the first one, the pull checks that
-/// it can bring back every changed destination item that the mirror after it
-/// would replace or delete, and changes nothing if it cannot. An added item
-/// that the source cannot take is left out with a warning instead, as the
-/// mirror leaves it alone.
-///
-/// Each item it writes gets a marker naming the destination item, so that the
-/// mirror after it pairs the two even when it is interrupted and run again.
-/// The pull reads each item back, as a server can drop part of a write.
-/// `unmark` removes the markers once the mirror has run.
-///
-/// A failed pull can leave a source item holding only part of what it wrote,
-/// and calling this again can take that for an edit made in the source. The
-/// caller must persist a recovery hold before calling this, keep it through
-/// the mirror and `unmark`, and release it only when all of them succeed.
-/// `run --pull` does this in its backup directory.
+/// Each item is checked in the source once written, and its destination item
+/// then becomes the copy of it, so the mirror after the pull doesn't copy it
+/// back.
 pub async fn pull(
     source: &Endpoint<'_>,
     dest: &Endpoint<'_>,
     source_vault: &Vault,
     dest_vault: &Vault,
     options: &MirrorOptions,
-    backed_up: bool,
     reporter: &dyn Reporter,
 ) -> Result<Pulled> {
     let mode = mode(&source.scope, &dest.scope)?;
     ensure_distinct(source, dest, source_vault, dest_vault)?;
-    // The mirror checks this too, but only after the pull has changed the
-    // source.
     let mut selected_source = source_vault.clone();
     options.filter.apply(&mut selected_source, mode);
-    plan::check_safety(
-        &plan::plan(&selected_source, dest_vault, mode),
-        &options.safety,
-    )?;
-    let plan = plan::plan(source_vault, dest_vault, mode);
     let mut selected_dest = dest_vault.clone();
     options.filter.apply(&mut selected_dest, mode);
-    // Destination items as the filter selects them, with only the selected
-    // collections.
-    let projected: HashMap<&str, &Item> = (selected_dest.items.iter())
-        .map(|item| (item.id.as_str(), item))
-        .collect();
-    let in_source: HashSet<&str> = (selected_source.items.iter())
-        .map(|item| item.id.as_str())
-        .collect();
-    let mut source_folders: HashMap<String, String> = (source_vault.folders.iter())
-        .map(|f| (f.name.clone(), f.id.clone()))
-        .collect();
-    let mut source_collections: HashMap<String, String> = (source_vault.collections.iter())
-        .map(|c| (c.name.clone(), c.id.clone()))
-        .collect();
+    // What the mirror after the pull would do, checked before the pull
+    // changes the source.
+    let plan = plan::plan(&selected_source, dest_vault, mode);
+    plan::check_safety(&plan, &options.safety)?;
     let traits = source
         .account
         .server_traits()
         .await
         .context("reading the source server's settings")?;
-    let mut unpullable: BTreeMap<Unpullable, Vec<&str>> = BTreeMap::new();
 
-    // Source items that name a destination item come from an earlier pull.
-    let mut linked = HashMap::new();
-    for item in source_vault.items.iter().filter(|item| !item.in_trash) {
-        if let Some(marker) = plan::marker_of(item)
-            && let Some(previous) = linked.insert(marker.source_id.clone(), item)
-            && (marker.files_pending()
-                || plan::marker_of(previous).is_some_and(|m| m.files_pending()))
-        {
-            bail!(
-                "source items {} and {} both name destination item {}; reconcile their markers before pulling, so the pull changed nothing",
-                previous.id,
-                item.id,
-                marker.source_id
-            );
-        }
+    // Destination items to bring back, each with the source item it changes.
+    // Only what the filter selects in the destination comes back: an edit
+    // in an excluded folder or collection stays out of the source.
+    let selected: HashSet<&str> = (selected_dest.items.iter())
+        .map(|item| item.id.as_str())
+        .collect();
+    let mut items: Vec<(&Item, Option<(&Item, &plan::Update)>)> = Vec::new();
+    for update in (plan.updates.iter()).filter(|update| {
+        update.changed_in_dest() && selected.contains(dest_vault.items[update.dest].id.as_str())
+    }) {
+        let original = &selected_source.items[plan.entries[update.entry].source];
+        let copy = &dest_vault.items[update.dest];
+        items.push((copy, Some((original, update))));
     }
-    // Items vault-mirror didn't make, each with its source item if an earlier
-    // pull made one but stopped before it finished.
-    let mut added: Vec<(&Item, Option<&Item>)> = Vec::new();
-    let mut halfway: HashSet<&str> = HashSet::new();
-    for item in
-        (dest_vault.items.iter()).filter(|item| !item.in_trash && plan::marker_of(item).is_none())
-    {
-        let selected = projected.contains_key(item.id.as_str());
-        let Some(&made) = linked.get(&item.id) else {
-            if selected {
-                added.push((item, None));
-            }
-            continue;
-        };
-        if !plan::marker_of(made).is_some_and(|marker| marker.files_pending()) {
-            continue;
-        }
-        halfway.insert(item.id.as_str());
-        // Finishing it writes to the source item. Leaving it lets the mirror
-        // pair the two and replace the destination item with the unfinished
-        // source item.
-        match (selected, in_source.contains(made.id.as_str())) {
-            (true, true) => added.push((item, Some(made))),
-            (false, false) => {}
-            _ => refuse(&mut unpullable, Unpullable::Filtered, item),
-        }
-    }
-
-    // Without these, an item the source hides would be added again on every
-    // pull, and one it refuses would stop every pull. A resumed item cannot
-    // be left out, as the mirror would replace it with its unfinished source
-    // item.
+    let changed = items.len();
+    // A new source item the source would not show would be added again on
+    // every pull.
     let mut left_out = 0;
-    let mut uploads: Vec<&Item> = Vec::new();
-    let mut additions = Vec::new();
-    for (item, made) in added {
-        let kept = kept_by_resumption(dest_vault, item, made, mode);
+    let mut add = |item: &'_ Item| {
         let homeless = mode == Mode::Organization
             && traits.items_need_collections
-            && collection_names(&selected_dest, projected[item.id.as_str()], mode).is_empty();
-        let unfit = match kept {
-            Some(_) => None,
-            None if traits.hides(item) => Some(Unpullable::HiddenType),
-            None if homeless => Some(Unpullable::NoCollection),
-            None => None,
-        };
-        match (unfit, made) {
-            (Some(_), None) => left_out += 1,
-            (Some(why), Some(_)) => refuse(&mut unpullable, why, item),
-            (None, _) => {
-                if !item.attachments.is_empty() {
-                    uploads.push(item);
-                }
-                additions.push((item, made, kept));
-            }
+            && item.collection_ids.is_empty();
+        let shown = !traits.hides(item) && !homeless;
+        if !shown {
+            left_out += 1;
+        }
+        shown
+    };
+    // A changed copy whose source item is gone comes back as a new item.
+    for delete in (plan.deletes.iter()).filter(|delete| {
+        delete.changed_in_dest && selected.contains(dest_vault.items[delete.dest].id.as_str())
+    }) {
+        let copy = &dest_vault.items[delete.dest];
+        if add(copy) {
+            items.push((copy, None));
         }
     }
+    // Items vault-mirror didn't make, except the originals of copies made the
+    // other way round.
+    let originals: HashSet<String> = (source_vault.items.iter())
+        .filter_map(plan::marker_of)
+        .map(|marker| marker.source_id)
+        .collect();
+    for item in &selected_dest.items {
+        if item.in_trash || plan::marker_of(item).is_some() || originals.contains(&item.id) {
+            continue;
+        }
+        if add(item) {
+            let item = dest_vault.items.iter().find(|real| real.id == item.id);
+            items.extend(item.map(|item| (item, None)));
+        }
+    }
+
     let mut pulled = Pulled::default();
+    let mut warn = |warning: String| {
+        reporter.warn(&warning);
+        pulled.warnings.push(warning);
+    };
     if left_out > 0 {
-        let warning = format!(
+        warn(format!(
             "Left {} out of the pull because the source server would not show them: bank \
              accounts, driver's licences and passports are not shown yet, and organization \
              items must be in a collection.",
             count(left_out, "item")
-        );
-        reporter.warn(&warning);
-        pulled.warnings.push(warning);
+        ));
     }
-
-    let changed: Vec<&plan::Update> = (plan.updates.iter())
-        .filter(|update| {
-            update.changed_in_dest() && !halfway.contains(dest_vault.items[update.dest].id.as_str())
-        })
-        .collect();
-    for update in &changed {
-        let original = &source_vault.items[plan.entries[update.entry].source];
-        let copy = &dest_vault.items[update.dest];
-        // In an individual vault, an edit brings the copy's folder along, and
-        // with it the original.
-        let moves = mode == Mode::Personal && update.content_changed_in_dest;
-        if !in_source.contains(original.id.as_str())
-            || (moves && !projected.contains_key(copy.id.as_str()))
-        {
-            refuse(&mut unpullable, Unpullable::Filtered, copy);
-        } else if update.content_changed_in_dest && traits.hides(copy) {
-            refuse(&mut unpullable, Unpullable::HiddenType, copy);
-        }
-        if update.files_changed_in_dest && !copy.attachments.is_empty() {
-            uploads.push(copy);
-        }
-    }
-    for delete in plan.deletes.iter().filter(|delete| delete.changed_in_dest) {
-        let copy = &dest_vault.items[delete.dest];
-        refuse(&mut unpullable, Unpullable::SourceGone, copy);
-    }
-    // Organizations pay for attachments themselves.
-    if mode == Mode::Personal && !source.account.premium {
-        for item in uploads {
-            refuse(&mut unpullable, Unpullable::NoPremium, item);
-        }
-    }
-    if !unpullable.is_empty() {
-        let total: usize = unpullable.values().map(Vec::len).sum();
-        let reasons: Vec<String> = (unpullable.iter())
-            .map(|(why, ids)| format!("{} ({})", why.reason(mode), listed(ids)))
-            .collect();
-        bail!(
-            "the pull cannot bring back {} as {}, so it changed nothing: {}. Fix that, or copy \
-             them into the source by hand, and run again",
-            count(total, "destination item"),
-            if total == 1 { "it is" } else { "they are" },
-            reasons.join("; ")
-        );
-    }
-
-    let both = (changed.iter())
-        .filter(|update| plan.changed_in_both(update, dest_vault))
+    let both = (items.iter())
+        .filter_map(|(_, changed)| *changed)
+        .filter(|(_, update)| plan.changed_in_both(update, dest_vault))
         .count();
     if both > 0 {
-        let kept = match backed_up {
-            true => ", which is in the source backup from the start of this run",
-            false => "",
-        };
-        let warning = format!(
-            "{} changed in both vaults since the last run. The destination's version \
-             replaces the source's{kept}.",
+        warn(format!(
+            "{} changed in both vaults since the last run. The destination's version replaces \
+             the source's, which is in the source backup from the start of this run.",
             count(both, "item")
-        );
-        reporter.warn(&warning);
-        pulled.warnings.push(warning);
+        ));
     }
-
-    pulled.summary.items_updated = changed.len();
-    pulled.summary.items_created = additions.len();
-    let items: Vec<String> = [
-        (additions.len(), "new item"),
-        (changed.len(), "changed item"),
+    pulled.summary.items_updated = changed;
+    pulled.summary.items_created = items.len() - changed;
+    let parts: Vec<String> = [
+        (items.len() - changed, "new item"),
+        (changed, "changed item"),
     ]
     .into_iter()
     .filter(|(n, _)| *n > 0)
     .map(|(n, noun)| count(n, noun))
     .collect();
-    match (items.is_empty(), options.dry_run) {
-        (true, _) => reporter.status("Found", "nothing to pull from the destination"),
-        (false, true) => reporter.status(
-            "Would pull",
-            &format!("{} into the source", items.join(" and ")),
-        ),
-        (false, false) => reporter.status(
+    match parts.is_empty() {
+        true => reporter.status("Found", "nothing to pull from the destination"),
+        false => reporter.status(
             "Pulling",
-            &format!("{} into the source", items.join(" and ")),
+            &format!("{} into the source", parts.join(" and ")),
         ),
     }
-    if options.dry_run {
-        return Ok(pulled);
-    }
-    pulled.cleanup_source_ids = (selected_source.items.iter())
-        .filter(|item| {
-            !item.in_trash && plan::marker_of(item).is_some_and(|marker| !marker.files_pending())
-        })
-        .map(|item| item.id.clone())
-        .collect();
 
-    let mut archiver = Archiver::default();
-    let changing: HashSet<&str> = changed
-        .iter()
-        .map(|update| {
-            source_vault.items[plan.entries[update.entry].source]
-                .id
-                .as_str()
-        })
-        .collect();
-    for original in &selected_source.items {
-        let Some(marker) = plan::marker_of(original).filter(|marker| marker.files_pending()) else {
-            continue;
-        };
-        if changing.contains(original.id.as_str()) {
-            continue;
-        }
-        let Some(copy) = dest_vault
-            .items
-            .iter()
-            .find(|item| !item.in_trash && item.id == marker.source_id)
-        else {
-            continue;
-        };
-        let draft = Draft {
-            content: original.content.clone(),
-            folder_id: original.folder_id.clone(),
-            collection_ids: original.collection_ids.clone(),
-        };
-        let files = attachment_ids(original)
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        check_pulled(
-            source,
-            original,
-            &draft,
-            &files,
-            original.archived,
-            copy,
-            mode,
-        )
-        .await?;
-        pulled.cleanup_source_ids.insert(original.id.clone());
+    let mut puller = Puller {
+        source,
+        dest,
+        source_vault,
+        dest_vault,
+        mode,
+        folders: (source_vault.folders.iter())
+            .map(|f| (f.name.clone(), f.id.clone()))
+            .collect(),
+        collections: (source_vault.collections.iter())
+            .map(|c| (c.name.clone(), c.id.clone()))
+            .collect(),
+        selected_collections: (selected_dest.collections.iter())
+            .map(|c| c.id.clone())
+            .collect(),
+        not_archived: 0,
+        archive_refusal: None,
+    };
+    for (copy, changed) in items {
+        pulled.summary.attachments_copied += puller.pull(copy, changed).await?;
     }
-    for update in changed {
-        let original = &source_vault.items[plan.entries[update.entry].source];
-        let copy = &dest_vault.items[update.dest];
-        let folder = folder_name(dest_vault, copy, mode);
-        let names = collection_names(dest_vault, copy, mode);
-        let (content, folder_id) = match (update.content_changed_in_dest, mode) {
-            (true, Mode::Personal) => (
-                copy,
-                source_folder(source, &mut source_folders, folder.as_deref()).await?,
-            ),
-            (true, Mode::Organization) => (copy, original.folder_id.clone()),
-            (false, _) => (original, original.folder_id.clone()),
-        };
-        let draft = |files: Option<&Item>| Draft {
-            content: plan::mark_copy(content, copy, folder.as_deref(), &names, mode, files),
-            folder_id: folder_id.clone(),
-            collection_ids: original.collection_ids.clone(),
-        };
-        // The files match the copy's once copied, or if neither side changed them.
-        let files = match update.files_changed_in_dest {
-            true => None,
-            false => (!update.sync_attachments).then_some(original),
-        };
-        pulled.cleanup_source_ids.insert(original.id.clone());
-        let mut written = source
-            .account
-            .update_item(&source.scope, original, &draft(None))
-            .await
-            .with_context(|| format!("updating source item {}", original.id))?;
-        let mut final_draft = draft(files);
-        let mut wanted_files = attachment_ids(original)
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        let mut wanted_archived = original.archived;
-        if update.files_changed_in_dest {
-            let old: Vec<String> = original.attachments.iter().map(|a| a.id.clone()).collect();
-            let (mut stored, copied) =
-                copy_attachments((dest, copy), (source, &written), &old, true, mode).await?;
-            pulled.summary.attachments_copied += copied;
-            // Bitwarden's server takes an item out of the archive on an upload.
-            if original.archived && !stored.archived {
-                stored = archiver.archive(source, stored, mode).await?;
-                wanted_archived = archiver.refusal.is_none();
-            }
-            wanted_files = attachment_ids(&stored)
-                .into_iter()
-                .map(str::to_string)
-                .collect();
-            final_draft = draft(Some(&stored));
-            written = stored;
-        }
-        check_pulled(
-            source,
-            &written,
-            &final_draft,
-            &wanted_files,
-            wanted_archived,
-            copy,
-            mode,
-        )
-        .await?;
-        written = source
-            .account
-            .update_item(&source.scope, &written, &final_draft)
-            .await?;
-        check_pulled(
-            source,
-            &written,
-            &final_draft,
-            &wanted_files,
-            wanted_archived,
-            copy,
-            mode,
-        )
-        .await?;
-    }
-
-    for (item, made, kept) in additions {
-        let folder = folder_name(dest_vault, item, mode);
-        let names = collection_names(dest_vault, item, mode);
-        let (content, folder_id, collection_ids) = match kept {
-            Some(made) => (made, made.folder_id.clone(), made.collection_ids.clone()),
-            None => {
-                let folder_id = match mode {
-                    Mode::Personal => {
-                        source_folder(source, &mut source_folders, folder.as_deref()).await?
-                    }
-                    Mode::Organization => None,
-                };
-                let mut collection_ids = Vec::new();
-                if let Scope::Organization(org) = &source.scope {
-                    let selected = projected[item.id.as_str()];
-                    for name in collection_names(&selected_dest, selected, mode) {
-                        if !source_collections.contains_key(&name) {
-                            let created =
-                                source.account.create_collection(org, &name, None).await?;
-                            source_collections.insert(created.name, created.id);
-                        }
-                        collection_ids.push(source_collections[&name].clone());
-                    }
-                }
-                (item, folder_id, collection_ids)
-            }
-        };
-        let draft = |files: Option<&Item>| Draft {
-            content: plan::mark_copy(content, item, folder.as_deref(), &names, mode, files),
-            folder_id: folder_id.clone(),
-            collection_ids: collection_ids.clone(),
-        };
-        let made = match made {
-            Some(made) => {
-                source
-                    .account
-                    .update_item(&source.scope, made, &draft(None))
-                    .await?
-            }
-            None => {
-                source
-                    .account
-                    .create_item(&source.scope, &draft(None))
-                    .await?
-            }
-        };
-        pulled.cleanup_source_ids.insert(made.id.clone());
-        let old: Vec<String> = made.attachments.iter().map(|a| a.id.clone()).collect();
-        let (mut stored, copied) =
-            copy_attachments((dest, item), (source, &made), &old, true, mode).await?;
-        pulled.summary.attachments_copied += copied;
-        let mut wanted_archived = stored.archived;
-        // Archived before the final marker, so that a pull that stops in
-        // between finishes the item, archive state included, when run again.
-        if item.archived && !stored.archived {
-            stored = archiver.archive(source, stored, mode).await?;
-            wanted_archived = archiver.refusal.is_none();
-        }
-        let final_draft = draft(Some(&stored));
-        let wanted = attachment_ids(&stored)
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        check_pulled(
-            source,
-            &stored,
-            &final_draft,
-            &wanted,
-            wanted_archived,
-            item,
-            mode,
-        )
-        .await?;
-        let written = source
-            .account
-            .update_item(&source.scope, &stored, &final_draft)
-            .await
-            .with_context(|| format!("updating source item {}", stored.id))?;
-        check_pulled(
-            source,
-            &written,
-            &final_draft,
-            &wanted,
-            wanted_archived,
-            item,
-            mode,
-        )
-        .await?;
-    }
-    if let Some(error) = archiver.refusal {
-        let warning = format!(
+    if let Some(error) = puller.archive_refusal {
+        warn(format!(
             "The source refused to archive {}: {error:#}",
-            count(archiver.not_archived, "item")
-        );
-        reporter.warn(&warning);
-        pulled.warnings.push(warning);
+            count(puller.not_archived, "item")
+        ));
     }
     Ok(pulled)
 }
 
-/// The source item an earlier pull made from `item` and stopped before
-/// finishing, if the pull keeps what changed in it since: it does unless
-/// `item` changed too.
-fn kept_by_resumption<'a>(
-    dest_vault: &Vault,
-    item: &Item,
-    made: Option<&'a Item>,
+/// Writes destination items into the source, one at a time.
+struct Puller<'a> {
+    source: &'a Endpoint<'a>,
+    dest: &'a Endpoint<'a>,
+    source_vault: &'a Vault,
+    dest_vault: &'a Vault,
     mode: Mode,
-) -> Option<&'a Item> {
-    let folder = folder_name(dest_vault, item, mode);
-    let names = collection_names(dest_vault, item, mode);
-    made.filter(|made| {
-        plan::marker_of(made)
-            .is_some_and(|marker| marker.content_matches(item, folder.as_deref(), &names, mode))
-    })
-}
-
-/// Reads back a source item the pull finished, and checks that the server
-/// holds what the pull wrote: `draft`'s content and folder, and the
-/// attachments `files`. A server can accept a write and drop part of it, and
-/// the mirror after the pull would copy the loss into the destination.
-///
-/// On a mismatch the item gets a pending marker naming the destination item
-/// again, which stops a run without `--pull`. The marker records what the
-/// server holds, so that the next pull writes the destination item again
-/// instead of taking that for an edit made in the source.
-async fn check_pulled(
-    source: &Endpoint<'_>,
-    written: &Item,
-    draft: &Draft,
-    files: &BTreeSet<String>,
-    archived: bool,
-    copy: &Item,
-    mode: Mode,
-) -> Result<()> {
-    let vault = source
-        .account
-        .load(&source.scope)
-        .await
-        .with_context(|| format!("checking source item {} in the vault", written.id))?;
-    let held = vault
-        .items
-        .iter()
-        .find(|item| item.id == written.id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "source item {} is missing after the pull; the destination is unchanged",
-                written.id
-            )
-        })?;
-    let wanted = Item {
-        content: draft.content.clone(),
-        ..held.clone()
-    };
-    let mut held_collections = held.collection_ids.clone();
-    let mut wanted_collections = draft.collection_ids.clone();
-    held_collections.sort();
-    wanted_collections.sort();
-    let held_files: BTreeSet<String> = held.attachments.iter().map(|a| a.id.clone()).collect();
-    if comparable(held, None, &[], mode) == comparable(&wanted, None, &[], mode)
-        && held.folder_id == draft.folder_id
-        && held_collections == wanted_collections
-        && !held.in_trash
-        && held.archived == archived
-        && held_files == *files
-    {
-        return Ok(());
-    }
-    let holds = Item {
-        id: copy.id.clone(),
-        ..held.clone()
-    };
-    let folder = folder_name(&vault, held, mode);
-    let names = collection_names(&vault, held, mode);
-    let pending = Draft {
-        content: plan::mark_copy(held, &holds, folder.as_deref(), &names, mode, None),
-        folder_id: held.folder_id.clone(),
-        collection_ids: held.collection_ids.clone(),
-    };
-    (source.account.update_item(&source.scope, held, &pending))
-        .await
-        .with_context(|| format!("marking source item {} as unfinished", held.id))?;
-    bail!(
-        "source item {} holds only part of what the pull wrote into it from destination item {}, \
-         so the source server may not support all of it. The destination item is unchanged, \
-         and a run without --pull stops at it",
-        held.id,
-        copy.id
-    );
-}
-
-/// Archives source items again after a pull wrote them, and counts those the
-/// server refuses to archive.
-#[derive(Default)]
-struct Archiver {
-    refusal: Option<anyhow::Error>,
+    /// Source folders, and in an organization collections, by name.
+    folders: HashMap<String, String>,
+    collections: HashMap<String, String>,
+    /// The destination collections the filter selects.
+    selected_collections: HashSet<String>,
     not_archived: usize,
+    archive_refusal: Option<anyhow::Error>,
 }
 
-impl Archiver {
-    /// Returns `stored` as the server holds it once archived, or unchanged
-    /// if the server refuses, now or earlier in the pull.
-    async fn archive(&mut self, source: &Endpoint<'_>, stored: Item, mode: Mode) -> Result<Item> {
-        if self.refusal.is_some() {
-            self.not_archived += 1;
-            return Ok(stored);
-        }
-        match source
-            .account
-            .set_archived(std::slice::from_ref(&stored.id), true)
-            .await
-        {
-            Ok(()) => {
-                let mut archived = source.account.get_item(&source.scope, &stored.id).await?;
-                archived.collection_ids = stored.collection_ids.clone();
-                if comparable(&archived, None, &[], mode) != comparable(&stored, None, &[], mode)
-                    || archived.folder_id != stored.folder_id
-                    || attachment_ids(&archived) != attachment_ids(&stored)
-                {
-                    bail!(
-                        "item {} changed during the run. Run again to copy it",
-                        stored.id
-                    );
-                }
-                Ok(archived)
+impl Puller<'_> {
+    /// Writes what changed in `copy` into its original, or all of it into a
+    /// new source item. Then makes `copy` the copy of that source item, and
+    /// returns how many files it copied.
+    async fn pull(
+        &mut self,
+        copy: &Item,
+        changed: Option<(&Item, &plan::Update)>,
+    ) -> Result<usize> {
+        let (source, dest, mode) = (self.source, self.dest, self.mode);
+        let original = changed.map(|(original, _)| original);
+        let (content, files) = changed.map_or((true, true), |(_, update)| {
+            (update.content_changed_in_dest, update.files_changed_in_dest)
+        });
+        let folder = folder_name(self.dest_vault, copy, mode);
+        // An edited copy keeps its original's collections.
+        let names = match original {
+            Some(original) => collection_names(self.source_vault, original, mode),
+            None => {
+                let mut selected = copy.clone();
+                selected
+                    .collection_ids
+                    .retain(|id| self.selected_collections.contains(id));
+                collection_names(self.dest_vault, &selected, mode)
             }
+        };
+        let written = match original {
+            Some(original) if !content => original.clone(),
+            _ => {
+                let folder_id = match mode {
+                    Mode::Personal => {
+                        source_folder(source, &mut self.folders, folder.as_deref()).await?
+                    }
+                    Mode::Organization => original.and_then(|original| original.folder_id.clone()),
+                };
+                let collection_ids = match (original, &source.scope) {
+                    (Some(original), _) => original.collection_ids.clone(),
+                    (None, Scope::Organization(org)) => {
+                        let mut ids = Vec::new();
+                        for name in &names {
+                            if !self.collections.contains_key(name) {
+                                let created =
+                                    source.account.create_collection(org, name, None).await?;
+                                self.collections.insert(created.name, created.id);
+                            }
+                            ids.push(self.collections[name].clone());
+                        }
+                        ids
+                    }
+                    (None, Scope::Personal) => Vec::new(),
+                };
+                let draft = Draft {
+                    content: plan::unmarked(copy),
+                    folder_id,
+                    collection_ids,
+                };
+                match original {
+                    Some(original) => {
+                        (source.account)
+                            .update_item(&source.scope, original, &draft)
+                            .await
+                    }
+                    None => source.account.create_item(&source.scope, &draft).await,
+                }
+                .with_context(|| format!("writing destination item {} into the source", copy.id))?
+            }
+        };
+        let (stored, copied) = match files {
+            true => {
+                // Only files the backup holds may go: the write's response can
+                // list one added to the source since.
+                let old: Vec<String> = (original.iter())
+                    .flat_map(|original| &original.attachments)
+                    .map(|a| a.id.clone())
+                    .collect();
+                copy_attachments((dest, copy), (source, &written), &old, mode).await?
+            }
+            false => (reread(source, &written, mode).await?, 0),
+        };
+        // A server can accept a write and keep less of it, and the mirror
+        // after the pull would copy that loss into the destination.
+        if content && comparable(&stored, None, &[], mode) != comparable(copy, None, &[], mode) {
+            bail!(
+                "source item {} did not keep all of destination item {}, so the pull stopped there",
+                stored.id,
+                copy.id
+            );
+        }
+        let archived = original.map_or(copy.archived, |original| original.archived);
+        if stored.archived != archived {
+            self.archive(&stored, archived).await?;
+        }
+        // The marker vouches for the content and files both sides now share,
+        // so the mirror after the pull brings over what changed only in the
+        // source: content, if only the files came back, and files the source
+        // replaced while only the copy's content changed.
+        let shared = Item {
+            content: copy.content.clone(),
+            ..stored.clone()
+        };
+        let files_match = changed.is_none_or(|(_, update)| files || !update.sync_attachments);
+        let marked = Draft {
+            content: plan::mark_copy(
+                copy,
+                &shared,
+                folder.as_deref(),
+                &names,
+                mode,
+                files_match.then_some(copy),
+            ),
+            folder_id: copy.folder_id.clone(),
+            collection_ids: copy.collection_ids.clone(),
+        };
+        (dest.account)
+            .update_item(&dest.scope, copy, &marked)
+            .await
+            .with_context(|| format!("updating destination item {}", copy.id))?;
+        Ok(copied)
+    }
+
+    /// Bitwarden's server takes an item out of the archive on an upload, so
+    /// the archive state is set again. A refusal is counted, not an error.
+    async fn archive(&mut self, item: &Item, archived: bool) -> Result<()> {
+        if self.archive_refusal.is_some() {
+            self.not_archived += 1;
+            return Ok(());
+        }
+        let ids = std::slice::from_ref(&item.id);
+        match self.source.account.set_archived(ids, archived).await {
+            Ok(()) => Ok(()),
             Err(error) if refused(&error) => {
                 self.not_archived += 1;
-                self.refusal = Some(error);
-                Ok(stored)
+                self.archive_refusal = Some(error);
+                Ok(())
             }
             Err(error) => Err(error),
         }
@@ -944,14 +552,13 @@ async fn source_folder(
 }
 
 /// Replaces the attachments `old` of `to`'s item, as this run last wrote it,
-/// with copies of `from`'s. The copies are uploaded and checked before `old`
+/// with copies of `from`'s. The copies are uploaded and read back before `old`
 /// is deleted, so a failed upload leaves the files it was replacing. Returns
 /// the item as the server then holds it, and how many files it copied.
 async fn copy_attachments(
     (from, from_item): (&Endpoint<'_>, &Item),
     (to, to_item): (&Endpoint<'_>, &Item),
     old: &[String],
-    verify: bool,
     mode: Mode,
 ) -> Result<(Item, usize)> {
     let mut copied = Vec::new();
@@ -978,30 +585,7 @@ async fn copy_attachments(
         ));
     }
     if !copied.is_empty() {
-        // Checked whatever `verify` says before the files they replace go.
-        let read = !old.is_empty() || verify;
-        let uploaded = reread(to, to_item, mode).await?;
-        for (id, name, digest) in &copied {
-            let found = uploaded.attachments.iter().find(|a| a.id == *id);
-            let matches = match found {
-                Some(attachment) if attachment.file_name == *name => {
-                    !read || {
-                        let data = to
-                            .account
-                            .download_attachment(&to.scope, &uploaded, attachment)
-                            .await?;
-                        <[u8; 32]>::from(Sha256::digest(&data)) == *digest
-                    }
-                }
-                _ => false,
-            };
-            if !matches {
-                bail!(
-                    "the attachments of item {} do not match what was copied",
-                    to_item.id
-                );
-            }
-        }
+        check_uploads(to, to_item, &copied, mode).await?;
     }
     for attachment_id in old {
         to.account
@@ -1019,6 +603,37 @@ async fn copy_attachments(
         );
     }
     Ok((stored, copied.len()))
+}
+
+/// Reads `item` back and fails unless it holds each `uploaded` file, by id,
+/// name and SHA-256 of its content.
+pub(crate) async fn check_uploads(
+    to: &Endpoint<'_>,
+    item: &Item,
+    uploaded: &[(String, &str, [u8; 32])],
+    mode: Mode,
+) -> Result<()> {
+    let stored = reread(to, item, mode).await?;
+    for (id, name, digest) in uploaded {
+        let found = stored.attachments.iter().find(|a| a.id == *id);
+        let matches = match found {
+            Some(attachment) if attachment.file_name == *name => {
+                let data = to
+                    .account
+                    .download_attachment(&to.scope, &stored, attachment)
+                    .await?;
+                <[u8; 32]>::from(Sha256::digest(&data)) == *digest
+            }
+            _ => false,
+        };
+        if !matches {
+            bail!(
+                "the attachments of item {} do not match what was uploaded",
+                item.id
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `item` as the server now holds it. Fails if it was edited since this run
@@ -1039,123 +654,6 @@ async fn reread(endpoint: &Endpoint<'_>, item: &Item, mode: Mode) -> Result<Item
         );
     }
     Ok(stored)
-}
-
-/// Takes the markers off the captured source items that the destination has
-/// a copy of. The caller must persist a recovery hold before calling this,
-/// and release it only on success. An interrupted write can remove a marker
-/// before verification can check what the server kept.
-pub async fn unmark(
-    source: &Endpoint<'_>,
-    dest: &Endpoint<'_>,
-    expected: &[Item],
-    concurrency: usize,
-) -> Result<usize> {
-    let mode = mode(&source.scope, &dest.scope)?;
-    let source_vault = source.account.load(&source.scope).await?;
-    let dest_vault = dest.account.load(&dest.scope).await?;
-    // A destination copy that names a source item proves the mirror paired
-    // them, whatever the source item's own marker names.
-    let paired: HashSet<String> = (dest_vault.items.iter())
-        .filter(|item| !item.in_trash)
-        .filter_map(plan::marker_of)
-        .map(|marker| marker.source_id)
-        .collect();
-    let mut marked = Vec::new();
-    for item in expected
-        .iter()
-        .filter(|item| plan::marker_of(item).is_some())
-    {
-        let held = source_vault.items.iter().find(|held| held.id == item.id);
-        if !paired.contains(&item.id) || held.is_none_or(|held| !same_state(held, item)) {
-            bail!(
-                "source item {} changed after the forward mirror; marker cleanup changed nothing",
-                item.id
-            );
-        }
-        marked.push(item);
-    }
-    // Verification needs every file's bytes from before the first rewrite.
-    let files: Vec<BTreeMap<String, [u8; 32]>> =
-        stream::iter(marked.iter().map(|item| async move {
-            let mut hashes = BTreeMap::new();
-            for attachment in &item.attachments {
-                let data = source
-                    .account
-                    .download_attachment(&source.scope, item, attachment)
-                    .await?;
-                hashes.insert(attachment.id.clone(), Sha256::digest(&data).into());
-            }
-            anyhow::Ok(hashes)
-        }))
-        .buffered(concurrency.max(1))
-        .try_collect()
-        .await?;
-    stream::iter(marked.iter().map(|item| async move {
-        let draft = Draft {
-            content: plan::unmarked(item),
-            folder_id: item.folder_id.clone(),
-            collection_ids: item.collection_ids.clone(),
-        };
-        source
-            .account
-            .update_item(&source.scope, item, &draft)
-            .await
-            .with_context(|| format!("updating source item {}", item.id))
-    }))
-    .buffer_unordered(concurrency.max(1))
-    .try_collect::<Vec<_>>()
-    .await?;
-    let vault = source
-        .account
-        .load(&source.scope)
-        .await
-        .context("checking marker cleanup in the source vault")?;
-    for (item, hashes) in marked.iter().zip(files) {
-        let held = vault
-            .items
-            .iter()
-            .find(|held| held.id == item.id)
-            .ok_or_else(|| {
-                anyhow::anyhow!("source item {} is missing after marker cleanup", item.id)
-            })?;
-        let mut collections = item.collection_ids.clone();
-        let mut held_collections = held.collection_ids.clone();
-        collections.sort();
-        held_collections.sort();
-        let mut attachments = item.attachments.clone();
-        let mut held_attachments = held.attachments.clone();
-        attachments.sort_by(|a, b| a.id.cmp(&b.id));
-        held_attachments.sort_by(|a, b| a.id.cmp(&b.id));
-        if plan::marker_of(held).is_some()
-            || comparable(held, None, &[], mode) != comparable(item, None, &[], mode)
-            || held.folder_id != item.folder_id
-            || held_collections != collections
-            || held.in_trash
-            || held.archived != item.archived
-            || held_attachments != attachments
-        {
-            bail!(
-                "source item {} changed during marker cleanup; mirroring must remain paused for reconciliation",
-                item.id
-            );
-        }
-        for attachment in &held.attachments {
-            let data = source
-                .account
-                .download_attachment(&source.scope, held, attachment)
-                .await?;
-            let hash: [u8; 32] = Sha256::digest(&data).into();
-            if hashes.get(&attachment.id) != Some(&hash) {
-                bail!(
-                    "attachment {} of source item {} changed during marker cleanup; mirroring must remain paused for reconciliation",
-                    attachment.id,
-                    item.id
-                );
-            }
-        }
-    }
-    Ok(marked.len())
 }
 
 fn ensure_distinct(
@@ -1250,15 +748,9 @@ struct Run<'a> {
     copy_attachments: bool,
     /// The destination as already read, if it was.
     dest_vault: Option<Vault>,
-    verified_source_ids: BTreeSet<String>,
-    cleanup_source_items: Vec<Item>,
 }
 
 impl Run<'_> {
-    fn mode(&self) -> Result<Mode> {
-        mode(&self.source.scope, &self.dest.scope)
-    }
-
     /// Removes source items the destination could not hold, with a warning.
     fn leave_out(&mut self, source: &mut Vault, unfit: impl Fn(&Item) -> bool, reason: &str) {
         let left_out = source
@@ -1320,7 +812,7 @@ impl Run<'_> {
     }
 
     async fn execute(&mut self) -> Result<bool> {
-        let mode = self.mode()?;
+        let mode = mode(&self.source.scope, &self.dest.scope)?;
         let loaded = self.dest_vault.take();
         let (source_vault, dest_vault) = tokio::try_join!(
             async {
@@ -1345,39 +837,6 @@ impl Run<'_> {
         ensure_distinct(self.source, self.dest, &source_vault, &dest_vault)?;
 
         self.stage = "planning";
-        let dest_ids: HashSet<&str> = dest_vault
-            .items
-            .iter()
-            .filter(|item| !item.in_trash)
-            .map(|item| item.id.as_str())
-            .collect();
-        let unfinished = source_vault
-            .items
-            .iter()
-            .filter(|item| {
-                !self.verified_source_ids.contains(&item.id)
-                    && plan::marker_of(item).is_some_and(|marker| {
-                        marker.files_pending() && dest_ids.contains(marker.source_id.as_str())
-                    })
-            })
-            .count();
-        if unfinished > 0 {
-            let n = unfinished;
-            bail!(
-                "{} in the source {} halfway through a pull, and this run would replace the \
-                 changes in {} copies with {}. Run with --pull to finish the pull",
-                count(n, "item"),
-                if n == 1 { "is" } else { "are" },
-                if n == 1 { "its" } else { "their" },
-                if n == 1 { "it" } else { "them" },
-            );
-        }
-        self.cleanup_source_items = source_vault
-            .items
-            .iter()
-            .filter(|item| self.verified_source_ids.contains(&item.id) && !item.in_trash)
-            .cloned()
-            .collect();
         let mut source_vault = source_vault;
         self.filter(&mut source_vault, mode);
         // Without these, items the destination hides could be created again
@@ -1409,7 +868,6 @@ impl Run<'_> {
             );
         }
 
-        self.stage = "planning";
         let plan = plan::plan_with(&source_vault, &dest_vault, mode, self.copy_attachments);
         check_source_shows(&plan, &dest_vault, &source_traits)?;
         if plan.attachments_withheld > 0 {
@@ -1449,13 +907,13 @@ impl Run<'_> {
         let changed = plan.updates.iter().filter(|u| u.changed_in_dest()).count();
         if changed > 0 {
             let them = if changed == 1 { "it" } else { "them" };
-            let kept = match self.options.dest_backed_up {
-                true => " Your changes are in the destination backup from the start of this run.",
-                false => "",
+            let backed_up = match self.options.dry_run {
+                true => "",
+                false => " Your changes are in the destination backup from the start of this run.",
             };
             self.warn(format!(
                 "{} changed in the destination since vault-mirror wrote {them}. A run replaces \
-                 {them} with the source version, so make lasting changes in the source.{kept}",
+                 {them} with the source version, so make lasting changes in the source.{backed_up}",
                 count(changed, "copy")
             ));
         }
@@ -1488,7 +946,6 @@ impl Run<'_> {
     ) -> Result<()> {
         let source = self.source;
         let dest = self.dest;
-        let concurrency = self.options.concurrency.max(1);
 
         self.stage = "creating folders and collections";
         let mut folder_ids = plan.folder_ids.clone();
@@ -1543,9 +1000,7 @@ impl Run<'_> {
         let writes = Tally::new(self.reporter, "Writing", drafts.len() + rewritten, "items");
         let new_items = dest
             .account
-            .create_items(&dest.scope, &drafts, &folder_names, concurrency, &|n| {
-                writes.add(n)
-            })
+            .create_items(&dest.scope, &drafts, &folder_names, &|n| writes.add(n))
             .await?;
         let created: Vec<(usize, Item)> = plan.creates.iter().copied().zip(new_items).collect();
 
@@ -1571,7 +1026,7 @@ impl Run<'_> {
                     Ok((index, item))
                 }
             }))
-            .buffer_unordered(concurrency)
+            .buffer_unordered(WRITES_AT_ONCE)
             .try_collect()
             .await?;
         if !created.is_empty() {
@@ -1600,7 +1055,6 @@ impl Run<'_> {
                 transfers.push((update.entry, item, old_attachment_ids));
             }
         }
-        let verify_attachments = self.options.verify_attachments;
         let uploads = Tally::new(
             self.reporter,
             "Copying",
@@ -1625,7 +1079,6 @@ impl Run<'_> {
                         (source, source_item),
                         (dest, dest_item),
                         &old_attachment_ids,
-                        verify_attachments,
                         mode,
                     )
                     .await?;
@@ -1642,7 +1095,7 @@ impl Run<'_> {
             },
         ))
         // Attachments are held in memory while they are re-encrypted.
-        .buffer_unordered(concurrency.min(2))
+        .buffer_unordered(2)
         .try_collect()
         .await?;
         let mut finished: HashMap<usize, Item> = HashMap::new();
@@ -1726,6 +1179,10 @@ impl Run<'_> {
             if !ids.is_empty() {
                 dest.account.trash_items(&ids).await?;
                 self.reporter.status("Deleted", &count(ids.len(), "item"));
+            }
+            // Items already gone were not deleted by this run.
+            if let Some(summary) = &mut self.summary {
+                summary.items_deleted = ids.len();
             }
         }
         if plan.folders_to_delete.is_empty() && plan.collections_to_delete.is_empty() {

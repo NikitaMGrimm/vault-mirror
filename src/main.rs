@@ -19,10 +19,10 @@ use vault_mirror::{
     app::{self, RunFlags},
     config::{self, Config},
     mirror::{Endpoint, MirrorOptions, mirror},
-    restore::{self, RestoreOptions},
+    restore::{RestoreOptions, restore},
     schedule::Timetable,
     snapshot,
-    store::{self, Keys, Store},
+    store::{self, Keys, Snapshot, Store},
     text::count,
 };
 
@@ -43,10 +43,7 @@ struct Cli {
 
 #[derive(Args, Clone, Copy)]
 struct RunArgs {
-    /// Back up and report what would change, without changing the destination.
-    #[arg(long)]
-    dry_run: bool,
-    /// Let this run delete every earlier copy, or more than MAX_DELETE_PERCENT.
+    /// Let this run delete every earlier copy.
     #[arg(long)]
     allow_mass_delete: bool,
     /// Let this run take over copies made the other way round, after you switched the source and destination.
@@ -67,7 +64,7 @@ enum Command {
     },
     /// Back up, then mirror the source into the destination, once.
     Run(RunArgs),
-    /// Keep running on SCHEDULE or every INTERVAL.
+    /// Keep running on SCHEDULE.
     Daemon,
     /// Log in to the configured vaults and report what a run would do, without changing them.
     Check,
@@ -100,12 +97,9 @@ struct SnapshotArgs {
     /// Whose backups to read from.
     #[arg(long, value_enum, default_value_t = Role::Source)]
     from: Role,
-    /// A snapshot file or name, as `snapshots` lists it, or `latest`.
+    /// A snapshot id, as `snapshots` lists it, or `latest`.
     #[arg(long, default_value = "latest")]
     snapshot: String,
-    /// An age identity file, needed when backups are made with BACKUP_RECIPIENTS.
-    #[arg(long)]
-    identity: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -216,7 +210,6 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
 
 fn flags(args: RunArgs) -> RunFlags {
     RunFlags {
-        dry_run: args.dry_run,
         allow_mass_delete: args.allow_mass_delete,
         reverse: args.reverse,
         pull: args.pull,
@@ -242,10 +235,6 @@ async fn run_and_report(config: &Config, flags: RunFlags) -> bool {
 fn finished(status: &app::Status) -> String {
     let seconds = status.duration_seconds;
     match &status.mirror {
-        _ if status.dry_run && status.pulled.is_some() => {
-            format!("dry run in {seconds:.1}s; neither vault was changed")
-        }
-        _ if status.dry_run => format!("dry run in {seconds:.1}s; the destination is unchanged"),
         Some(app::SummaryRecord {
             summary: mirror, ..
         }) => {
@@ -279,17 +268,10 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
 
 async fn daemon() -> Result<ExitCode> {
     let config = config()?;
-    let schedule = config.schedule.as_ref().ok_or_else(|| {
-        anyhow!(
-            "configuration: the daemon needs SCHEDULE (a cron expression) or INTERVAL (such as 6h)"
-        )
-    })?;
+    let schedule = (config.schedule.as_deref())
+        .ok_or_else(|| anyhow!("configuration: the daemon needs SCHEDULE, a cron expression"))?;
     let timetable = Timetable::new(schedule, config.timezone.as_deref())?;
     let mut terminate = Terminate::new()?;
-
-    if timetable.runs_at_start() {
-        run_and_report(&config, RunFlags::default()).await;
-    }
     loop {
         let next = timetable.next(chrono::Utc::now())?;
         Console::status(
@@ -371,15 +353,6 @@ fn describe_vault(vault: &vault_mirror::vault::Vault) -> String {
 /// `init` has reported the logins already.
 async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
     let started = Instant::now();
-    // `init` warned before each login already.
-    if report_logins {
-        for warning in config
-            .vaults()
-            .filter_map(|(vault, role)| app::plain_http_warning(vault, role))
-        {
-            Console::warning(&warning);
-        }
-    }
     let http = app::http_client(config)?;
     let source = app::open_account(&config.backups_dir, &http, &config.source, "source").await?;
     let source_scope = app::scope_of(&config.source);
@@ -411,7 +384,6 @@ async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
 
     let options = MirrorOptions {
         dry_run: true,
-        safety: config.safety.clone(),
         filter: config.filter.clone(),
         ..MirrorOptions::default()
     };
@@ -435,64 +407,38 @@ fn checked(started: Instant) -> String {
     )
 }
 
-fn read_keys(
-    backups: &Path,
-    env: &HashMap<String, String>,
-    identity: Option<&Path>,
-) -> Result<Keys> {
-    if let Some(path) = identity {
-        return Keys::from_identity_file(path);
-    }
-    let passphrase = config::backup_passphrase(env)?.ok_or_else(|| {
-        anyhow!("reading a backup needs BACKUP_PASSPHRASE or --identity with an age identity file")
-    })?;
+fn read_keys(backups: &Path, env: &HashMap<String, String>) -> Result<Keys> {
+    let passphrase = config::backup_passphrase(env)?
+        .ok_or_else(|| anyhow!("reading a backup needs BACKUP_PASSPHRASE"))?;
     Keys::from_key_file(backups, &passphrase)
 }
 
 fn snapshots(vault: Role) -> Result<ExitCode> {
     let backups = config::backups_dir(&settings());
     let _lock = app::lock_backups_dir(&backups)?;
-    let list = store::list(&backups, vault.name())?;
-    if list.is_empty() {
+    let ids = store::list(&backups, vault.name())?;
+    if ids.is_empty() {
         println!(
             "No snapshots of the {} vault in {}.",
             vault.name(),
             backups.display()
         );
     }
-    for snapshot in list {
-        let detail = match &snapshot.meta {
-            Some(meta) => format!(
-                "{}, {}",
-                count(meta.items, "item"),
-                count(meta.attachment_files, "attachment file")
-            ),
-            None => "no metadata".to_string(),
-        };
-        println!("{}  {detail}", snapshot.path.display());
+    for id in ids {
+        println!("{id}");
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn locate_snapshot(store: &Store<'_>, role: Role, snapshot: &str) -> Result<PathBuf> {
-    if snapshot != "latest" {
-        let path = PathBuf::from(snapshot);
-        if path.exists() {
-            return Ok(path);
-        }
-        // A file name as `snapshots` lists it.
-        return store
-            .list()?
-            .into_iter()
-            .find(|entry| entry.path.file_name() == Some(std::ffi::OsStr::new(snapshot)))
-            .map(|entry| entry.path)
-            .ok_or_else(|| anyhow!("no snapshot {snapshot} of the {} vault", role.name()));
-    }
-    store
-        .list()?
-        .pop()
-        .map(|latest| latest.path)
-        .ok_or_else(|| anyhow!("there are no snapshots of the {} vault", role.name()))
+/// The snapshot `name`, as `snapshots` lists it, or the newest for `latest`.
+fn locate_snapshot<'a>(store: &Store<'a>, role: Role, name: &str) -> Result<Snapshot<'a>> {
+    let ids = store.list()?;
+    let id = match name {
+        "latest" => ids.last(),
+        name => ids.iter().find(|id| *id == name),
+    };
+    let id = id.ok_or_else(|| anyhow!("no snapshot {name} of the {} vault", role.name()))?;
+    Ok(store.snapshot(id))
 }
 
 async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
@@ -502,25 +448,13 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
     // A run at the same time could prune the snapshot being restored, or
     // mirror into the vault being restored to.
     let _lock = app::lock_backups_dir(&backups)?;
-    let keys = read_keys(&backups, &env, args.snapshot.identity.as_deref())?;
+    let keys = read_keys(&backups, &env)?;
     let store = Store::new(&backups, args.snapshot.from.name(), &keys);
-    let path = locate_snapshot(&store, args.snapshot.from, &args.snapshot.snapshot)?;
-    let restorable = snapshot::parse(&store.read_snapshot(&path)?)?;
-    Console::status(
-        "Reading",
-        &format!(
-            "{} from {}",
-            count(restorable.items().len(), "item"),
-            path.display()
-        ),
-    );
+    let backup = locate_snapshot(&store, args.snapshot.from, &args.snapshot.snapshot)?;
 
     let http = build_http_client(&config::client_options(&env)?)?;
     let role = args.to.name();
     let target_config = config::vault_config(&env, &role.to_uppercase())?;
-    if let Some(warning) = app::plain_http_warning(&target_config, role) {
-        Console::warning(&warning);
-    }
     let account = app::open_account(&backups, &http, &target_config, role).await?;
     let target = Endpoint {
         account: &account,
@@ -528,14 +462,8 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
     };
     let options = RestoreOptions {
         allow_non_empty: args.allow_non_empty,
-        concurrency: config::concurrency(&env)?,
     };
-    let prepared = restore::prepare(&target, &restorable, Some(&store), &options).await?;
-    app::hold_after_restore(&backups)?;
-    Console::warning(
-        "Mirroring is paused by restore-hold.json. Reconcile the recovered vaults before resuming; see docs/backups.md.",
-    );
-    let report = prepared.apply(&Console).await?;
+    let report = restore(&target, &backup, &options, &Console).await?;
     Console::finished(
         &format!(
             "restore of {}, {}, {} and {} in {:.1}s",
@@ -545,7 +473,7 @@ async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
             count(report.collections_created, "new collection"),
             started.elapsed().as_secs_f64()
         ),
-        true,
+        report.items_left_out + report.items_left_unarchived + report.attachments_skipped > 0,
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -554,29 +482,19 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
     let env = settings();
     let backups = config::backups_dir(&env);
     let _lock = app::lock_backups_dir(&backups)?;
-    let keys = read_keys(&backups, &env, args.identity.as_deref())?;
+    let keys = read_keys(&backups, &env)?;
     let store = Store::new(&backups, args.from.name(), &keys);
-    let path = locate_snapshot(&store, args.from, &args.snapshot)?;
-    let document = store.read_snapshot(&path)?;
+    let backup = locate_snapshot(&store, args.from, &args.snapshot)?;
+    let document = backup.document()?;
     let restorable = snapshot::parse(&document)?;
-    let document = snapshot::importable(&document)?;
-
     if output.exists() {
         bail!("{} already exists", output.display());
     }
-    let mut files = Vec::new();
-    let mut missing = 0;
-    for item in restorable.items() {
-        for attachment in &item.attachments {
-            if attachment.storage == snapshot::AttachmentStorage::Omitted {
-                missing += 1;
-                continue;
-            }
-            let staged = store.stage_snapshot_attachment(attachment)?;
-            staged.read_plaintext()?;
-            files.push((item, attachment, staged));
-        }
+    // A damaged backup exports nothing.
+    for attachment in restorable.attachments() {
+        backup.attachment(&attachment.attachment_id)?;
     }
+
     if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
@@ -591,26 +509,20 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
         serde_json::to_vec_pretty(&document)?,
     )?;
     let mut written = 0;
-    for (item, attachment, staged) in files {
-        // Item and attachment ids keep files with the same name apart;
-        // the name itself is reduced to its final path component.
+    for attachment in restorable.attachments() {
+        // The attachment id keeps files with the same name apart; the name
+        // itself is reduced to its final path component.
         let name = Path::new(&attachment.file_name)
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "attachment".to_string());
-        let directory = output
-            .join("attachments")
-            .join(safe(&item.id))
-            .join(safe(&attachment.attachment_id));
+        let directory = output.join("attachments").join(&attachment.attachment_id);
         fs::create_dir_all(&directory)?;
-        fs::write(directory.join(name), staged.read_plaintext()?)?;
+        fs::write(
+            directory.join(name),
+            backup.attachment(&attachment.attachment_id)?,
+        )?;
         written += 1;
-    }
-    if missing > 0 {
-        Console::warning(&format!(
-            "The backup lacks the content of {} listed in the snapshot.",
-            count(missing, "attachment")
-        ));
     }
     Console::warning(&format!(
         "{} is not encrypted. Any Bitwarden client can import its export.json. Delete it when you are done.",
@@ -626,12 +538,6 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
         true,
     );
     Ok(ExitCode::SUCCESS)
-}
-
-fn safe(id: &str) -> String {
-    id.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect()
 }
 
 fn healthcheck(max_age_hours: u64) -> Result<ExitCode> {

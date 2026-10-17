@@ -1172,50 +1172,6 @@ fn deleting_every_earlier_copy_is_refused() {
 }
 
 #[test]
-fn a_delete_limit_applies_only_when_set() {
-    let dest = mirrored(&numbered(40), Mode::Personal);
-    let limited = Safety {
-        max_delete_percent: Some(50),
-        ..Safety::default()
-    };
-
-    let shrunk = plan(&numbered(5), &dest, Mode::Personal);
-    assert_eq!(check_safety(&shrunk, &Safety::default()), Ok(()));
-    assert_eq!(
-        check_safety(&shrunk, &limited),
-        Err(SafetyViolation::MassDelete {
-            deleting: 35,
-            total: 40,
-            percent: 87,
-            limit: 50
-        })
-    );
-    let confirmed = Safety {
-        allow_mass_delete: true,
-        ..limited.clone()
-    };
-    assert_eq!(check_safety(&shrunk, &confirmed), Ok(()));
-
-    // Just over half is refused, although it rounds down to the limit.
-    let large = mirrored(&numbered(200), Mode::Personal);
-    assert!(matches!(
-        check_safety(&plan(&numbered(99), &large, Mode::Personal), &limited),
-        Err(SafetyViolation::MassDelete { deleting: 101, .. })
-    ));
-
-    // Half is allowed, and so is anything at or below the floor.
-    assert_eq!(
-        check_safety(&plan(&numbered(20), &dest, Mode::Personal), &limited),
-        Ok(())
-    );
-    let small = mirrored(&numbered(12), Mode::Personal);
-    assert_eq!(
-        check_safety(&plan(&numbered(2), &small, Mode::Personal), &limited),
-        Ok(())
-    );
-}
-
-#[test]
 fn differences_are_reported_as_paths_without_values() {
     let left = json!({"content": {"name": "a", "login": {"password": "secret-1", "uris": [{"uri": "x"}]}}, "folder": null});
     let right = json!({"content": {"name": "a", "login": {"password": "secret-2", "uris": [{"uri": "y"}], "totp": "t"}}, "folder": "F"});

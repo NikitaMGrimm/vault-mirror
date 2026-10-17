@@ -187,20 +187,15 @@ impl Node {
     }
 
     /// Rebuilds a tree from plain JSON. Strings at `plain_paths` stay in the
-    /// clear; with no path list, strings that are timestamps under a key
-    /// ending in `Date` do, which is where servers keep their only clear text.
-    pub fn from_plain(value: &Value, plain_paths: Option<&[String]>) -> Self {
-        fn walk(value: &Value, key: &str, path: &mut String, plain: Option<&[String]>) -> Node {
+    /// clear.
+    pub fn from_plain(value: &Value, plain_paths: &[String]) -> Self {
+        fn walk(value: &Value, path: &mut String, plain: &[String]) -> Node {
             match value {
                 Value::Null => Node::Null,
                 Value::Bool(b) => Node::Bool(*b),
                 Value::Number(n) => Node::Number(n.clone()),
                 Value::String(s) => {
-                    let is_plain = match plain {
-                        Some(paths) => paths.iter().any(|p| p == path),
-                        None => key.ends_with("Date") && normalize_timestamp(s).is_some(),
-                    };
-                    if is_plain {
+                    if plain.iter().any(|p| p == path) {
                         Node::Text(s.clone())
                     } else {
                         Node::Secret(s.clone())
@@ -213,7 +208,7 @@ impl Node {
                         .map(|(index, item)| {
                             let length = path.len();
                             path.push_str(&format!("/{index}"));
-                            let node = walk(item, key, path, plain);
+                            let node = walk(item, path, plain);
                             path.truncate(length);
                             node
                         })
@@ -225,7 +220,7 @@ impl Node {
                             let length = path.len();
                             path.push('/');
                             path.push_str(&k.replace('~', "~0").replace('/', "~1"));
-                            let node = walk(v, k, path, plain);
+                            let node = walk(v, path, plain);
                             path.truncate(length);
                             (k.clone(), node)
                         })
@@ -233,7 +228,7 @@ impl Node {
                 ),
             }
         }
-        walk(value, "", &mut String::new(), plain_paths)
+        walk(value, &mut String::new(), plain_paths)
     }
 
     pub fn as_str(&self) -> Option<&str> {
@@ -505,39 +500,7 @@ mod tests {
             paths,
             ["/login/passwordRevisionDate", "/login/uris/0/a~1b~0c"]
         );
-        assert_eq!(Node::from_plain(&node.to_plain(), Some(&paths)), node);
-    }
-
-    #[test]
-    fn a_foreign_export_keeps_only_dated_timestamps_in_the_clear() {
-        let plain = json!({
-            "name": "2026-01-02T03:04:05Z",
-            "login": {"passwordRevisionDate": "2026-01-02T03:04:05.000Z", "password": "pw"},
-            "passwordHistory": [{"lastUsedDate": "2025-01-01T00:00:00Z", "password": "old"}],
-            "expiryDate": "next week",
-        });
-        let node = Node::from_plain(&plain, None);
-        let login = node.as_map().unwrap()["login"].as_map().unwrap();
-        assert_eq!(
-            login["passwordRevisionDate"],
-            Node::Text("2026-01-02T03:04:05.000Z".into())
-        );
-        assert_eq!(login["password"], Node::secret("pw"));
-        assert_eq!(
-            node.as_map().unwrap()["name"],
-            Node::secret("2026-01-02T03:04:05Z")
-        );
-        assert_eq!(
-            node.as_map().unwrap()["expiryDate"],
-            Node::secret("next week")
-        );
-        let history = node.as_map().unwrap()["passwordHistory"].as_list().unwrap()[0]
-            .as_map()
-            .unwrap();
-        assert_eq!(
-            history["lastUsedDate"],
-            Node::Text("2025-01-01T00:00:00Z".into())
-        );
+        assert_eq!(Node::from_plain(&node.to_plain(), &paths), node);
     }
 
     #[test]

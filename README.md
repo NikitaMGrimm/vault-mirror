@@ -39,19 +39,16 @@ another account. Without a destination, it only makes backups.
 
 - Copies every item type, custom field, passkey, password history, folder,
   collection and attachment, within [server limits](docs/limitations.md).
-- Saves backups in Bitwarden's export format. You can restore them with `age`
-  and any Bitwarden app, without vault-mirror.
+- Saves backups in Bitwarden's export format, readable with `age` and any
+  Bitwarden app.
 - Stops before runs that look like a mistake, such as swapped vaults or an empty
   source. See [safety checks](docs/how-it-works.md#safety-checks).
-- Runs as one binary or a container. It doesn't need the `bw` CLI or Node.js.
-- Connects only to your servers, their attachment storage, and a notification
-  URL if you set one.
+- Runs as one binary or a container, without the `bw` CLI or Node.js.
 
 ## Quick start
 
 You need Docker, your main account, and a second account for the destination.
-vault-mirror only changes the copies it makes there. Everything else in the
-destination stays as it is, and the source is only changed when you ask for it.
+vault-mirror only changes the copies it makes there.
 
 1. In the web vault of each account, open **Settings → Security → Keys** and
    select **View API key**. Keep both pages open.
@@ -72,7 +69,7 @@ destination stays as it is, and the source is only changed when you ask for it.
    ```
 
 vault-mirror now runs on the schedule you chose. [Getting
-started](docs/getting-started.md) explains each step and what it prints.
+started](docs/getting-started.md) explains each step.
 
 ## Installation
 
@@ -115,7 +112,7 @@ xattr -d com.apple.quarantine vault-mirror
 - [Backups and restoring](docs/backups.md)
 - [Commands and scheduling](docs/running.md)
 - [Limitations](docs/limitations.md)
-- [Questions](docs/questions.md): does it change the source, do backups pile up, and more.
+- [Questions](docs/questions.md)
 - [Security](SECURITY.md): what vault-mirror can access and what it stores.
 
 ## Getting help

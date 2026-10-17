@@ -61,23 +61,6 @@ impl Marker {
         valid.then_some(marker)
     }
 
-    /// The attachments were still being copied when the marker was written.
-    pub fn files_pending(&self) -> bool {
-        self.source_files == UNKNOWN || self.dest_files == UNKNOWN
-    }
-
-    /// `item`, in a folder or collections with these names, is as it was
-    /// when the marker was written.
-    pub fn content_matches(
-        &self,
-        item: &Item,
-        folder: Option<&str>,
-        collections: &[String],
-        mode: Mode,
-    ) -> bool {
-        self.content == content_hash(item, folder, collections, mode)
-    }
-
     fn render(&self) -> String {
         format!(
             "{} {} {} {}",
@@ -323,16 +306,10 @@ impl Entry {
         folder_ids: &HashMap<String, String>,
         collection_ids: &HashMap<String, String>,
     ) -> Result<Draft, PlanError> {
-        let item = &source.items[self.source];
-        let mut content = item.content.clone();
-        let mut fields: Vec<Node> = item
-            .fields()
-            .iter()
-            .filter(|field| !is_mirror_marker(field))
-            .cloned()
-            .collect();
-        fields.push(marker.to_field());
-        content.insert("fields".to_string(), Node::List(fields));
+        let mut content = unmarked(&source.items[self.source]);
+        if let Some(Node::List(fields)) = content.get_mut("fields") {
+            fields.push(marker.to_field());
+        }
 
         let folder_id = match &self.folder {
             Some(name) => Some(
@@ -890,41 +867,21 @@ fn hash(value: &Value) -> String {
 }
 
 /// Limits that stop a misconfigured run before it destroys a vault.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Safety {
-    /// Refuse to delete more than this share of the copies, if
-    /// set. Off by default: any fixed share is arbitrary, and the backup
-    /// taken before the run holds what it deletes.
-    pub max_delete_percent: Option<u32>,
-    /// Below this many deletions the percentage is not checked, so small
-    /// vaults can change freely.
-    pub delete_floor: usize,
-    /// Permit this run to delete every earlier copy, or more than
-    /// `max_delete_percent`.
+    /// Permit this run to delete every earlier copy.
     pub allow_mass_delete: bool,
     /// Permit this run to pair copies the other way round, after the source
     /// and destination switched roles.
     pub allow_reverse: bool,
 }
 
-impl Default for Safety {
-    fn default() -> Self {
-        Self {
-            max_delete_percent: None,
-            delete_floor: 10,
-            allow_mass_delete: false,
-            allow_reverse: false,
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SafetyViolation {
     #[error(
-        "{} in the source {} copies of destination items, so the source and destination look \
-         swapped. If you are switching them on purpose, run once with --reverse",
-        count(*.0, "item"),
-        if *.0 == 1 { "is" } else { "are" }
+        "the source holds {} copied from destination items, so the source and destination \
+         look swapped. If you are switching them on purpose, run once with --reverse",
+        count(*.0, "item")
     )]
     Reversed(usize),
     #[error(
@@ -932,50 +889,26 @@ pub enum SafetyViolation {
          looks empty or like a different vault. Pass --allow-mass-delete if this is expected"
     )]
     ReplacesEverything(usize),
-    #[error(
-        "the run would delete {deleting} of {total} copies ({percent}%), above the \
-         {limit}% limit. Pass --allow-mass-delete if this is expected"
-    )]
-    MassDelete {
-        deleting: usize,
-        total: usize,
-        percent: u32,
-        limit: u32,
-    },
 }
 
 pub fn check_safety(plan: &Plan, safety: &Safety) -> Result<(), SafetyViolation> {
     if plan.reversed > 0 && !safety.allow_reverse {
         return Err(SafetyViolation::Reversed(plan.reversed));
     }
+    let total = plan.tracked_before;
+    if safety.allow_mass_delete || total == 0 {
+        return Ok(());
+    }
     let stale = plan
         .deletes
         .iter()
         .filter(|delete| delete.reason == DeleteReason::Stale)
         .count();
-    if safety.allow_mass_delete {
-        return Ok(());
-    }
     // Not one earlier copy still has its source item: the source read as
     // empty, or is another vault. A source that changes, however much, keeps
     // at least some of its items.
-    if plan.tracked_before > 0 && stale == plan.tracked_before {
+    if stale == total {
         return Err(SafetyViolation::ReplacesEverything(stale));
-    }
-    let (deleting, total) = (stale, plan.tracked_before);
-    if let Some(limit) = safety.max_delete_percent
-        && total > 0
-        && deleting > safety.delete_floor
-        // Compared exactly: 101 of 200 is above a 50% limit.
-        && deleting as u128 * 100 > limit as u128 * total as u128
-    {
-        let percent = u32::try_from(deleting * 100 / total).unwrap_or(u32::MAX);
-        return Err(SafetyViolation::MassDelete {
-            deleting,
-            total,
-            percent,
-            limit,
-        });
     }
     Ok(())
 }

@@ -1,31 +1,28 @@
 //! Writes a snapshot back into a vault.
 //!
-//! [`prepare`] reads everything a restore needs, decides what the target can
-//! take and checks every attachment file the backup promises, without writing
-//! anything. A damaged backup stops the restore before its first write. Then
-//! [`PreparedRestore::apply`] writes, reads the target vault again, and checks
-//! every restored item against the snapshot: a server that accepts an item but
-//! keeps less of it fails the restore. Nothing written is ever undone, so a
-//! failed restore leaves its items in the target vault to inspect.
+//! Every attachment file is read from the backup before the first write, so a
+//! damaged backup restores nothing. Afterwards the target vault is read again
+//! and every restored item compared with the snapshot: a server that accepts
+//! an item but keeps less of it fails the restore. Nothing written is undone,
+//! so a failed restore leaves its items in the target vault to inspect.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, TryStreamExt, stream};
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    mirror::{Endpoint, Reporter, Tally, refused},
+    mirror::{Endpoint, Reporter, Tally, check_uploads, refused},
     node::Node,
     plan::{Mode, comparable, differing_paths},
-    snapshot::{AttachmentStorage, Restorable, RestorableItem, SnapshotAttachment},
-    store::{StagedAttachment, Store},
+    snapshot::{self, RestorableItem, SnapshotAttachment},
+    store::Snapshot,
     text::count,
-    vault::{Collection, Draft, Folder, Item, Scope, Vault},
+    vault::{Draft, Item, Scope, Vault, WRITES_AT_ONCE},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RestoreReport {
     pub items: usize,
     /// Items left out because the target server would not show them.
@@ -36,57 +33,23 @@ pub struct RestoreReport {
     pub folders_created: usize,
     pub collections_created: usize,
     pub attachments_restored: usize,
-    /// Attachments the snapshot lists but whose content the backup left out.
-    pub attachments_missing: usize,
     /// Attachments left out because the account may not upload attachments.
     pub attachments_skipped: usize,
-}
-
-impl RestoreReport {
-    /// Whether the restore left anything out, with a warning about it.
-    pub fn warned(&self) -> bool {
-        self.items_left_out
-            + self.items_left_unarchived
-            + self.attachments_missing
-            + self.attachments_skipped
-            > 0
-    }
 }
 
 pub struct RestoreOptions {
     /// Restore into a vault that already has items. They are kept, so
     /// restoring the same snapshot twice duplicates everything.
     pub allow_non_empty: bool,
-    pub concurrency: usize,
 }
 
-/// An attachment file read from the backup and checked, ready to upload.
-struct StagedFile<'a> {
-    attachment: &'a SnapshotAttachment,
-    staged: StagedAttachment<'a>,
-    length: usize,
-    sha256: [u8; 32],
-}
-
-/// A restore that has read and checked everything it needs, and written
-/// nothing yet.
-pub struct PreparedRestore<'a> {
-    target: &'a Endpoint<'a>,
-    snapshot: &'a Restorable,
-    existing: Vault,
-    items: Vec<(&'a RestorableItem, Vec<StagedFile<'a>>)>,
-    report: RestoreReport,
-    warnings: Vec<String>,
-    concurrency: usize,
-}
-
-/// Reads `target` and the backup, and decides what to restore. Writes nothing.
-pub async fn prepare<'a>(
-    target: &'a Endpoint<'a>,
-    snapshot: &'a Restorable,
-    store: Option<&'a Store<'a>>,
+pub async fn restore(
+    target: &Endpoint<'_>,
+    backup: &Snapshot<'_>,
     options: &RestoreOptions,
-) -> Result<PreparedRestore<'a>> {
+    reporter: &dyn Reporter,
+) -> Result<RestoreReport> {
+    let snapshot = &snapshot::parse(&backup.document()?)?;
     let account = target.account;
     let scope = &target.scope;
     match (snapshot.organization(), scope) {
@@ -109,24 +72,19 @@ pub async fn prepare<'a>(
             count(live, "item")
         );
     }
-
-    // Every file the backup promises is read and checked first, whatever
-    // the target would take: a damaged backup is not restored at all.
-    let staged = (snapshot.items().iter())
-        .map(|item| {
-            (item.attachments.iter())
-                .filter(|attachment| attachment.storage != AttachmentStorage::Omitted)
-                .map(|attachment| {
-                    stage(store, attachment).with_context(|| {
-                        format!(
-                            "reading attachment {} of snapshot item {} from the backup",
-                            attachment.attachment_id, item.id
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>>>()
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let read = |attachment: &SnapshotAttachment| {
+        backup
+            .attachment(&attachment.attachment_id)
+            .with_context(|| {
+                format!(
+                    "reading attachment {} of snapshot item {} from the backup",
+                    attachment.attachment_id, attachment.item_id
+                )
+            })
+    };
+    for attachment in snapshot.attachments() {
+        read(attachment)?;
+    }
 
     // Items the server would accept but not show could not be found, and
     // a second restore would create them again.
@@ -147,23 +105,19 @@ pub async fn prepare<'a>(
     // Bitwarden accepts attachments only from premium accounts.
     let attachments_allowed = *scope != Scope::Personal || account.premium;
     let mut report = RestoreReport::default();
-    let mut prepared = Vec::new();
-    for (item, files) in snapshot.items().iter().zip(staged) {
+    let mut items = Vec::new();
+    for item in snapshot.items() {
         if hidden(item) {
             report.items_left_out += 1;
-        } else if attachments_allowed {
-            report.attachments_missing += (item.attachments.iter())
-                .filter(|attachment| attachment.storage == AttachmentStorage::Omitted)
-                .count();
-            prepared.push((item, files));
-        } else {
+            continue;
+        }
+        items.push(item);
+        if !attachments_allowed {
             report.attachments_skipped += item.attachments.len();
-            prepared.push((item, Vec::new()));
         }
     }
-    let mut warnings = Vec::new();
     if report.items_left_out > 0 {
-        warnings.push(format!(
+        reporter.warn(&format!(
             "Left {} out of the restore because the target server would not show them: \
              bank accounts, driver's licences and passports are not shown yet, and organization \
              items must be in a collection.",
@@ -171,345 +125,174 @@ pub async fn prepare<'a>(
         ));
     }
     if report.attachments_skipped > 0 {
-        warnings.push(format!(
+        reporter.warn(&format!(
             "Skipped {}: the account has no premium subscription, which Bitwarden requires \
              for attachments.",
             count(report.attachments_skipped, "attachment")
         ));
     }
-    if report.attachments_missing > 0 {
-        warnings.push(format!(
-            "The backup lacks the content of {} listed in the snapshot, because it was made \
-             with BACKUP_ATTACHMENTS=false.",
-            count(report.attachments_missing, "attachment")
-        ));
-    }
-    Ok(PreparedRestore {
-        target,
-        snapshot,
-        existing,
-        items: prepared,
-        report,
-        warnings,
-        concurrency: options.concurrency.max(1),
-    })
-}
 
-/// Copies an attachment file out of the backup and checks that it decrypts.
-/// Only its length and digest stay in memory.
-fn stage<'a>(
-    store: Option<&'a Store<'a>>,
-    attachment: &'a SnapshotAttachment,
-) -> Result<StagedFile<'a>> {
-    let store = store.ok_or_else(|| anyhow!("no backup directory was given to read it from"))?;
-    let staged = store.stage_snapshot_attachment(attachment)?;
-    let data = staged.read_plaintext()?;
-    Ok(StagedFile {
-        attachment,
-        length: data.len(),
-        sha256: Sha256::digest(&data).into(),
-        staged,
-    })
-}
-
-#[derive(Clone)]
-struct RestoredFile {
-    attachment_id: String,
-    file_name: String,
-    length: usize,
-    sha256: [u8; 32],
-}
-
-#[derive(Default)]
-struct ExpectedContainers {
-    folders: Vec<Folder>,
-    collections: Vec<Collection>,
-}
-
-struct ExpectedRestoredItem {
-    item: Item,
-    files: Vec<RestoredFile>,
-}
-
-impl PreparedRestore<'_> {
-    pub async fn apply(self, reporter: &dyn Reporter) -> Result<RestoreReport> {
-        let Self {
-            target,
-            snapshot,
-            existing,
-            items,
-            mut report,
-            warnings,
-            concurrency,
-        } = self;
-        for warning in &warnings {
-            reporter.warn(warning);
-        }
-        let account = target.account;
-        let scope = &target.scope;
-
-        // Snapshot container id -> target container id, matched by name, and
-        // the containers as the target must show them afterwards.
-        let mut folder_ids: HashMap<&str, String> = HashMap::new();
-        let mut collection_ids: HashMap<&str, String> = HashMap::new();
-        let mut containers = ExpectedContainers::default();
-        match scope {
-            Scope::Personal => {
-                let mut by_name: HashMap<String, Folder> = (existing.folders.iter())
-                    .map(|f| (f.name.clone(), f.clone()))
-                    .collect();
-                for folder in snapshot.folders() {
-                    let mapped = match by_name.get(&folder.name) {
-                        Some(found) => found.clone(),
-                        None => {
-                            report.folders_created += 1;
-                            let created = account.create_folder(&folder.name).await?;
-                            by_name.insert(created.name.clone(), created.clone());
-                            created
-                        }
-                    };
-                    folder_ids.insert(&folder.id, mapped.id.clone());
-                    // Folders of the same name in the snapshot share one.
-                    if !containers.folders.contains(&mapped) {
-                        containers.folders.push(mapped);
-                    }
-                }
-            }
-            Scope::Organization(org) => {
-                let mut by_name: HashMap<String, Collection> = (existing.collections.iter())
-                    .map(|c| (c.name.clone(), c.clone()))
-                    .collect();
-                for collection in snapshot.collections() {
-                    let mapped = match by_name.get(&collection.name) {
-                        Some(found) => found.clone(),
-                        None => {
-                            report.collections_created += 1;
-                            let created = account
-                                .create_collection(
-                                    org,
-                                    &collection.name,
-                                    collection.external_id.as_deref(),
-                                )
-                                .await?;
-                            by_name.insert(created.name.clone(), created.clone());
-                            created
-                        }
-                    };
-                    collection_ids.insert(&collection.id, mapped.id.clone());
-                    if !containers.collections.contains(&mapped) {
-                        containers.collections.push(mapped);
-                    }
-                }
-            }
-        }
-
-        let drafts: Vec<Draft> = items
-            .iter()
-            .map(|(item, _)| {
-                let mut content = item.content.clone();
-                // Servers materialize these defaults. Sending them keeps
-                // verification strict for every explicitly saved value.
-                content
-                    .entry("reprompt".into())
-                    .or_insert(Node::Number(0.into()));
-                if *scope == Scope::Personal {
-                    content
-                        .entry("favorite".into())
-                        .or_insert(Node::Bool(false));
-                }
-                Draft {
-                    content,
-                    folder_id: (item.folder_id.as_deref())
-                        .and_then(|id| folder_ids.get(id))
-                        .cloned(),
-                    collection_ids: (item.collection_ids.iter())
-                        .filter_map(|id| collection_ids.get(id.as_str()))
-                        .cloned()
-                        .collect(),
-                }
-            })
-            .collect();
-        let folder_names: HashMap<String, String> = snapshot
-            .folders()
-            .iter()
-            .filter_map(|folder| {
-                Some((
-                    folder_ids.get(folder.id.as_str())?.clone(),
-                    folder.name.clone(),
-                ))
-            })
-            .collect();
-        let writes = Tally::new(reporter, "Restoring", drafts.len(), "items");
-        let created = account
-            .create_items(scope, &drafts, &folder_names, concurrency, &|n| {
-                writes.add(n)
-            })
-            .await?;
-        check_created(drafts.len(), &created, &existing)?;
-
-        let files: Vec<Vec<RestoredFile>> = stream::iter(items.iter().zip(&created).map(
-            |((item, files), created)| async move {
-                let mut restored = Vec::new();
-                for file in files {
-                    let uploaded = upload(target, created, file).await.with_context(|| {
-                        format!(
-                            "restoring attachment {} of snapshot item {}",
-                            file.attachment.attachment_id, item.id
-                        )
-                    })?;
-                    restored.push(uploaded);
-                }
-                anyhow::Ok(restored)
-            },
-        ))
-        .buffered(concurrency)
-        .try_collect()
-        .await?;
-
-        let archived: Vec<String> = items
-            .iter()
-            .zip(&created)
-            .filter(|((item, _), _)| item.archived)
-            .map(|(_, created)| created.id.clone())
-            .collect();
-        let mut archive_refused = false;
-        if !archived.is_empty()
-            && let Err(error) = account.set_archived(&archived, true).await
-        {
-            // As when mirroring, only a refusal is tolerated.
-            if !refused(&error) {
-                return Err(error.context("archiving restored items"));
-            }
-            archive_refused = true;
-            report.items_left_unarchived = archived.len();
-            reporter.warn(&format!(
-                "The server refused to archive {}, so they stay unarchived: {error:#}",
-                count(archived.len(), "restored item")
-            ));
-        }
-
-        let expected: Vec<ExpectedRestoredItem> =
-            (items.iter().zip(&drafts).zip(created).zip(files))
-                .map(
-                    |((((item, _), draft), created), files)| ExpectedRestoredItem {
-                        item: Item {
-                            folder_id: draft.folder_id.clone(),
-                            collection_ids: draft.collection_ids.clone(),
-                            archived: item.archived && !archive_refused,
-                            content: draft.content.clone(),
-                            attachments: Vec::new(),
-                            ..created
-                        },
-                        files,
-                    },
-                )
+    // Snapshot container id -> target container id, matched by name.
+    let mut folder_ids: HashMap<&str, String> = HashMap::new();
+    let mut collection_ids: HashMap<&str, String> = HashMap::new();
+    match scope {
+        Scope::Personal => {
+            let mut by_name: HashMap<String, String> = (existing.folders.iter())
+                .map(|f| (f.name.clone(), f.id.clone()))
                 .collect();
-        verify(target, &containers, &expected, concurrency).await?;
-        report.items = expected.len();
-        report.attachments_restored = expected.iter().map(|e| e.files.len()).sum();
-        Ok(report)
-    }
-}
-
-/// Uploads a staged file from the same staged copy that was checked.
-async fn upload(target: &Endpoint<'_>, item: &Item, file: &StagedFile<'_>) -> Result<RestoredFile> {
-    let data = file.staged.read_plaintext()?;
-    let sha256: [u8; 32] = Sha256::digest(&data).into();
-    if (data.len(), sha256) != (file.length, file.sha256) {
-        bail!("the copy staged from the backup changed since it was checked");
-    }
-    let attachment_id = target
-        .account
-        .upload_attachment(&target.scope, item, &file.attachment.file_name, &data)
-        .await?;
-    Ok(RestoredFile {
-        attachment_id,
-        file_name: file.attachment.file_name.clone(),
-        length: file.length,
-        sha256,
-    })
-}
-
-/// Fails unless the server reported one new item for every one it was sent.
-fn check_created(sent: usize, created: &[Item], existing: &Vault) -> Result<()> {
-    if created.len() != sent {
-        bail!(
-            "the server reported {} after being sent {}",
-            count(created.len(), "new item"),
-            count(sent, "item")
-        );
-    }
-    let before: HashSet<&str> = existing.items.iter().map(|i| i.id.as_str()).collect();
-    let mut seen = HashSet::new();
-    for item in created {
-        if before.contains(item.id.as_str()) || !seen.insert(item.id.as_str()) {
-            bail!(
-                "the server reported item {} as new more than once, or it was there before",
-                item.id
-            );
+            for folder in snapshot.folders() {
+                let id = match by_name.get(&folder.name) {
+                    Some(id) => id.clone(),
+                    None => {
+                        report.folders_created += 1;
+                        let created = account.create_folder(&folder.name).await?;
+                        by_name.insert(created.name, created.id.clone());
+                        created.id
+                    }
+                };
+                folder_ids.insert(&folder.id, id);
+            }
+        }
+        Scope::Organization(org) => {
+            let mut by_name: HashMap<String, String> = (existing.collections.iter())
+                .map(|c| (c.name.clone(), c.id.clone()))
+                .collect();
+            for collection in snapshot.collections() {
+                let id = match by_name.get(&collection.name) {
+                    Some(id) => id.clone(),
+                    None => {
+                        report.collections_created += 1;
+                        let created = account
+                            .create_collection(
+                                org,
+                                &collection.name,
+                                collection.external_id.as_deref(),
+                            )
+                            .await?;
+                        by_name.insert(created.name, created.id.clone());
+                        created.id
+                    }
+                };
+                collection_ids.insert(&collection.id, id);
+            }
         }
     }
-    Ok(())
-}
 
-/// Reads the target vault again and checks every restored item: content,
-/// folder or collections, archive state, and each attachment's id, name and
-/// content.
-async fn verify(
-    target: &Endpoint<'_>,
-    containers: &ExpectedContainers,
-    expected: &[ExpectedRestoredItem],
-    concurrency: usize,
-) -> Result<()> {
-    let vault = target
-        .account
-        .load(&target.scope)
-        .await
-        .context("reading the target vault again")?;
-    let mode = match target.scope {
+    let drafts: Vec<Draft> = items
+        .iter()
+        .map(|item| {
+            let mut content = item.content.clone();
+            // Servers materialize these defaults. Sending them keeps
+            // verification strict for every explicitly saved value.
+            content
+                .entry("reprompt".into())
+                .or_insert(Node::Number(0.into()));
+            if *scope == Scope::Personal {
+                content
+                    .entry("favorite".into())
+                    .or_insert(Node::Bool(false));
+            }
+            Draft {
+                content,
+                folder_id: (item.folder_id.as_deref())
+                    .and_then(|id| folder_ids.get(id))
+                    .cloned(),
+                collection_ids: (item.collection_ids.iter())
+                    .filter_map(|id| collection_ids.get(id.as_str()))
+                    .cloned()
+                    .collect(),
+            }
+        })
+        .collect();
+    let folder_names: HashMap<String, String> = (snapshot.folders().iter())
+        .filter_map(|folder| {
+            Some((
+                folder_ids.get(folder.id.as_str())?.clone(),
+                folder.name.clone(),
+            ))
+        })
+        .collect();
+    let writes = Tally::new(reporter, "Restoring", drafts.len(), "items");
+    let created = account
+        .create_items(scope, &drafts, &folder_names, &|n| writes.add(n))
+        .await?;
+
+    let mode = match scope {
         Scope::Personal => Mode::Personal,
         Scope::Organization(_) => Mode::Organization,
     };
-    let mut problems = container_differences(containers, &vault);
-    problems.extend(differences(expected, &vault, mode));
-    if problems.is_empty() {
-        let by_id: HashMap<&str, &Item> = (vault.items.iter())
-            .map(|item| (item.id.as_str(), item))
-            .collect();
-        let downloads = expected.iter().flat_map(|wanted| {
-            let item = by_id[wanted.item.id.as_str()];
-            wanted.files.iter().map(move |file| (item, file))
-        });
-        problems = stream::iter(downloads.map(|(item, file)| async move {
-            // `differences` found every uploaded attachment on its item.
-            let attachment = (item.attachments.iter())
-                .find(|a| a.id == file.attachment_id)
-                .ok_or_else(|| anyhow!("attachment {} is gone", file.attachment_id))?;
-            let data = target
-                .account
-                .download_attachment(&target.scope, item, attachment)
-                .await
-                .with_context(|| {
-                    format!(
-                        "reading attachment {} of restored item {} back",
-                        attachment.id, item.id
-                    )
-                })?;
-            let sha256: [u8; 32] = Sha256::digest(&data).into();
+    let files: Vec<Vec<String>> = stream::iter(items.iter().zip(&created).map(
+        |(item, created)| async move {
+            let mut uploaded = Vec::new();
+            for attachment in (item.attachments.iter()).filter(|_| attachments_allowed) {
+                let data = read(attachment)?;
+                let id = account
+                    .upload_attachment(scope, created, &attachment.file_name, &data)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "restoring attachment {} of snapshot item {}",
+                            attachment.attachment_id, item.id
+                        )
+                    })?;
+                uploaded.push((
+                    id,
+                    attachment.file_name.as_str(),
+                    <[u8; 32]>::from(Sha256::digest(&data)),
+                ));
+            }
+            if !uploaded.is_empty() {
+                check_uploads(target, created, &uploaded, mode).await?;
+            }
             anyhow::Ok(
-                ((data.len(), sha256) != (file.length, file.sha256)).then(|| {
-                    format!(
-                        "item {}: attachment {} holds other content than was uploaded",
-                        item.id, attachment.id
-                    )
-                }),
+                uploaded
+                    .iter()
+                    .map(|(_, name, _)| name.to_string())
+                    .collect(),
             )
-        }))
-        .buffer_unordered(concurrency)
-        .try_filter_map(|problem| async move { Ok(problem) })
-        .try_collect()
-        .await?;
+        },
+    ))
+    .buffered(WRITES_AT_ONCE)
+    .try_collect()
+    .await?;
+
+    let archived: Vec<String> = (items.iter().zip(&created))
+        .filter(|(item, _)| item.archived)
+        .map(|(_, created)| created.id.clone())
+        .collect();
+    let mut archive_refused = false;
+    if !archived.is_empty()
+        && let Err(error) = account.set_archived(&archived, true).await
+    {
+        // As when mirroring, only a refusal is tolerated.
+        if !refused(&error) {
+            return Err(error.context("archiving restored items"));
+        }
+        archive_refused = true;
+        report.items_left_unarchived = archived.len();
+        reporter.warn(&format!(
+            "The server refused to archive {}, so they stay unarchived: {error:#}",
+            count(archived.len(), "restored item")
+        ));
     }
+
+    let expected: Vec<(Item, Vec<String>)> = (items.iter().zip(drafts).zip(created).zip(files))
+        .map(|(((item, draft), created), files)| {
+            let item = Item {
+                folder_id: draft.folder_id,
+                collection_ids: draft.collection_ids,
+                archived: item.archived && !archive_refused,
+                content: draft.content,
+                ..created
+            };
+            (item, files)
+        })
+        .collect();
+    let vault = account
+        .load(scope)
+        .await
+        .context("reading the target vault again")?;
+    let mut problems = differences(&expected, &vault, mode);
     if !problems.is_empty() {
         let more = match problems.len() {
             0..=5 => String::new(),
@@ -523,47 +306,15 @@ async fn verify(
             count(expected.len(), "restored item")
         );
     }
-    Ok(())
+    report.items = expected.len();
+    report.attachments_restored = expected.iter().map(|(_, files)| files.len()).sum();
+    Ok(report)
 }
 
-/// What differs between the folders and collections as the restore created
-/// or found them and `vault`. A server can accept a new name but keep
-/// another, and the items in it would still look right.
-fn container_differences(containers: &ExpectedContainers, vault: &Vault) -> Vec<String> {
-    let mut problems = Vec::new();
-    for wanted in &containers.folders {
-        match vault.folders.iter().find(|found| found.id == wanted.id) {
-            None => problems.push(format!(
-                "folder {}: the target vault does not show it",
-                wanted.id
-            )),
-            Some(found) if found.name != wanted.name => {
-                problems.push(format!("folder {}: its name differs", wanted.id))
-            }
-            Some(_) => {}
-        }
-    }
-    for wanted in &containers.collections {
-        match vault.collections.iter().find(|found| found.id == wanted.id) {
-            None => problems.push(format!(
-                "collection {}: the target vault does not show it",
-                wanted.id
-            )),
-            Some(found) if found.name != wanted.name || found.external_id != wanted.external_id => {
-                problems.push(format!(
-                    "collection {}: its name or external id differs",
-                    wanted.id
-                ))
-            }
-            Some(_) => {}
-        }
-    }
-    problems
-}
-
-/// What differs between the restored items as written and `vault`, item by
-/// item, as paths and ids only: this ends up in logs.
-fn differences(expected: &[ExpectedRestoredItem], vault: &Vault, mode: Mode) -> Vec<String> {
+/// What differs between the restored items as written, with the names of
+/// their uploaded files, and `vault`, as paths and ids only: this ends up in
+/// logs.
+fn differences(expected: &[(Item, Vec<String>)], vault: &Vault, mode: Mode) -> Vec<String> {
     let by_id: HashMap<&str, &Item> = (vault.items.iter())
         .filter(|item| !item.in_trash)
         .map(|item| (item.id.as_str(), item))
@@ -574,25 +325,23 @@ fn differences(expected: &[ExpectedRestoredItem], vault: &Vault, mode: Mode) -> 
         comparable(item, item.folder_id.as_deref(), &collections, mode)
     };
     let mut problems = Vec::new();
-    for wanted in expected {
-        let id = &wanted.item.id;
+    for (wanted, files) in expected {
+        let id = &wanted.id;
         let Some(found) = by_id.get(id.as_str()) else {
             problems.push(format!("item {id}: the target vault does not show it"));
             continue;
         };
         let mut reasons = Vec::new();
-        let paths = differing_paths(&shape(&wanted.item), &shape(found));
+        let paths = differing_paths(&shape(wanted), &shape(found));
         if !paths.is_empty() {
             reasons.push(format!("it differs at [{}]", paths.join(", ")));
         }
-        if found.archived != wanted.item.archived {
+        if found.archived != wanted.archived {
             reasons.push("its archive state differs".to_string());
         }
-        let mut uploaded: Vec<(&str, &str)> = (wanted.files.iter())
-            .map(|f| (f.attachment_id.as_str(), f.file_name.as_str()))
-            .collect();
-        let mut stored: Vec<(&str, &str)> = (found.attachments.iter())
-            .map(|a| (a.id.as_str(), a.file_name.as_str()))
+        let mut uploaded: Vec<&str> = files.iter().map(String::as_str).collect();
+        let mut stored: Vec<&str> = (found.attachments.iter())
+            .map(|a| a.file_name.as_str())
             .collect();
         uploaded.sort_unstable();
         stored.sort_unstable();
@@ -604,19 +353,6 @@ fn differences(expected: &[ExpectedRestoredItem], vault: &Vault, mode: Mode) -> 
         }
     }
     problems
-}
-
-pub async fn restore(
-    target: &Endpoint<'_>,
-    snapshot: &Restorable,
-    store: Option<&Store<'_>>,
-    options: &RestoreOptions,
-    reporter: &dyn Reporter,
-) -> Result<RestoreReport> {
-    prepare(target, snapshot, store, options)
-        .await?
-        .apply(reporter)
-        .await
 }
 
 #[cfg(test)]
@@ -654,31 +390,17 @@ mod tests {
         }
     }
 
-    fn files() -> Vec<RestoredFile> {
-        ["a1", "a2"]
-            .map(|id| RestoredFile {
-                attachment_id: id.to_string(),
-                file_name: "scan.pdf".to_string(),
-                length: 1,
-                sha256: [0; 32],
-            })
-            .to_vec()
-    }
-
-    fn expected() -> ExpectedRestoredItem {
-        ExpectedRestoredItem {
-            item: note("i"),
-            files: files(),
-        }
+    fn files() -> Vec<String> {
+        vec!["scan.pdf".to_string(), "photo.jpg".to_string()]
     }
 
     /// The restored item as a server that kept everything shows it.
     fn kept() -> Item {
         let mut item = note("i");
-        item.attachments = (files().into_iter())
-            .map(|file| Attachment {
-                id: file.attachment_id,
-                file_name: file.file_name,
+        item.attachments = (files().into_iter().enumerate())
+            .map(|(n, file_name)| Attachment {
+                id: format!("a{n}"),
+                file_name,
                 size: 100,
                 wrapped_key: None,
             })
@@ -686,12 +408,12 @@ mod tests {
         item
     }
 
-    fn check(found: Item, mode: Mode) -> Vec<String> {
+    fn check(expected: Item, found: Item, mode: Mode) -> Vec<String> {
         let vault = Vault {
             items: vec![found],
             ..Vault::default()
         };
-        differences(&[expected()], &vault, mode)
+        differences(&[(expected, files())], &vault, mode)
     }
 
     #[test]
@@ -702,7 +424,10 @@ mod tests {
             .content
             .insert("fields".into(), Node::List(Vec::new()));
         found.revision_date = Some("2026-10-16T12:00:00.000Z".into());
-        assert_eq!(check(found, Mode::Personal), Vec::<String>::new());
+        assert_eq!(
+            check(note("i"), found, Mode::Personal),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -735,11 +460,6 @@ mod tests {
                 "attachments differ",
             ),
             (
-                "file under another id",
-                |item| item.attachments[1].id = "a3".into(),
-                "attachments differ",
-            ),
-            (
                 "extra file",
                 |item| item.attachments.push(item.attachments[0].clone()),
                 "attachments differ",
@@ -758,7 +478,7 @@ mod tests {
         for (what, change, reason) in cases {
             let mut found = kept();
             change(&mut found);
-            let problems = check(found, Mode::Personal);
+            let problems = check(note("i"), found, Mode::Personal);
             assert_eq!(problems.len(), 1, "{what}");
             assert!(problems[0].starts_with("item i: "), "{what}");
             assert!(problems[0].contains(reason), "{what}: {}", problems[0]);
@@ -768,105 +488,22 @@ mod tests {
 
     #[test]
     fn organization_items_are_checked_by_collection_without_favorites() {
+        let mut expected = note("i");
+        expected.collection_ids = vec!["c2".into(), "c1".into()];
         let mut found = kept();
         found.collection_ids = vec!["c1".into()];
-        let mut expected = expected();
-        expected.item.collection_ids = vec!["c2".into(), "c1".into()];
-        let vault = |found: &Item| Vault {
-            items: vec![found.clone()],
-            ..Vault::default()
-        };
-        let problems = differences(&[expected], &vault(&found), Mode::Organization);
+        let problems = check(expected.clone(), found.clone(), Mode::Organization);
         assert!(
             problems[0].contains("differs at [collections]"),
             "{problems:?}"
         );
 
-        let mut expected = self::expected();
-        expected.item.collection_ids = vec!["c2".into(), "c1".into()];
         found.collection_ids = vec!["c1".into(), "c2".into()];
         // Bitwarden keeps an organization item's favorite flag per member.
         found.content.insert("favorite".into(), Node::Bool(true));
         assert_eq!(
-            differences(&[expected], &vault(&found), Mode::Organization),
+            check(expected, found, Mode::Organization),
             Vec::<String>::new()
         );
-    }
-
-    #[test]
-    fn a_container_the_server_named_otherwise_fails() {
-        let containers = ExpectedContainers {
-            folders: vec![Folder {
-                id: "f".into(),
-                name: "Work".into(),
-            }],
-            collections: vec![Collection {
-                id: "c".into(),
-                name: "".into(),
-                external_id: Some("ext".into()),
-            }],
-        };
-        let mut vault = Vault {
-            folders: containers.folders.clone(),
-            collections: containers.collections.clone(),
-            ..Vault::default()
-        };
-        assert_eq!(
-            container_differences(&containers, &vault),
-            Vec::<String>::new()
-        );
-        vault.folders[0].name = String::new();
-        vault.collections[0].external_id = None;
-        assert_eq!(
-            container_differences(&containers, &vault),
-            [
-                "folder f: its name differs",
-                "collection c: its name or external id differs"
-            ]
-        );
-        vault.folders.clear();
-        vault.collections[0] = containers.collections[0].clone();
-        assert_eq!(
-            container_differences(&containers, &vault),
-            ["folder f: the target vault does not show it"]
-        );
-    }
-
-    #[test]
-    fn the_server_must_report_each_new_item_once() {
-        let none = Vault::default();
-        assert!(check_created(2, &[note("a"), note("b")], &none).is_ok());
-        assert!(check_created(2, &[note("a")], &none).is_err());
-        assert!(check_created(2, &[note("a"), note("a")], &none).is_err());
-        let before = Vault {
-            items: vec![note("old")],
-            ..Vault::default()
-        };
-        assert!(check_created(1, &[note("old")], &before).is_err());
-    }
-
-    #[test]
-    fn a_report_with_anything_left_out_has_warned() {
-        assert!(!RestoreReport::default().warned());
-        for report in [
-            RestoreReport {
-                items_left_out: 1,
-                ..RestoreReport::default()
-            },
-            RestoreReport {
-                items_left_unarchived: 1,
-                ..RestoreReport::default()
-            },
-            RestoreReport {
-                attachments_missing: 1,
-                ..RestoreReport::default()
-            },
-            RestoreReport {
-                attachments_skipped: 1,
-                ..RestoreReport::default()
-            },
-        ] {
-            assert!(report.warned(), "{report:?}");
-        }
     }
 }

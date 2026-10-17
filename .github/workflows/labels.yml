@@ -25,9 +25,6 @@ jobs:
           labels=(
             "bug|d73a4a|Something doesn't work as documented."
             "dependencies|0366d6|Updates a dependency."
-            "size:S|0e8a16|Changes fewer than 50 lines, not counting tests and documentation."
-            "size:M|fbca04|Changes 50 to 299 lines, not counting tests and documentation."
-            "size:L|d93f0b|Changes 300 lines or more, not counting tests and documentation."
           )
           for entry in "${labels[@]}"; do
             IFS='|' read -r name color description <<< "$entry"

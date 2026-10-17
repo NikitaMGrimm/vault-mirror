@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     fs,
     io::{IsTerminal, Write},
-    path::{Path, PathBuf},
+    path::Path,
     process::ExitCode,
 };
 
@@ -31,11 +31,11 @@ const SERVERS: &[(&str, Option<&str>)] = &[
     ("Self-hosted Bitwarden or Vaultwarden", None),
 ];
 
-/// The schedule choices and the settings each one writes.
-const SCHEDULES: &[(&str, &str, &str)] = &[
-    ("Every day at 03:00", "SCHEDULE", "0 3 * * *"),
-    ("Every 6 hours", "INTERVAL", "6h"),
-    ("Every hour", "INTERVAL", "1h"),
+/// The schedule choices and the cron expression each one writes.
+const SCHEDULES: &[(&str, &str)] = &[
+    ("Every day at 03:00", "0 3 * * *"),
+    ("Every 6 hours", "0 */6 * * *"),
+    ("Every hour", "0 * * * *"),
 ];
 
 pub async fn init(dir: &Path) -> Result<ExitCode> {
@@ -55,7 +55,6 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
             bail!("{} already exists; move it away first", path.display());
         }
     }
-    let ca_cert = ca_cert_file(std::env::var("CA_CERT_FILE").ok())?;
     println!(
         "This writes {ENV_FILE} and {COMPOSE_FILE} to {}.\n\
          Each account needs a personal API key: in the web vault, open\n\
@@ -74,8 +73,8 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
         ("BACKUP_PASSPHRASE".into(), "placeholder".into()),
     ]);
     let mut written: Vec<(&str, String)> = Vec::new();
-    if let Some(path) = &ca_cert {
-        let path = path.display().to_string();
+    // A server with a private CA needs it for the logins below too.
+    if let Ok(path) = std::env::var("CA_CERT_FILE") {
         env.insert("CA_CERT_FILE".into(), path.clone());
         written.push(("CA_CERT_FILE", path));
     }
@@ -100,20 +99,17 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
         .items(SCHEDULES.iter().map(|(label, ..)| *label))
         .default(0)
         .interact()?;
-    let (_, name, value) = SCHEDULES[choice];
-    written.push((name, value.to_string()));
-    if name == "SCHEDULE" {
-        let zone: String = Input::with_theme(&theme)
-            .with_prompt("Time zone")
-            .default(local_timezone())
-            .validate_with(|zone: &String| {
-                zone.parse::<chrono_tz::Tz>()
-                    .map(|_| ())
-                    .map_err(|_| "not a time zone name, such as Europe/Berlin")
-            })
-            .interact_text()?;
-        written.push(("TZ", zone));
-    }
+    written.push(("SCHEDULE", SCHEDULES[choice].1.to_string()));
+    let zone: String = Input::with_theme(&theme)
+        .with_prompt("Time zone")
+        .default(local_timezone())
+        .validate_with(|zone: &String| {
+            zone.parse::<chrono_tz::Tz>()
+                .map(|_| ())
+                .map_err(|_| "not a time zone name, such as Europe/Berlin")
+        })
+        .interact_text()?;
+    written.push(("TZ", zone));
 
     let generate = Select::with_theme(&theme)
         .with_prompt("Backups are encrypted with a passphrase")
@@ -141,11 +137,7 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
              computer may be able to read it; make it readable only by you"
         ));
     }
-    write_new(
-        &compose_path,
-        &compose_file(dir, ca_cert.as_deref())?,
-        false,
-    )?;
+    write_new(&compose_path, &compose_file(dir)?, false)?;
     Console::status("Created", COMPOSE_FILE);
     Console::note(
         "keep BACKUP_PASSPHRASE outside the backups and vault. After the first run, \
@@ -259,14 +251,9 @@ async fn log_in(env: &HashMap<String, String>, prefix: &str, role: &str) -> Resu
             .as_ref()
             .ok_or_else(|| anyhow!("no destination settings"))?,
     };
-    if prefix == "DEST"
-        && vault.server == config.source.server
-        && vault.client_id == config.source.client_id
-    {
+    // A personal API key's client id names its account on any server address.
+    if prefix == "DEST" && vault.client_id == config.source.client_id {
         bail!("this is the source account; the destination must be another account");
-    }
-    if let Some(warning) = app::plain_http_warning(vault, prefix) {
-        Console::warning(&warning);
     }
     let http = app::http_client(&config)?;
     let account =
@@ -290,7 +277,7 @@ fn env_file(settings: &[(&str, String)]) -> String {
     let mut last_group = "";
     for (name, value) in settings {
         let group = match name.split('_').next().unwrap_or_default() {
-            "INTERVAL" | "TZ" => "SCHEDULE",
+            "TZ" => "SCHEDULE",
             group => group,
         };
         if group != last_group {
@@ -302,7 +289,7 @@ fn env_file(settings: &[(&str, String)]) -> String {
     text
 }
 
-fn compose_file(dir: &Path, ca_cert: Option<&Path>) -> Result<String> {
+fn compose_file(dir: &Path) -> Result<String> {
     let version = env!("CARGO_PKG_VERSION");
     let tag = version
         .rsplit_once('.')
@@ -312,24 +299,6 @@ fn compose_file(dir: &Path, ca_cert: Option<&Path>) -> Result<String> {
     let user = owner(&dir.join("backups"))?
         .map(|(uid, gid)| format!("    user: \"{uid}:{gid}\"\n"))
         .unwrap_or_default();
-    // The settings file names the certificate where runs without Docker find
-    // it; in the container it is mounted at one fixed path instead.
-    let (environment, certificate) = ca_cert
-        .map(|path| {
-            (
-                "    environment:\n      CA_CERT_FILE: /ca.pem\n".to_string(),
-                format!(
-                    "      - type: bind\n        \
-                             source: {}\n        \
-                             target: /ca.pem\n        \
-                             read_only: true\n        \
-                             bind:\n          \
-                               create_host_path: false\n",
-                    compose_source(dir, path)
-                ),
-            )
-        })
-        .unwrap_or_default();
     Ok(format!(
         "services:\n  \
            vault-mirror:\n    \
@@ -338,31 +307,13 @@ fn compose_file(dir: &Path, ca_cert: Option<&Path>) -> Result<String> {
          {user}    \
              env_file:\n      \
                - path: {ENV_FILE}\n        \
-                 format: raw\n\
-         {environment}    \
+                 format: raw\n    \
              volumes:\n      \
-               - ./backups:/data\n\
-         {certificate}    \
+               - ./backups:/data\n    \
              restart: unless-stopped\n    \
              # Gives a run in progress up to 5 minutes to finish when the container stops.\n    \
              stop_grace_period: 5m\n"
     ))
-}
-
-/// `path` as a quoted YAML string for compose.yaml: relative to `dir` when
-/// it is inside, so that it also works when `init` ran in a container with
-/// `dir` mounted.
-fn compose_source(dir: &Path, path: &Path) -> String {
-    let source = match path.strip_prefix(dir) {
-        Ok(inside) => {
-            let parts: Vec<_> = inside.iter().map(|part| part.to_string_lossy()).collect();
-            format!("./{}", parts.join("/"))
-        }
-        Err(_) => path.display().to_string(),
-    };
-    // JSON's quoting is valid YAML, and `$$` keeps Compose from reading `$`
-    // as the start of a variable.
-    serde_json::Value::from(source.replace('$', "$$")).to_string()
 }
 
 #[cfg(unix)]
@@ -377,21 +328,6 @@ fn owner(path: &Path) -> Result<Option<(u32, u32)>> {
 fn owner(path: &Path) -> Result<Option<(u32, u32)>> {
     fs::create_dir_all(path)?;
     Ok(None)
-}
-
-/// `CA_CERT_FILE` as an absolute path, so that runs started in another
-/// directory find it.
-fn ca_cert_file(value: Option<String>) -> Result<Option<PathBuf>> {
-    match value
-        .as_deref()
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-    {
-        None => Ok(None),
-        Some(path) => fs::canonicalize(path)
-            .map(Some)
-            .map_err(|error| anyhow!("CA_CERT_FILE {path}: {error}")),
-    }
 }
 
 #[cfg(unix)]
@@ -477,7 +413,7 @@ mod tests {
     #[test]
     fn the_compose_file_lets_a_run_finish_on_stop() {
         let dir = tempfile::tempdir().unwrap();
-        let compose = compose_file(dir.path(), None).unwrap();
+        let compose = compose_file(dir.path()).unwrap();
         assert!(compose.contains("\n    command: daemon\n"), "{compose}");
         assert!(
             compose.contains("\n    stop_grace_period: 5m\n"),
@@ -497,54 +433,6 @@ mod tests {
         let parsed = crate::parse_env_file(&text).unwrap();
         assert_eq!(parsed["SOURCE_PASSWORD"], "it's $HOME \"#x\" ");
         assert_eq!(parsed["SCHEDULE"], "0 3 * * *");
-    }
-
-    #[test]
-    fn the_compose_file_mounts_the_ca_certificate() {
-        let dir = tempfile::tempdir().unwrap();
-        let dir = dir.path().canonicalize().unwrap();
-        let inside = compose_file(&dir, Some(&dir.join("certs").join("ca.pem"))).unwrap();
-        assert!(
-            inside.contains("\n    environment:\n      CA_CERT_FILE: /ca.pem\n"),
-            "{inside}"
-        );
-        assert!(
-            inside.contains(
-                "\n      - type: bind\n        source: \"./certs/ca.pem\"\n        \
-                 target: /ca.pem\n        read_only: true\n"
-            ),
-            "{inside}"
-        );
-        assert!(
-            inside.contains("\n        bind:\n          create_host_path: false\n"),
-            "{inside}"
-        );
-        let outside = compose_file(&dir, Some(Path::new(r#"/etc/ssl/a\b "c" $HOME.pem"#))).unwrap();
-        assert!(
-            outside
-                .lines()
-                .any(|line| line == r#"        source: "/etc/ssl/a\\b \"c\" $$HOME.pem""#),
-            "{outside}"
-        );
-        assert!(!compose_file(&dir, None).unwrap().contains("CA_CERT_FILE"));
-    }
-
-    #[test]
-    fn the_ca_certificate_path_is_made_absolute() {
-        let path = ca_cert_file(Some(" Cargo.toml ".into())).unwrap().unwrap();
-        assert!(
-            path.is_absolute() && path.ends_with("Cargo.toml"),
-            "{}",
-            path.display()
-        );
-        assert_eq!(ca_cert_file(Some(" ".into())).unwrap(), None);
-        let missing = ca_cert_file(Some("missing.pem".into())).unwrap_err();
-        assert!(
-            missing
-                .to_string()
-                .starts_with("CA_CERT_FILE missing.pem: "),
-            "{missing}"
-        );
     }
 
     #[test]
