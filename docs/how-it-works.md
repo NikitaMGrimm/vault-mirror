@@ -3,8 +3,7 @@
 [← Documentation](README.md)
 
 vault-mirror makes one vault, the **destination**, match another, the
-**source**. Each time it does this is a **run**. If a run fails, the next run
-picks up where it left off.
+**source**. Each time it does this is a **run**.
 
 ## A run, step by step
 

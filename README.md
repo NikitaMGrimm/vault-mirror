@@ -33,7 +33,7 @@ vault-mirror copies your main vault, the **source**, into a second vault, the
 
 Use it to keep a working copy on Bitwarden's cloud for when your own server is
 down, to move between servers, or to share one folder or collection with
-another account. Without a destination, it only makes backups.
+another account.
 
 ## Features
 

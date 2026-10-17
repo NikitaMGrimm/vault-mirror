@@ -67,7 +67,7 @@ secrets and systemd credentials. Trailing newlines in the file are ignored.
 | --- | --- | --- |
 | `SCHEDULE` | | When `daemon` runs, as a cron expression such as `0 3 * * *`. |
 | `TZ` | UTC | The time zone `SCHEDULE` is read in, such as `Europe/Berlin`. |
-| `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After each run, `POST` a one-line summary here, such as to [ntfy](https://ntfy.sh) or [healthchecks.io](https://healthchecks.io). It holds counts and errors, never vault content. |
+| `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After a successful or a failed run, `POST` a one-line summary to the matching URL, such as an [ntfy](https://ntfy.sh) topic or a [healthchecks.io](https://healthchecks.io) check. It holds counts and errors, never vault content. |
 | `CA_CERT_FILE` | | A PEM file of extra certificate authorities to trust. In Docker, mount it into the container and give its path there. |
 
 ## Setting up by hand
