@@ -869,10 +869,7 @@ fn hash(value: &Value) -> String {
 /// Limits that stop a misconfigured run before it destroys a vault.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Safety {
-    /// Refuse to delete more than this percentage of the copies.
-    pub max_delete_percent: Option<u32>,
-    /// Permit this run to delete every earlier copy, or more than
-    /// `max_delete_percent`.
+    /// Permit this run to delete every earlier copy.
     pub allow_mass_delete: bool,
     /// Permit this run to pair copies the other way round, after the source
     /// and destination switched roles.
@@ -892,16 +889,6 @@ pub enum SafetyViolation {
          looks empty or like a different vault. Pass --allow-mass-delete if this is expected"
     )]
     ReplacesEverything(usize),
-    #[error(
-        "the run would delete {deleting} of {total} copies ({percent}%), above the \
-         {limit}% limit. Pass --allow-mass-delete if this is expected"
-    )]
-    MassDelete {
-        deleting: usize,
-        total: usize,
-        percent: u32,
-        limit: u32,
-    },
 }
 
 pub fn check_safety(plan: &Plan, safety: &Safety) -> Result<(), SafetyViolation> {
@@ -922,18 +909,6 @@ pub fn check_safety(plan: &Plan, safety: &Safety) -> Result<(), SafetyViolation>
     // at least some of its items.
     if stale == total {
         return Err(SafetyViolation::ReplacesEverything(stale));
-    }
-    let deleting = plan.deletes.len();
-    if let Some(limit) = safety.max_delete_percent
-        // Compared exactly: 101 of 200 is above a 50% limit.
-        && deleting as u64 * 100 > u64::from(limit) * total as u64
-    {
-        return Err(SafetyViolation::MassDelete {
-            deleting,
-            total,
-            percent: (deleting * 100 / total) as u32,
-            limit,
-        });
     }
     Ok(())
 }

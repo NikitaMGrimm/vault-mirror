@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, fs, path::PathBuf, str::FromStr};
 
-use crate::{api::ClientOptions, mirror::Filter, plan::Safety};
+use crate::{api::ClientOptions, mirror::Filter};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("{0}")]
@@ -32,7 +32,6 @@ pub struct Config {
     pub dest: Option<VaultConfig>,
     pub backups_dir: PathBuf,
     pub backup: BackupConfig,
-    pub safety: Safety,
     pub filter: Filter,
     pub ca_cert_file: Option<PathBuf>,
     /// When `daemon` runs: a five- or six-field cron expression, evaluated in
@@ -163,15 +162,6 @@ impl Config {
             retention_days: env.parse("RETENTION_DAYS", 30)?,
         };
 
-        let max_delete_percent: Option<u32> = env
-            .get("MAX_DELETE_PERCENT")
-            .map(|_| env.parse("MAX_DELETE_PERCENT", 0))
-            .transpose()?;
-        if max_delete_percent.is_some_and(|percent| percent > 100) {
-            return Err(ConfigError(
-                "MAX_DELETE_PERCENT must be between 0 and 100".into(),
-            ));
-        }
         let folders = Filter {
             include: env.names("INCLUDE_FOLDERS"),
             exclude: env.names("EXCLUDE_FOLDERS"),
@@ -200,10 +190,6 @@ impl Config {
             dest,
             backups_dir: backups_dir(env.0),
             backup,
-            safety: Safety {
-                max_delete_percent,
-                ..Safety::default()
-            },
             filter,
             ca_cert_file: env.get("CA_CERT_FILE").map(PathBuf::from),
             schedule: env.get("SCHEDULE"),
@@ -297,7 +283,6 @@ mod tests {
         assert_eq!(config.dest.as_ref().unwrap().client_id, "user.dest");
         assert_eq!(config.backup.passphrase, "backup passphrase");
         assert_eq!(config.backup.retention_days, 30);
-        assert_eq!(config.safety, Safety::default());
         assert!(config.schedule.is_none());
         assert_eq!(config.backups_dir, PathBuf::from("backups"));
     }
@@ -440,15 +425,8 @@ mod tests {
 
     #[test]
     fn tuning_values_are_validated() {
-        let config = Config::from_env(&with(&[
-            ("RETENTION_DAYS", "7"),
-            ("MAX_DELETE_PERCENT", "20"),
-        ]))
-        .unwrap();
+        let config = Config::from_env(&with(&[("RETENTION_DAYS", "7")])).unwrap();
         assert_eq!(config.backup.retention_days, 7);
-        assert_eq!(config.safety.max_delete_percent, Some(20));
-
-        assert!(error(with(&[("MAX_DELETE_PERCENT", "101")])).contains("between 0 and 100"));
         assert!(error(with(&[("RETENTION_DAYS", "soon")])).contains("RETENTION_DAYS"));
     }
 }

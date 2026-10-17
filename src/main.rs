@@ -43,7 +43,7 @@ struct Cli {
 
 #[derive(Args, Clone, Copy)]
 struct RunArgs {
-    /// Let this run delete every earlier copy, or more than MAX_DELETE_PERCENT.
+    /// Let this run delete every earlier copy.
     #[arg(long)]
     allow_mass_delete: bool,
     /// Let this run take over copies made the other way round, after you switched the source and destination.
@@ -384,8 +384,8 @@ async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
 
     let options = MirrorOptions {
         dry_run: true,
-        safety: config.safety.clone(),
         filter: config.filter.clone(),
+        ..MirrorOptions::default()
     };
     let source = Endpoint {
         account: &source,

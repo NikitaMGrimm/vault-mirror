@@ -93,7 +93,6 @@ run stops and the destination stays as it was.
 | Items in the source are copies of destination items | Source and destination are swapped. | Fix the settings, or `run --reverse` if you [switched them on purpose](#switching-the-source-and-destination). |
 | Source and destination are the same vault | A settings mistake. | Fix the settings. |
 | The run would delete every copy | The source is empty, the wrong account, or filtered to nothing. | `run --allow-mass-delete` |
-| The run would delete more than `MAX_DELETE_PERCENT` of the copies | You set a limit. | `run --allow-mass-delete` |
 
 A flag applies to one run:
 

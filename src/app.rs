@@ -309,7 +309,6 @@ async fn execute(
         safety: Safety {
             allow_mass_delete: flags.allow_mass_delete,
             allow_reverse: flags.reverse,
-            ..config.safety.clone()
         },
         filter: config.filter.clone(),
     };
