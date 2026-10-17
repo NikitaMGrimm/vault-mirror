@@ -214,17 +214,6 @@ impl Plan {
             && self.collections_to_delete.is_empty())
     }
 
-    /// The source item, too, changed what `update` finds changed in its
-    /// copy in `dest`, since vault-mirror last wrote the copy.
-    pub fn changed_in_both(&self, update: &Update, dest: &Vault) -> bool {
-        let entry = &self.entries[update.entry];
-        marker_of(&dest.items[update.dest]).is_some_and(|marker| {
-            (update.content_changed_in_dest && marker.content != entry.marker.content)
-                || (update.files_changed_in_dest
-                    && marker.source_files != entry.marker.source_files)
-        })
-    }
-
     pub fn summary(&self, source: &Vault) -> Summary {
         let attachments = |entry: usize| match self.copy_attachments {
             true => source.items[self.entries[entry].source].attachments.len(),
@@ -803,32 +792,6 @@ pub fn unmarked(item: &Item) -> BTreeMap<String, Node> {
         .collect();
     content.insert("fields".to_string(), Node::List(fields));
     content
-}
-
-/// `item`'s content, unmarked, with a marker that makes it a copy of
-/// `original`, an item in the other vault in a folder or collections with
-/// these names. `copy` is the item the content is for, once it holds the same
-/// attachments as `original`. Without it the attachments count as unknown, so
-/// the next mirror copies them again.
-pub fn mark_copy(
-    item: &Item,
-    original: &Item,
-    folder: Option<&str>,
-    collections: &[String],
-    mode: Mode,
-    copy: Option<&Item>,
-) -> BTreeMap<String, Node> {
-    let marker = Marker {
-        source_id: original.id.clone(),
-        content: content_hash(original, folder, collections, mode),
-        source_files: copy.map_or(UNKNOWN.to_string(), |_| source_files(original)),
-        dest_files: copy.map_or(UNKNOWN.to_string(), dest_files),
-    };
-    let mut marked = unmarked(item);
-    if let Some(Node::List(fields)) = marked.get_mut("fields") {
-        fields.push(marker.to_field());
-    }
-    marked
 }
 
 fn content_hash(item: &Item, folder: Option<&str>, collections: &[String], mode: Mode) -> String {

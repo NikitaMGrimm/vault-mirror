@@ -20,9 +20,8 @@ decrypt items to compare and copy them.
 Environment variables can be visible to other processes on the same host. To
 keep secrets out of them, use [secret files](docs/configuration.md#secrets-in-files).
 
-vault-mirror writes to the source only when you run `restore --to source` or
-`run --pull`. A normal run changes and deletes only the copies it made in the
-destination.
+vault-mirror never writes to the source. A run changes and deletes only the
+copies it made in the destination.
 
 ## What it stores
 
@@ -33,7 +32,7 @@ destination.
 | `*/<snapshot>/attachments/*.age` | Attachment content. | Encrypted to the backup key with age. |
 | `last-run.json` | Time, result and counts of the last run. | None. No vault content. |
 | `state.json` | The device ids vault-mirror logs in with. | None. |
-| `run.lock`, `unfinished-pull` | Nothing. | None. |
+| `run.lock` | Nothing. | None. |
 
 On Unix, these files are readable only by their owner. Backups cover the whole
 vault, whatever the folder and collection filters.

@@ -111,8 +111,8 @@ here in the same pull request.
 ### Safety checks
 
 - Change and delete only copies. An item without a marker belongs to the
-  user, and so does the folder or collection it is in. Write to the source
-  only in `restore --to source` or an explicitly requested `run --pull`.
+  user, and so does the folder or collection it is in. Never write to the
+  source.
 - Refuse only a state that is almost never intended: swapped vaults, one
   vault twice, or a run that deletes every earlier copy.
 - Name the flag that allows a refused run once.

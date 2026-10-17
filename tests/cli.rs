@@ -35,7 +35,7 @@ fn snapshots_need_only_the_backup_directory() {
 }
 
 #[test]
-fn recovery_needs_only_the_backup_passphrase_and_the_target_vault() {
+fn an_export_needs_only_the_backup_passphrase() {
     use serde_json::json;
     use vault_mirror::store::{Keys, Store};
 
@@ -83,29 +83,6 @@ fn recovery_needs_only_the_backup_passphrase_and_the_target_vault() {
         fs::read(output_dir.join("attachments/attachment-id/recovered.txt")).unwrap(),
         b"synthetic attachment bytes"
     );
-
-    for (role, prefix, unrelated) in [("dest", "DEST", "SOURCE"), ("source", "SOURCE", "DEST")] {
-        let output = vault_mirror()
-            .env("BACKUPS_DIR", dir.path())
-            .env(
-                format!("{unrelated}_PASSWORD_FILE"),
-                dir.path().join("unavailable-unrelated-secret"),
-            )
-            .env(format!("{prefix}_SERVER"), "invalid-server-url")
-            .env(format!("{prefix}_CLIENT_ID"), "user.synthetic")
-            .env(format!("{prefix}_CLIENT_SECRET"), "synthetic-api-secret")
-            .env(format!("{prefix}_PASSWORD"), "synthetic-password")
-            .env("BACKUP_PASSPHRASE", "synthetic passphrase")
-            .arg("restore")
-            .arg("--to")
-            .arg(role)
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!output.status.success());
-        assert!(stderr.contains("invalid server URL"), "{stderr}");
-        assert!(!stderr.contains("unavailable-unrelated-secret"), "{stderr}");
-    }
 
     fs::write(
         dir.path()

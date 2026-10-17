@@ -4,18 +4,16 @@ use std::{collections::HashMap, path::Path, process::Command};
 
 use anyhow::Result;
 use common::{provision::TestAccount, *};
-use futures_util::future::BoxFuture;
 use time::OffsetDateTime;
 use vault_mirror::{
     app::{self, RunFlags},
     backup::{BackupOptions, backup},
     config::Config,
-    mirror::{Endpoint, Reporter},
     node::Node,
-    plan::marker_of,
-    restore::{RestoreOptions, restore},
-    store::{Keys, Store},
-    vault::{Account, Draft, Item, Scope, Vault},
+    plan::{self, marker_of},
+    snapshot::{self, Restorable},
+    store::{Keys, Snapshot, Store},
+    vault::{Draft, Scope, Vault},
 };
 
 const PERSONAL: Scope = Scope::Personal;
@@ -60,30 +58,14 @@ fn contents(vault: &Vault) -> HashMap<String, Summary> {
         .collect()
 }
 
-async fn restored_copy(sandbox: &Sandbox, store: &Store<'_>) -> Result<Account> {
-    let target = sandbox
-        .open(&sandbox.register(&sandbox.dest_url).await?)
-        .await?;
-    let latest = store.list()?.pop().expect("a snapshot");
-    let endpoint = Endpoint {
-        account: &target,
-        scope: PERSONAL,
-    };
-    let options = RestoreOptions {
-        allow_non_empty: false,
-    };
-    restore(
-        &endpoint,
-        &store.snapshot(&latest),
-        &options,
-        &Capture::default(),
-    )
-    .await?;
-    Ok(target)
+/// The newest snapshot in `store`, read back.
+fn latest<'a>(store: &Store<'a>) -> Result<(Restorable, Snapshot<'a>)> {
+    let snapshot = store.snapshot(&store.list()?.pop().expect("a snapshot"));
+    Ok((snapshot::parse(&snapshot.document()?)?, snapshot))
 }
 
 #[tokio::test]
-async fn a_backup_restores_into_an_identical_vault() -> Result<()> {
+async fn a_backup_holds_the_whole_vault() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
@@ -91,57 +73,43 @@ async fn a_backup_restores_into_an_identical_vault() -> Result<()> {
         .open(&sandbox.register(&sandbox.source_url).await?)
         .await?;
     fixtures::seed(&source).await?;
-    // Enough items that the restore imports them in bulk.
-    seed_extra(&source, 12).await?;
     let dir = tempfile::tempdir()?;
     let keys = keys(dir.path());
     let store = Store::new(dir.path(), "source", &keys);
 
     let report = backup(&source, &PERSONAL, &store, &options(), &Capture::default()).await?;
-    assert_eq!(report.items, fixtures::samples().len() + 12);
+    assert_eq!(report.items, fixtures::samples().len());
     assert_eq!(report.attachments_downloaded, 4);
     assert!(report.snapshot.is_some());
 
-    let target = restored_copy(&sandbox, &store).await?;
+    let (backed_up, snapshot) = latest(&store)?;
     let original = source.load(&PERSONAL).await?;
-    let copy = target.load(&PERSONAL).await?;
-    assert_eq!(contents(&copy), contents(&original));
-    assert_eq!(copy.folders.len(), original.folders.len());
-    for sample in fixtures::samples() {
-        let item = by_name(&copy, sample.content["name"].as_str().unwrap());
-        for (file, data) in &sample.attachments {
-            let attachment = item
-                .attachments
-                .iter()
-                .find(|a| &a.file_name == file)
-                .unwrap();
+    assert_eq!(backed_up.folders(), original.folders);
+    assert_eq!(backed_up.items().len(), original.items.len());
+    for item in &original.items {
+        let copy = (backed_up.items().iter())
+            .find(|copy| copy.id == item.id)
+            .unwrap();
+        assert_eq!(
+            Node::Map(copy.content.clone()).normalized(),
+            Node::Map(item.content.clone()).normalized(),
+            "{}",
+            item.name()
+        );
+        assert_eq!(
+            (&copy.folder_id, copy.archived),
+            (&item.folder_id, item.archived)
+        );
+        assert_eq!(copy.attachments.len(), item.attachments.len());
+        for attachment in &item.attachments {
             assert_eq!(
-                &target
+                snapshot.attachment(&attachment.id)?,
+                source
                     .download_attachment(&PERSONAL, item, attachment)
-                    .await?,
-                data
+                    .await?
             );
         }
     }
-
-    // Restoring again would duplicate everything, so it has to be asked for.
-    let latest = store.list()?.pop().unwrap();
-    let endpoint = Endpoint {
-        account: &target,
-        scope: PERSONAL,
-    };
-    let refused = RestoreOptions {
-        allow_non_empty: false,
-    };
-    let error = restore(
-        &endpoint,
-        &store.snapshot(&latest),
-        &refused,
-        &Capture::default(),
-    )
-    .await
-    .unwrap_err();
-    assert!(error.to_string().contains("--allow-non-empty"), "{error}");
     Ok(())
 }
 
@@ -288,318 +256,14 @@ async fn a_full_run_backs_up_both_sides_mirrors_and_records_the_result() -> Resu
         }
     }
 
-    // The mirror's own snapshot restores without mirror markers.
+    // The mirror's own snapshot holds the copies without mirror markers.
     let keys = keys(dir.path());
-    let dest_store = Store::new(dir.path(), "dest", &keys);
-    let latest = dest_store.list()?.pop().unwrap();
-    let target = sandbox
-        .open(&sandbox.register(&sandbox.dest_url).await?)
-        .await?;
-    let endpoint = Endpoint {
-        account: &target,
-        scope: PERSONAL,
-    };
-    let options = RestoreOptions {
-        allow_non_empty: false,
-    };
-    restore(
-        &endpoint,
-        &dest_store.snapshot(&latest),
-        &options,
-        &Capture::default(),
-    )
-    .await?;
-    let restored = target.load(&PERSONAL).await?;
-    assert_eq!(restored.items.len(), count);
-    assert!(restored.items.iter().all(|item| marker_of(item).is_none()));
-    Ok(())
-}
-
-/// While the source was down, the destination was used instead. A pull
-/// brings its changes back into the source and leaves no marker there.
-#[tokio::test]
-async fn a_pull_brings_back_what_changed_in_the_destination() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let source_account = sandbox.register(&sandbox.source_url).await?;
-    let dest_account = sandbox.register(&sandbox.dest_url).await?;
-    let source = sandbox.open(&source_account).await?;
-    let dest = sandbox.open(&dest_account).await?;
-    fixtures::seed(&source).await?;
-    let dir = tempfile::tempdir()?;
-    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
-    let capture = Capture::default();
-    let run = |flags| app::run_once(&config, flags, &capture);
-    assert!(run(RunFlags::default()).await.succeeded());
-
-    let vault = dest.load(&PERSONAL).await?;
-    let visa = by_name(&vault, "Visa");
-    let mut edited = Draft {
-        content: visa.content.clone(),
-        folder_id: visa.folder_id.clone(),
-        collection_ids: vec![],
-    };
-    let Some(Node::Map(card)) = edited.content.get_mut("card") else {
-        panic!()
-    };
-    card.insert("number".into(), Node::secret("5555555555554444"));
-    dest.update_item(&PERSONAL, visa, &edited).await?;
-    dest.delete_items(&[by_name(&vault, "Identity").id.clone()])
-        .await?;
-    // Changed only in the source: the pull leaves it as it is.
-    let originals = source.load(&PERSONAL).await?;
-    let passkey = by_name(&originals, "Passkey login");
-    let mut noted = Draft {
-        content: passkey.content.clone(),
-        folder_id: passkey.folder_id.clone(),
-        collection_ids: vec![],
-    };
-    noted
-        .content
-        .insert("notes".into(), Node::secret("edited in the source"));
-    source.update_item(&PERSONAL, passkey, &noted).await?;
-    let mut added = fixtures::named("Bare login without folder").content;
-    added.insert("name".into(), Node::secret("Added during the outage"));
-    dest.create_item(
-        &PERSONAL,
-        &Draft {
-            content: added,
-            folder_id: None,
-            collection_ids: vec![],
-        },
-    )
-    .await?;
-
-    let pulled = run(RunFlags {
-        pull: true,
-        ..RunFlags::default()
-    })
-    .await;
-    assert!(pulled.succeeded(), "{pulled:?}");
-    let summary = &pulled.pulled.as_ref().unwrap().summary;
-    assert_eq!((summary.items_created, summary.items_updated), (1, 1));
-
-    let back = source.load(&PERSONAL).await?;
-    let card = by_name(&back, "Visa").content["card"].as_map().unwrap();
-    assert_eq!(card["number"].as_str(), Some("5555555555554444"));
-    by_name(&back, "Added during the outage");
-    assert_eq!(
-        by_name(&back, "Passkey login").content["notes"].as_str(),
-        Some("edited in the source")
-    );
-    // Deleted in the destination, but the pull deletes nothing.
-    by_name(&back, "Identity");
-    assert!(back.items.iter().all(|item| marker_of(item).is_none()));
-    let mirrored = dest.load(&PERSONAL).await?;
-    assert_eq!(mirrored.items.len(), fixtures::samples().len() + 1);
-    assert_eq!(
-        by_name(&mirrored, "Passkey login").content["notes"].as_str(),
-        Some("edited in the source")
-    );
-    assert!(mirrored.items.iter().all(|item| marker_of(item).is_some()));
-
-    let again = run(RunFlags::default()).await;
-    assert!(again.succeeded(), "{again:?}");
-    assert!(!again.mirror.as_ref().unwrap().changed);
-    Ok(())
-}
-
-/// An item the source server would accept but never show is left out of the
-/// pull, instead of being added again on every pull.
-#[tokio::test]
-async fn a_pull_leaves_out_items_the_source_would_not_show() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let source_account = sandbox.register(&sandbox.source_url).await?;
-    let dest_account = sandbox.register(&sandbox.dest_url).await?;
-    let source = sandbox.open(&source_account).await?;
-    let dest = sandbox.open(&dest_account).await?;
-    if !dest.server_traits().await?.hidden_item_types.is_empty() {
-        eprintln!("skipping: the destination server does not show passports");
-        return Ok(());
+    let (backed_up, _) = latest(&Store::new(dir.path(), "dest", &keys))?;
+    assert_eq!(backed_up.items().len(), count);
+    for item in backed_up.items() {
+        let fields = item.content["fields"].as_list().unwrap_or_default();
+        assert!(!fields.iter().any(plan::is_mirror_marker));
     }
-    let passport: std::collections::BTreeMap<String, Node> = [
-        ("surname", "Mustermann"),
-        ("givenName", "Erika"),
-        ("passportNumber", "C01X00T47"),
-        ("dateOfBirth", "1964-08-12"),
-        ("expirationDate", "2031-10-31"),
-    ]
-    .into_iter()
-    .map(|(key, value)| (key.to_string(), Node::secret(value)))
-    .collect();
-    let draft = Draft {
-        content: [
-            ("type".to_string(), Node::Number(8.into())),
-            ("name".to_string(), Node::secret("Passport")),
-            ("passport".to_string(), Node::Map(passport)),
-        ]
-        .into(),
-        folder_id: None,
-        collection_ids: vec![],
-    };
-    if let Err(error) = dest.create_item(&PERSONAL, &draft).await {
-        eprintln!("skipping: the destination server rejects passports: {error:#}");
-        return Ok(());
-    }
-
-    let dir = tempfile::tempdir()?;
-    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
-    let hidden = !source.server_traits().await?.hidden_item_types.is_empty();
-    let flags = RunFlags {
-        pull: true,
-        ..RunFlags::default()
-    };
-    let first = app::run_once(&config, flags, &Capture::default()).await;
-    assert!(first.succeeded(), "{first:?}");
-    let created = first.pulled.as_ref().unwrap().summary.items_created;
-    assert_eq!(created, usize::from(!hidden));
-    assert_eq!(
-        first.warnings.iter().any(|w| w.contains("out of the pull")),
-        hidden,
-        "{:?}",
-        first.warnings
-    );
-    let second = app::run_once(&config, flags, &Capture::default()).await;
-    assert!(second.succeeded(), "{second:?}");
-    assert_eq!(second.pulled.as_ref().unwrap().summary.items_created, 0);
-    Ok(())
-}
-
-/// A copy edited in the destination whose source item is gone goes back into
-/// the source as a new item, instead of being deleted by the mirror.
-#[tokio::test]
-async fn a_pull_brings_back_an_edited_copy_whose_source_item_is_gone() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let source_account = sandbox.register(&sandbox.source_url).await?;
-    let dest_account = sandbox.register(&sandbox.dest_url).await?;
-    let source = sandbox.open(&source_account).await?;
-    let dest = sandbox.open(&dest_account).await?;
-    fixtures::seed(&source).await?;
-    let dir = tempfile::tempdir()?;
-    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
-    let capture = Capture::default();
-    let run = |flags| app::run_once(&config, flags, &capture);
-    assert!(run(RunFlags::default()).await.succeeded());
-
-    let vault = dest.load(&PERSONAL).await?;
-    let copy = by_name(&vault, "Visa");
-    let mut edited = Draft {
-        content: copy.content.clone(),
-        folder_id: copy.folder_id.clone(),
-        collection_ids: vec![],
-    };
-    edited
-        .content
-        .insert("notes".into(), Node::secret("edited during the outage"));
-    dest.update_item(&PERSONAL, copy, &edited).await?;
-    let originals = source.load(&PERSONAL).await?;
-    source
-        .delete_items(&[by_name(&originals, "Visa").id.clone()])
-        .await?;
-
-    let pulled = run(RunFlags {
-        pull: true,
-        ..RunFlags::default()
-    })
-    .await;
-    assert!(pulled.succeeded(), "{pulled:?}");
-    assert_eq!(pulled.pulled.as_ref().unwrap().summary.items_created, 1);
-    assert!(!dir.path().join("unfinished-pull").exists());
-    for vault in [source.load(&PERSONAL).await?, dest.load(&PERSONAL).await?] {
-        assert_eq!(
-            by_name(&vault, "Visa").content["notes"].as_str(),
-            Some("edited during the outage")
-        );
-    }
-    let again = run(RunFlags::default()).await;
-    assert!(!again.mirror.as_ref().unwrap().changed, "{again:?}");
-    Ok(())
-}
-
-/// A pull that the mirror after it would refuse stops on the same safety
-/// check before it changes the source: one into a source that holds none of
-/// the originals, such as a new account, or one whose filter selects none.
-#[tokio::test]
-async fn a_pull_the_mirror_would_refuse_stops_before_changing_the_source() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let source_account = sandbox.register(&sandbox.source_url).await?;
-    let dest_account = sandbox.register(&sandbox.dest_url).await?;
-    let source = sandbox.open(&source_account).await?;
-    let dest = sandbox.open(&dest_account).await?;
-    fixtures::seed(&source).await?;
-    let dir = tempfile::tempdir()?;
-    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
-    assert!(
-        app::run_once(&config, RunFlags::default(), &Capture::default())
-            .await
-            .succeeded()
-    );
-    let mut content = fixtures::named("Bare login without folder").content;
-    content.insert("name".into(), Node::secret("Added during the outage"));
-    dest.create_item(
-        &PERSONAL,
-        &Draft {
-            content,
-            folder_id: None,
-            collection_ids: vec![],
-        },
-    )
-    .await?;
-    let vault = dest.load(&PERSONAL).await?;
-    let visa = by_name(&vault, "Visa");
-    let mut edited = Draft {
-        content: visa.content.clone(),
-        folder_id: visa.folder_id.clone(),
-        collection_ids: vec![],
-    };
-    edited
-        .content
-        .insert("notes".into(), Node::secret("edited during the outage"));
-    dest.update_item(&PERSONAL, visa, &edited).await?;
-    let before = source.load(&PERSONAL).await?;
-
-    let other_account = sandbox.register(&sandbox.source_url).await?;
-    let other_dir = tempfile::tempdir()?;
-    let configs = [
-        config_for(&other_account, Some(&dest_account), other_dir.path(), &[]),
-        config_for(
-            &source_account,
-            Some(&dest_account),
-            dir.path(),
-            &[("INCLUDE_FOLDERS", "Empty")],
-        ),
-    ];
-    for config in &configs {
-        let flags = RunFlags {
-            pull: true,
-            ..RunFlags::default()
-        };
-        let refused = app::run_once(config, flags, &Capture::default()).await;
-        assert!(!refused.succeeded(), "{refused:?}");
-        assert_eq!(refused.failure_stage.as_deref(), Some("pull"));
-        assert!(
-            refused
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("--allow-mass-delete")
-        );
-    }
-    let other = sandbox.open(&other_account).await?;
-    assert!(other.load(&PERSONAL).await?.items.is_empty());
-    let after = source.load(&PERSONAL).await?;
-    assert_eq!(after.items.len(), before.items.len());
-    assert_eq!(
-        by_name(&after, "Visa").content,
-        by_name(&before, "Visa").content
-    );
     Ok(())
 }
 
@@ -685,374 +349,13 @@ async fn destination_attachments_are_backed_up_before_the_mirror_deletes_them() 
     );
 
     let keys = keys(dir.path());
-    let store = Store::new(dir.path(), "dest", &keys);
-    let target = restored_copy(&sandbox, &store).await?;
-    let restored = target.load(&PERSONAL).await?;
-    let item = &restored.items[0];
-    let attachment = &item.attachments[0];
+    let (backed_up, snapshot) = latest(&Store::new(dir.path(), "dest", &keys))?;
+    let attachment = &backed_up.items()[0].attachments[0];
     assert_eq!(attachment.file_name, "only-copy.txt");
     assert_eq!(
-        target
-            .download_attachment(&PERSONAL, item, attachment)
-            .await?,
+        snapshot.attachment(&attachment.attachment_id)?,
         b"the only copy"
     );
-    Ok(())
-}
-
-/// A file replaced in an archived copy is pulled into the source item, which
-/// stays archived, also on servers where an upload takes an item out of the
-/// archive.
-#[tokio::test]
-async fn a_pull_into_an_archived_item_keeps_it_archived() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let source_account = sandbox.register(&sandbox.source_url).await?;
-    let dest_account = sandbox.register(&sandbox.dest_url).await?;
-    let source = sandbox.open(&source_account).await?;
-    let dest = sandbox.open(&dest_account).await?;
-    let name = "Bare login without folder";
-    let made = source
-        .create_item(
-            &PERSONAL,
-            &Draft {
-                content: fixtures::named(name).content,
-                folder_id: None,
-                collection_ids: vec![],
-            },
-        )
-        .await?;
-    source
-        .upload_attachment(&PERSONAL, &made, "file.txt", b"first")
-        .await?;
-    source
-        .set_archived(std::slice::from_ref(&made.id), true)
-        .await?;
-    let dir = tempfile::tempdir()?;
-    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
-    let capture = Capture::default();
-    let run = |flags| app::run_once(&config, flags, &capture);
-    let first = run(RunFlags::default()).await;
-    assert!(first.succeeded(), "{first:?}");
-    if first.warnings.iter().any(|w| w.contains("archive")) {
-        eprintln!("skipping: the destination server does not archive items");
-        return Ok(());
-    }
-
-    let vault = dest.load(&PERSONAL).await?;
-    let copy = by_name(&vault, name);
-    dest.delete_attachment(&copy.id, &copy.attachments[0].id)
-        .await?;
-    dest.upload_attachment(&PERSONAL, copy, "file.txt", b"second")
-        .await?;
-    let vault = dest.load(&PERSONAL).await?;
-    let copy = by_name(&vault, name);
-    if !copy.archived {
-        dest.set_archived(std::slice::from_ref(&copy.id), true)
-            .await?;
-    }
-
-    let pulled = run(RunFlags {
-        pull: true,
-        ..RunFlags::default()
-    })
-    .await;
-    assert!(pulled.succeeded(), "{pulled:?}");
-    assert_eq!(pulled.pulled.as_ref().unwrap().summary.items_updated, 1);
-    for (account, vault) in [
-        (&source, source.load(&PERSONAL).await?),
-        (&dest, dest.load(&PERSONAL).await?),
-    ] {
-        let item = by_name(&vault, name);
-        assert!(item.archived);
-        let [attachment] = item.attachments.as_slice() else {
-            panic!("expected one attachment");
-        };
-        let data = account
-            .download_attachment(&PERSONAL, item, attachment)
-            .await?;
-        assert_eq!(data, b"second");
-    }
-    Ok(())
-}
-
-/// A new personal item named `name`, with a file.
-async fn item_with_file(account: &Account, name: &str, data: &[u8]) -> Result<Item> {
-    let mut content = fixtures::named("Bare login without folder").content;
-    content.insert("name".into(), Node::secret(name));
-    let draft = Draft {
-        content,
-        folder_id: None,
-        collection_ids: vec![],
-    };
-    let item = account.create_item(&PERSONAL, &draft).await?;
-    account
-        .upload_attachment(&PERSONAL, &item, "file.txt", data)
-        .await?;
-    Ok(item)
-}
-
-/// Gives the item named `name` these notes.
-async fn write_notes(account: &Account, name: &str, notes: &str) -> Result<()> {
-    let vault = account.load(&PERSONAL).await?;
-    let item = by_name(&vault, name);
-    let mut draft = Draft {
-        content: item.content.clone(),
-        folder_id: item.folder_id.clone(),
-        collection_ids: vec![],
-    };
-    draft.content.insert("notes".into(), Node::secret(notes));
-    account.update_item(&PERSONAL, item, &draft).await?;
-    Ok(())
-}
-
-/// Replaces the one file of the item named `name`.
-async fn replace_file(account: &Account, name: &str, data: &[u8]) -> Result<()> {
-    let vault = account.load(&PERSONAL).await?;
-    let item = by_name(&vault, name);
-    account
-        .delete_attachment(&item.id, &item.attachments[0].id)
-        .await?;
-    account
-        .upload_attachment(&PERSONAL, item, "file.txt", data)
-        .await?;
-    Ok(())
-}
-
-/// The notes and the one file of the item named `name`.
-async fn notes_and_file(account: &Account, name: &str) -> Result<(String, Vec<u8>)> {
-    let vault = account.load(&PERSONAL).await?;
-    let item = by_name(&vault, name);
-    let [attachment] = item.attachments.as_slice() else {
-        panic!("expected one attachment");
-    };
-    let data = account
-        .download_attachment(&PERSONAL, item, attachment)
-        .await?;
-    let notes = item.content["notes"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-    Ok((notes, data))
-}
-
-/// A pull brings back only what changed in the destination, so what changed
-/// only in the source survives it and reaches the destination.
-#[tokio::test]
-async fn a_pull_takes_only_what_changed_in_the_destination() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let source_account = sandbox.register(&sandbox.source_url).await?;
-    let dest_account = sandbox.register(&sandbox.dest_url).await?;
-    let source = sandbox.open(&source_account).await?;
-    let dest = sandbox.open(&dest_account).await?;
-    let (files_in_dest, notes_in_dest) = ("File changed in the destination", "Notes changed there");
-    item_with_file(&source, files_in_dest, b"first").await?;
-    item_with_file(&source, notes_in_dest, b"first").await?;
-    let dir = tempfile::tempdir()?;
-    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
-    let capture = Capture::default();
-    let run = |flags| app::run_once(&config, flags, &capture);
-    assert!(run(RunFlags::default()).await.succeeded());
-
-    write_notes(&source, files_in_dest, "newer in the source").await?;
-    replace_file(&dest, files_in_dest, b"from the destination").await?;
-    replace_file(&source, notes_in_dest, b"from the source").await?;
-    write_notes(&dest, notes_in_dest, "edited in the destination").await?;
-
-    let pulled = run(RunFlags {
-        pull: true,
-        ..RunFlags::default()
-    })
-    .await;
-    assert!(pulled.succeeded(), "{pulled:?}");
-    for account in [&source, &dest] {
-        assert_eq!(
-            notes_and_file(account, files_in_dest).await?,
-            (
-                "newer in the source".into(),
-                b"from the destination".to_vec()
-            )
-        );
-        assert_eq!(
-            notes_and_file(account, notes_in_dest).await?,
-            (
-                "edited in the destination".into(),
-                b"from the source".to_vec()
-            )
-        );
-    }
-    let again = run(RunFlags::default()).await;
-    assert!(again.succeeded(), "{again:?}");
-    assert!(!again.mirror.as_ref().unwrap().changed);
-    Ok(())
-}
-
-/// A copy moved out of what the filter selects and edited there stays out of
-/// the source.
-#[tokio::test]
-async fn a_pull_leaves_edits_outside_the_filter_out_of_the_source() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let source_account = sandbox.register(&sandbox.source_url).await?;
-    let dest_account = sandbox.register(&sandbox.dest_url).await?;
-    let source = sandbox.open(&source_account).await?;
-    let dest = sandbox.open(&dest_account).await?;
-    let work = source.create_folder("Work").await?;
-    let mut content = fixtures::named("Bare login without folder").content;
-    content.insert("name".into(), Node::secret("Moved out"));
-    let draft = Draft {
-        content,
-        folder_id: Some(work.id),
-        collection_ids: vec![],
-    };
-    source.create_item(&PERSONAL, &draft).await?;
-    let dir = tempfile::tempdir()?;
-    let filter = [("INCLUDE_FOLDERS", "Work")];
-    let config = config_for(&source_account, Some(&dest_account), dir.path(), &filter);
-    let capture = Capture::default();
-    let run = |flags| app::run_once(&config, flags, &capture);
-    assert!(run(RunFlags::default()).await.succeeded());
-
-    let private = dest.create_folder("Private").await?;
-    let vault = dest.load(&PERSONAL).await?;
-    let copy = by_name(&vault, "Moved out");
-    let mut edited = Draft {
-        content: copy.content.clone(),
-        folder_id: Some(private.id),
-        collection_ids: vec![],
-    };
-    (edited.content).insert("notes".into(), Node::secret("private change"));
-    dest.update_item(&PERSONAL, copy, &edited).await?;
-
-    let pulled = run(RunFlags {
-        pull: true,
-        ..RunFlags::default()
-    })
-    .await;
-    assert!(pulled.succeeded(), "{pulled:?}");
-    assert_eq!(pulled.pulled.as_ref().unwrap().summary.items_updated, 0);
-    let back = source.load(&PERSONAL).await?;
-    let original = by_name(&back, "Moved out");
-    assert_eq!(folder_of(&back, original).as_deref(), Some("Work"));
-    let notes = original.content.get("notes").and_then(Node::as_str);
-    assert_ne!(notes, Some("private change"));
-    Ok(())
-}
-
-/// Changes a vault as the pull starts, as someone still using it might.
-struct DuringPull<'a>(Box<dyn Fn() -> BoxFuture<'a, Result<()>> + Sync + 'a>);
-
-impl Reporter for DuringPull<'_> {
-    fn status(&self, verb: &str, _: &str) {
-        if verb == "Pulling" {
-            tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on((self.0)()))
-                .unwrap();
-        }
-    }
-
-    fn warn(&self, _: &str) {}
-}
-
-/// The mirror after a pull replaces destination edits only once a backup
-/// holds them, also edits made after the run's first backup.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_mirror_after_a_pull_replaces_only_what_a_backup_holds() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let source_account = sandbox.register(&sandbox.source_url).await?;
-    let dest_account = sandbox.register(&sandbox.dest_url).await?;
-    let source = sandbox.open(&source_account).await?;
-    let dest = sandbox.open(&dest_account).await?;
-    item_with_file(&source, "Pulled", b"file").await?;
-    item_with_file(&source, "Edited during the pull", b"file").await?;
-    let dir = tempfile::tempdir()?;
-    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
-    let first = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
-    assert!(first.succeeded(), "{first:?}");
-    write_notes(&dest, "Pulled", "edited before the pull").await?;
-
-    let vault = dest.load(&PERSONAL).await?;
-    let copy = by_name(&vault, "Edited during the pull").clone();
-    let mut edited = Draft {
-        content: copy.content.clone(),
-        folder_id: copy.folder_id.clone(),
-        collection_ids: vec![],
-    };
-    (edited.content).insert("notes".into(), Node::secret("edited during the pull"));
-    let reporter = DuringPull(Box::new(|| {
-        Box::pin(async {
-            dest.update_item(&PERSONAL, &copy, &edited).await?;
-            Ok(())
-        })
-    }));
-    let flags = RunFlags {
-        pull: true,
-        ..RunFlags::default()
-    };
-    let pulled = app::run_once(&config, flags, &reporter).await;
-    assert!(pulled.succeeded(), "{pulled:?}");
-
-    let keys = keys(dir.path());
-    let store = Store::new(dir.path(), "dest", &keys);
-    let backed_up = store.list()?.iter().any(|id| {
-        let document = store.snapshot(id).document().unwrap();
-        document.to_string().contains("edited during the pull")
-    });
-    assert!(backed_up, "no destination snapshot holds the edit");
-    Ok(())
-}
-
-/// A file added to the source while a pull replaces that item's files is
-/// in no backup, so the pull leaves it in place.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_pull_keeps_a_file_added_to_the_source_during_it() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let source_account = sandbox.register(&sandbox.source_url).await?;
-    let dest_account = sandbox.register(&sandbox.dest_url).await?;
-    let source = sandbox.open(&source_account).await?;
-    let dest = sandbox.open(&dest_account).await?;
-    let original = item_with_file(&source, "Files changed on both sides", b"first").await?;
-    let dir = tempfile::tempdir()?;
-    let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
-    let first = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
-    assert!(first.succeeded(), "{first:?}");
-    write_notes(
-        &dest,
-        "Files changed on both sides",
-        "edited in the destination",
-    )
-    .await?;
-    replace_file(
-        &dest,
-        "Files changed on both sides",
-        b"from the destination",
-    )
-    .await?;
-
-    let reporter = DuringPull(Box::new(|| {
-        Box::pin(async {
-            let late = source.get_item(&PERSONAL, &original.id).await?;
-            source
-                .upload_attachment(&PERSONAL, &late, "late.txt", b"added during the pull")
-                .await?;
-            Ok(())
-        })
-    }));
-    let flags = RunFlags {
-        pull: true,
-        ..RunFlags::default()
-    };
-    app::run_once(&config, flags, &reporter).await;
-    let vault = source.load(&PERSONAL).await?;
-    let item = by_name(&vault, "Files changed on both sides");
-    assert!(item.attachments.iter().any(|a| a.file_name == "late.txt"));
     Ok(())
 }
 

@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, fs, path::PathBuf, str::FromStr};
 
-use crate::{api::ClientOptions, mirror::Filter};
+use crate::mirror::Filter;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("{0}")]
@@ -251,24 +251,6 @@ pub fn is_setting(name: &str) -> bool {
     )
 }
 
-pub fn vault_config(env: &HashMap<String, String>, prefix: &str) -> Result<VaultConfig> {
-    Env(env)
-        .vault(prefix)?
-        .ok_or_else(|| ConfigError(format!("no {} vault is configured", prefix.to_lowercase())))
-}
-
-pub fn client_options(env: &HashMap<String, String>) -> Result<ClientOptions> {
-    let env = Env(env);
-    let mut options = ClientOptions::default();
-    if let Some(path) = env.get("CA_CERT_FILE") {
-        options.extra_root_certs.push(
-            fs::read(&path)
-                .map_err(|error| ConfigError(format!("reading CA_CERT_FILE {path}: {error}")))?,
-        );
-    }
-    Ok(options)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,28 +461,6 @@ mod tests {
             error(without(&["BACKUP_PASSPHRASE"])),
             "BACKUP_PASSPHRASE is not set"
         );
-    }
-
-    #[test]
-    fn recovery_reads_only_the_requested_settings() {
-        let mut values = with(&[]);
-        values.remove("SOURCE_PASSWORD");
-        values.insert(
-            "SOURCE_PASSWORD_FILE".into(),
-            "/unavailable-source-secret".into(),
-        );
-        values.insert(
-            "NOTIFY_SUCCESS_URL_FILE".into(),
-            "/unavailable-notification-secret".into(),
-        );
-        assert!(Config::from_env(&values).is_err());
-        let target = vault_config(&values, "DEST").unwrap();
-        assert_eq!(target.client_id, "user.dest");
-        assert_eq!(
-            backup_passphrase(&values).unwrap().as_deref(),
-            Some("backup passphrase")
-        );
-        assert!(client_options(&values).is_ok());
     }
 
     #[test]

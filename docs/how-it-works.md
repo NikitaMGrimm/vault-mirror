@@ -49,21 +49,9 @@ source is back:
 docker compose stop vault-mirror
 ```
 
-Once the source is back, pull your changes over and start the daemon again:
-
-```sh
-docker compose run --rm vault-mirror run --pull
-docker compose up -d
-```
-
-A pull copies into the source every copy you changed and every item you added
-in the destination, if your folder and collection filters select them. If an
-item changed in both vaults, the destination's version wins; the source's is
-in that run's source backup. Then the run mirrors as usual.
-
-A pull deletes nothing, so an item you deleted in the destination comes back
-from the source. Until a started pull finishes, runs without `--pull` refuse to
-start.
+Once the source is back, make the same changes there, then start the daemon
+again with `docker compose up -d`. The destination backups hold every version
+of your changes; see [Backups and restoring](backups.md).
 
 ### Switching the source and destination
 

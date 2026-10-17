@@ -15,11 +15,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use console::{Console, ERROR};
 use time::OffsetDateTime;
 use vault_mirror::{
-    api::build_http_client,
     app::{self, RunFlags},
     config::{self, Config},
     mirror::{Endpoint, MirrorOptions, mirror},
-    restore::{RestoreOptions, restore},
     schedule::Timetable,
     snapshot,
     store::{self, Keys, Snapshot, Store},
@@ -49,9 +47,6 @@ struct RunArgs {
     /// Let this run take over copies made the other way round, after you switched the source and destination.
     #[arg(long)]
     reverse: bool,
-    /// First copy what changed in the destination back into the source, such as after using the destination while the source was down.
-    #[arg(long)]
-    pull: bool,
 }
 
 #[derive(Subcommand)]
@@ -74,8 +69,6 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Role::Source)]
         from: Role,
     },
-    /// Write a snapshot into a vault.
-    Restore(RestoreArgs),
     /// Decrypt a snapshot and its attachments into a directory, in the clear.
     Export {
         #[command(flatten)]
@@ -100,18 +93,6 @@ struct SnapshotArgs {
     /// A snapshot id, as `snapshots` lists it, or `latest`.
     #[arg(long, default_value = "latest")]
     snapshot: String,
-}
-
-#[derive(Args)]
-struct RestoreArgs {
-    #[command(flatten)]
-    snapshot: SnapshotArgs,
-    /// The configured vault to restore into.
-    #[arg(long, value_enum)]
-    to: Role,
-    /// Restore into a vault that already has items, keeping them.
-    #[arg(long)]
-    allow_non_empty: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -202,7 +183,6 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Daemon => daemon().await,
         Command::Check => check().await,
         Command::Snapshots { from } => snapshots(from),
-        Command::Restore(args) => restore_command(args).await,
         Command::Export { snapshot, output } => export(snapshot, &output),
         Command::Healthcheck { max_age_hours } => healthcheck(max_age_hours),
     }
@@ -212,7 +192,6 @@ fn flags(args: RunArgs) -> RunFlags {
     RunFlags {
         allow_mass_delete: args.allow_mass_delete,
         reverse: args.reverse,
-        pull: args.pull,
     }
 }
 
@@ -237,22 +216,13 @@ fn finished(status: &app::Status) -> String {
     match &status.mirror {
         Some(app::SummaryRecord {
             summary: mirror, ..
-        }) => {
-            let pulled = match &status.pulled {
-                Some(app::SummaryRecord { summary, .. }) => format!(
-                    "{} created and {} updated in the source, then ",
-                    summary.items_created, summary.items_updated
-                ),
-                None => String::new(),
-            };
-            format!(
-                "{pulled}{} created, {} updated, {} deleted, {} unchanged in {seconds:.1}s",
-                mirror.items_created,
-                mirror.items_updated,
-                mirror.items_deleted,
-                mirror.items_unchanged
-            )
-        }
+        }) => format!(
+            "{} created, {} updated, {} deleted, {} unchanged in {seconds:.1}s",
+            mirror.items_created,
+            mirror.items_updated,
+            mirror.items_deleted,
+            mirror.items_unchanged
+        ),
         None => format!("backup in {seconds:.1}s"),
     }
 }
@@ -439,43 +409,6 @@ fn locate_snapshot<'a>(store: &Store<'a>, role: Role, name: &str) -> Result<Snap
     };
     let id = id.ok_or_else(|| anyhow!("no snapshot {name} of the {} vault", role.name()))?;
     Ok(store.snapshot(id))
-}
-
-async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
-    let started = Instant::now();
-    let env = settings();
-    let backups = config::backups_dir(&env);
-    // A run at the same time could prune the snapshot being restored, or
-    // mirror into the vault being restored to.
-    let _lock = app::lock_backups_dir(&backups)?;
-    let keys = read_keys(&backups, &env)?;
-    let store = Store::new(&backups, args.snapshot.from.name(), &keys);
-    let backup = locate_snapshot(&store, args.snapshot.from, &args.snapshot.snapshot)?;
-
-    let http = build_http_client(&config::client_options(&env)?)?;
-    let role = args.to.name();
-    let target_config = config::vault_config(&env, &role.to_uppercase())?;
-    let account = app::open_account(&backups, &http, &target_config, role).await?;
-    let target = Endpoint {
-        account: &account,
-        scope: app::scope_of(&target_config),
-    };
-    let options = RestoreOptions {
-        allow_non_empty: args.allow_non_empty,
-    };
-    let report = restore(&target, &backup, &options, &Console).await?;
-    Console::finished(
-        &format!(
-            "restore of {}, {}, {} and {} in {:.1}s",
-            count(report.items, "item"),
-            count(report.attachments_restored, "attachment"),
-            count(report.folders_created, "new folder"),
-            count(report.collections_created, "new collection"),
-            started.elapsed().as_secs_f64()
-        ),
-        report.items_left_out + report.items_left_unarchived + report.attachments_skipped > 0,
-    );
-    Ok(ExitCode::SUCCESS)
 }
 
 fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {

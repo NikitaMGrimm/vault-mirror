@@ -41,13 +41,12 @@ everything else, with a warning. Organizations don't need Premium.
 
 **Bank accounts, driver's licences and passports.** Bitwarden only shows these
 item types where it has turned them on. Until it does on the destination's
-server, vault-mirror leaves them out with a warning, and `run --pull` does the
-same for the source's server. Vaultwarden always shows them. If the source
+server, vault-mirror leaves them out with a warning. Vaultwarden always shows them. If the source
 stops showing them, the run stops rather than delete their copies.
 
 **Organization items need a collection on Bitwarden.** Source items in no
 collection are left out, with a warning, when the destination is a Bitwarden
-server. `run --pull` does the same the other way round.
+server.
 
 **Archived items** need a destination that supports archiving. Otherwise they're
 copied unarchived, with a warning.

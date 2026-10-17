@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -15,7 +15,7 @@ use crate::{
     api::{ApiCredentials, ClientOptions, ServerUrls, build_http_client},
     backup::{BackupOptions, BackupReport, backup_loaded},
     config::{Config, VaultConfig},
-    mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto, pull},
+    mirror::{Endpoint, MirrorOptions, Reporter, mirror_onto},
     plan::{Safety, Summary},
     store::{self, Keys, Store},
     text::count,
@@ -25,14 +25,11 @@ use crate::{
 pub const STATUS_FILE: &str = "last-run.json";
 const STATE_FILE: &str = "state.json";
 const LOCK_FILE: &str = "run.lock";
-/// Present while a `run --pull` has not finished its pull.
-const UNFINISHED_PULL_FILE: &str = "unfinished-pull";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunFlags {
     pub allow_mass_delete: bool,
     pub reverse: bool,
-    pub pull: bool,
 }
 
 /// The record of a run, written to `last-run.json`. It holds counts, times
@@ -44,9 +41,6 @@ pub struct Status {
     pub finished_at: String,
     pub duration_seconds: f64,
     pub version: String,
-    /// What a pull changed in the source, before the mirror.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pulled: Option<SummaryRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror: Option<SummaryRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,7 +100,7 @@ pub fn device_id(backups_dir: &Path, role: &str) -> Result<String> {
     Ok(id)
 }
 
-/// Claims the backup directory for one run or restore; it is released when
+/// Claims the backup directory for one command; it is released when
 /// the file is closed. Two runs at once could both prune and write the same
 /// snapshots and attachment files, and would both write `last-run.json`.
 pub fn lock_backups_dir(backups_dir: &Path) -> Result<fs::File> {
@@ -226,19 +220,6 @@ async fn execute(
     progress: &mut Progress,
     now: OffsetDateTime,
 ) -> Result<()> {
-    if flags.pull && config.dest.is_none() {
-        bail!("run --pull copies from the destination, and none is configured");
-    }
-    let unfinished_pull = config.backups_dir.join(UNFINISHED_PULL_FILE);
-    // Destination items the pull didn't get to still hold changes that a run
-    // without it would overwrite.
-    if config.dest.is_some() && !flags.pull && unfinished_pull.exists() {
-        progress.stage = "unfinished pull";
-        bail!(
-            "the last run --pull stopped before it finished, and this run would overwrite \
-             what it had still to bring back. Run with --pull again"
-        );
-    }
     let http = http_client(config)?;
     let keys = Keys::open(&config.backups_dir, &config.backup.passphrase)?;
     let backup_options = BackupOptions {
@@ -252,7 +233,6 @@ async fn execute(
     progress.stage = "source backup";
     reporter.status("Backing up", "the source vault");
     let store = Store::new(&config.backups_dir, "source", &keys);
-    // A pull writes to the source, and changes only what this backup holds.
     let source_vault = source
         .load(&source_scope)
         .await
@@ -283,7 +263,7 @@ async fn execute(
     reporter.status("Backing up", "the destination vault");
     let store = Store::new(&config.backups_dir, "dest", &keys);
     // The mirror changes only what this backup holds.
-    let mut dest_vault = dest.load(&dest_scope).await.context("reading the vault")?;
+    let dest_vault = dest.load(&dest_scope).await.context("reading the vault")?;
     progress.status.dest_backup = Some(
         backup_loaded(
             &dest,
@@ -312,44 +292,6 @@ async fn execute(
         },
         filter: config.filter.clone(),
     };
-
-    if flags.pull {
-        progress.stage = "pull";
-        store::write_private(&unfinished_pull, b"")?;
-        let pulled = pull(
-            &source,
-            &dest,
-            &source_vault,
-            &dest_vault,
-            &options,
-            reporter,
-        )
-        .await?;
-        progress.status.pulled = Some(SummaryRecord {
-            changed: pulled.summary != Summary::default(),
-            summary: pulled.summary,
-        });
-        progress.status.warnings.extend(pulled.warnings);
-        fs::remove_file(&unfinished_pull)
-            .with_context(|| format!("removing {}", unfinished_pull.display()))?;
-        // The pull rewrote the destination, so the mirror needs a new read,
-        // and that read a backup: it can hold edits the first one missed.
-        progress.stage = "destination backup";
-        reporter.status("Backing up", "the destination vault");
-        dest_vault = (dest.account.load(&dest.scope).await).context("reading the vault")?;
-        let again = backup_loaded(
-            dest.account,
-            &dest.scope,
-            &dest_vault,
-            &store,
-            &backup_options,
-            reporter,
-        )
-        .await?;
-        if again.snapshot.is_some() {
-            progress.status.dest_backup = Some(again);
-        }
-    }
 
     progress.stage = "mirror";
     match mirror_onto(&source, &dest, Some(dest_vault), &options, reporter).await {
@@ -562,12 +504,6 @@ mod tests {
         assert!(!dir.path().join("key.age").exists());
 
         drop(running);
-        let pull = RunFlags {
-            pull: true,
-            ..RunFlags::default()
-        };
-        let refused = run_once(&config, pull, &Quiet).await;
-        assert!(refused.error.unwrap().contains("none is configured"));
         lock_backups_dir(dir.path()).unwrap();
         #[cfg(unix)]
         {

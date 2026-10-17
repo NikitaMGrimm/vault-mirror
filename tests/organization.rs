@@ -2,13 +2,10 @@ mod common;
 
 use anyhow::Result;
 use common::*;
-use serde_json::json;
 use vault_mirror::{
     crypto::KdfParams,
-    mirror::{Endpoint, MirrorOptions, pull},
+    mirror::MirrorOptions,
     node::Node,
-    restore::{RestoreOptions, restore},
-    store::{Keys, Store},
     vault::{Account, Draft, Scope, Vault},
 };
 
@@ -422,118 +419,5 @@ async fn items_in_no_collection_are_never_lost_silently() -> Result<()> {
             .await?
             .changed
     );
-    Ok(())
-}
-
-/// A destination item in no collection is left out of a pull, with a
-/// warning, when the source server refuses such items, instead of stopping
-/// every pull.
-#[tokio::test]
-async fn a_pull_leaves_out_items_in_no_collection_that_the_source_refuses() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let (source, source_scope, _) = organization(&sandbox, &sandbox.source_url).await?;
-    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
-    if dest.server_traits().await?.items_need_collections {
-        eprintln!("skipping: the destination server hides items in no collection");
-        return Ok(());
-    }
-    let note = Draft {
-        content: [
-            ("type".to_string(), Node::Number(2.into())),
-            ("name".to_string(), Node::secret("Loose note")),
-            (
-                "secureNote".to_string(),
-                Node::Map([("type".to_string(), Node::Number(0.into()))].into()),
-            ),
-        ]
-        .into(),
-        folder_id: None,
-        collection_ids: vec![],
-    };
-    dest.create_item(&dest_scope, &note).await?;
-
-    let source_vault = source.load(&source_scope).await?;
-    let dest_vault = dest.load(&dest_scope).await?;
-    let pulled = pull(
-        &Endpoint {
-            account: &source,
-            scope: source_scope,
-        },
-        &Endpoint {
-            account: &dest,
-            scope: dest_scope,
-        },
-        &source_vault,
-        &dest_vault,
-        &MirrorOptions::default(),
-        &Capture::default(),
-    )
-    .await?;
-    let refused = source.server_traits().await?.items_need_collections;
-    assert_eq!(pulled.summary.items_created, usize::from(!refused));
-    assert_eq!(
-        pulled
-            .warnings
-            .iter()
-            .any(|w| w.contains("out of the pull")),
-        refused
-    );
-    Ok(())
-}
-
-/// A restore leaves out what the target server would accept but not show,
-/// and says so, instead of reporting items that cannot be found.
-#[tokio::test]
-async fn a_restore_leaves_out_items_the_target_would_hide() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
-    let note = |id: &str, name: &str, collection_ids: &[&str]| {
-        json!({"id": id, "type": 2, "name": name, "secureNote": {"type": 0},
-            "collectionIds": collection_ids})
-    };
-    let dir = tempfile::tempdir()?;
-    let keys = Keys::open(dir.path(), "test backup passphrase")?;
-    let store = Store::new(dir.path(), "source", &keys);
-    let id = store
-        .begin(time::OffsetDateTime::now_utc())?
-        .finish(&json!({
-            "encrypted": false,
-            "collections": [{"id": "c1", "name": "Shared"}],
-            "items": [note("i1", "Loose note", &[]), note("i2", "Shared note", &["c1"])],
-            "vaultMirror": {"scope": "organization", "plainStrings": {}, "attachments": []},
-        }))?;
-    let capture = Capture::default();
-    let report = restore(
-        &Endpoint {
-            account: &dest,
-            scope: dest_scope.clone(),
-        },
-        &store.snapshot(&id),
-        &RestoreOptions {
-            allow_non_empty: false,
-        },
-        &capture,
-    )
-    .await?;
-
-    let restored = dest.load(&dest_scope).await?;
-    assert_eq!(restored.items.len(), report.items);
-    if dest.server_traits().await?.items_need_collections {
-        assert_eq!((report.items, report.items_left_out), (1, 1));
-        assert!(
-            capture
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|line| line.starts_with("warn:") && line.contains("1 item ")),
-        );
-    } else {
-        assert_eq!((report.items, report.items_left_out), (2, 0));
-    }
     Ok(())
 }

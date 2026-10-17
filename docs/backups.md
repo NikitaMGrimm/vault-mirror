@@ -14,7 +14,6 @@ backups/
 ├── last-run.json              # the last run's outcome
 ├── state.json                 # login device ids
 ├── run.lock                   # held while a command uses the directory
-├── unfinished-pull            # there while a pull has not finished
 ├── source/
 │   └── 20261014T030000Z/      # one snapshot
 │       ├── vault.json.age
@@ -63,26 +62,16 @@ docker compose run --rm vault-mirror export --output /data/recovered
 
 Import `export.json` with any Bitwarden client, then attach the files from
 `attachments/<attachment id>/` to their items. Delete the output when done.
-
-Or restore the newest source snapshot straight into the destination:
-
-```sh
-docker compose run --rm vault-mirror restore --to dest
-```
-
-Restored items are not copies, so a run into a restored destination copies the
-source next to them. To rebuild a lost destination, mirror into an empty one
-instead.
+Imported items are not copies, so to rebuild a lost destination, mirror into an
+empty one instead.
 
 | Option | Effect |
 | --- | --- |
 | `--from dest` | Read the destination's snapshots. |
 | `--snapshot ID` | Use this snapshot instead of the newest. |
-| `--allow-non-empty` | Restore into a vault that already has items. |
 
-These commands need only `BACKUPS_DIR`, `BACKUP_PASSPHRASE` and, to restore, the
-target vault's settings. Without Docker, replace
-`docker compose run --rm vault-mirror` with
+These commands need only `BACKUPS_DIR` and `BACKUP_PASSPHRASE`. Without Docker,
+replace `docker compose run --rm vault-mirror` with
 `vault-mirror --env-file vault-mirror.env`.
 
 When you're done, start the daemon again with `docker compose up -d`.
