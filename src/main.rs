@@ -64,7 +64,7 @@ enum Command {
     },
     /// Back up, then mirror the source into the destination, once.
     Run(RunArgs),
-    /// Keep running on SCHEDULE.
+    /// Run now, then on SCHEDULE, until stopped.
     Daemon,
     /// Log in to the configured vaults and report what a run would do, without changing them.
     Check(RunArgs),

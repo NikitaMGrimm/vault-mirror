@@ -30,26 +30,41 @@ schedule.
 Folders and collections are matched by name, so two with the same name in the
 source share one in the destination.
 
-A run stops if it can't decrypt an item, or if a destination attachment has no
-readable file, such as after a failed upload. The error gives the id of the
-item or attachment.
+A run stops before it changes anything if it can't decrypt an item, or if an
+attachment in either vault has no readable file, such as after a failed upload.
+The error gives the ids of the item and the attachment; see [An attachment
+without a file](backups.md#an-attachment-without-a-file). Items stored as one
+encrypted data blob aren't supported yet and stop the run too.
 
 ## Server restrictions
 
-**Attachments need Premium on Bitwarden.** A free personal destination gets
-everything else, with a warning. Organizations don't need Premium.
+A run never leaves part of the source out. When the destination can't hold
+something, the run fails and sends the failure notification. Except for
+archiving, these are found before the run changes anything. A failed run keeps
+the backups it made at its start.
+
+**Attachments need Premium on Bitwarden.** A run into a free personal
+destination stops when it has attachments to copy. Organizations don't need
+Premium.
 
 **Bank accounts, driver's licences and passports.** Bitwarden only shows these
 item types where it has turned them on. Until it does on the destination's
-server, vault-mirror leaves them out with a warning. Vaultwarden always shows them. If the source
-stops showing them, the run stops rather than delete their copies.
+server, a run stops while the source has any. Vaultwarden always shows them. If
+the source stops showing them, the run stops rather than delete their copies.
 
-**Organization items need a collection on Bitwarden.** Source items in no
-collection are left out, with a warning, when the destination is a Bitwarden
-server.
+**Organization items need a collection on Bitwarden.** When the destination is
+a Bitwarden server, a run stops while source items are in no collection.
 
-**Archived items** need a destination that supports archiving. Otherwise they're
-copied unarchived, with a warning.
+**Archived items** need a destination that supports archiving. A run stops if
+the destination refuses to archive a copy.
+
+## Changes during a run
+
+A run plans from the reads its backups saved. A change made in the destination
+after that, to a copy the run then writes, can be lost without a backup. Before
+it deletes copies, a run reads them again and stops if one changed, but a
+change made between that read and the deletion still goes to the trash with
+the copy.
 
 ## Large vaults
 

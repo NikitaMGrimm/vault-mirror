@@ -76,6 +76,32 @@ replace `docker compose run --rm vault-mirror` with
 
 When you're done, start the daemon again with `docker compose up -d`.
 
+## An attachment without a file
+
+An upload that stopped part way can leave an attachment that has no file. A
+backup can't download it, so every run stops before it changes anything, with
+an error such as:
+
+```text
+error: the run failed during destination backup: downloading attachment <attachment id> of item <item id>: …
+```
+
+Until you fix it, no new snapshot of that vault is made and none is pruned, so
+the last complete one stays. To export it, find its id with `snapshots` and pass
+it to `export`:
+
+```sh
+docker compose run --rm vault-mirror snapshots --from dest
+docker compose run --rm vault-mirror export --from dest --snapshot ID --output /data/recovered
+```
+
+For the source, use `--from source` instead.
+
+To fix it, open the item in a Bitwarden client you trust, delete the attachment
+the error names, and attach the file again if you have it, for example from the
+export. If a later run stops at that copy because its attachments changed, see
+[How copies are recognized](how-it-works.md#how-copies-are-recognized).
+
 ## Restore without vault-mirror
 
 These commands write secrets unencrypted. Work in a private directory and

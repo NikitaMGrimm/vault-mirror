@@ -21,7 +21,8 @@ Environment variables can be visible to other processes on the same host. To
 keep secrets out of them, use [secret files](docs/configuration.md#secrets-in-files).
 
 vault-mirror never writes to the source. A run changes and deletes only the
-copies it made in the destination.
+copies it made in the destination, and stops rather than overwrite a copy
+someone changed there.
 
 ## What it stores
 
@@ -59,5 +60,6 @@ to 2,000,000 PBKDF2 iterations, or Argon2id with 2 to 10 iterations, 16 to
 ## The marker on each copy
 
 Every copy carries a [marker](docs/how-it-works.md#how-copies-are-recognized):
-a hidden custom field, encrypted like any other. It adds only the source item's
-id to what someone who can open the destination already sees.
+a hidden custom field, encrypted like any other. It adds the source item's id
+and a hash naming the two vaults to what someone who can open the destination
+already sees.

@@ -110,12 +110,15 @@ here in the same pull request.
 
 ### Safety checks
 
-- Change and delete only copies. An item without a marker belongs to the
-  user, and so does the folder or collection it is in. Never write to the
-  source.
+- Change and delete only copies whose marker names this pair of vaults. An
+  item without one belongs to the user. Never delete folders or collections,
+  and never write to the source.
 - Refuse only a state that is almost never intended: swapped vaults, one
-  vault twice, or a run that deletes every earlier copy.
-- Name the flag that allows a refused run once.
+  vault twice, copies changed in the destination, or a run that deletes more
+  than half of the copies.
+- Name the flag that allows a refused run once. The daemon takes no flags.
+- When the destination can't hold part of the source, fail the run. Never
+  report a partial copy as a success.
 
 ### Documentation
 

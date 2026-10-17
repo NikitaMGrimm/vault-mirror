@@ -285,8 +285,6 @@ async fn changes_to_copies_in_the_destination_are_replaced_only_when_allowed() -
         .await?;
     let changed = dest.load(&PERSONAL).await?;
 
-    // The card number, the attachment deleted from GitHub and the note taken
-    // out of the archive.
     let mut ids = [visa.id.clone(), github.id.clone(), note.id.clone()];
     ids.sort();
     for error in [
@@ -376,7 +374,10 @@ async fn items_vault_mirror_did_not_make_are_left_alone() -> Result<()> {
     assert_eq!(first.summary.items_created, fixtures::samples().len());
     assert_eq!(first.summary.items_deleted, 0);
     assert!(
-        first.warnings.iter().any(|w| w.contains("didn't make")),
+        first
+            .warnings
+            .iter()
+            .any(|w| w.contains("didn't copy from this source")),
         "{:?}",
         first.warnings
     );
@@ -882,8 +883,6 @@ async fn an_interrupted_attachment_copy_is_repaired() -> Result<()> {
             .upload_attachment(&PERSONAL, item, "file.txt", b"new")
             .await?;
     }
-    // What a run leaves when it stops after writing the item, before or
-    // after it removed the old files.
     let dest_vault = dest.load(&PERSONAL).await?;
     let emptied = by_name(&dest_vault, "Extra note 0");
     dest.delete_attachment(&emptied.id, &emptied.attachments[0].id)

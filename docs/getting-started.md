@@ -75,15 +75,14 @@ Nothing has been changed yet. The "Would" line is the plan.
 docker compose up -d
 ```
 
-The first run starts at the next scheduled time, such as 03:00.
-
-To run once now instead of waiting:
+The daemon runs once right away, then at each scheduled time, such as 03:00.
+To see what it does:
 
 ```sh
-docker compose run --rm vault-mirror run
+docker compose logs -f
 ```
 
-A first run prints:
+A first run prints this, with a timestamp and a level before each line:
 
 ```text
   Backing up the source vault
@@ -136,8 +135,9 @@ docker compose up -d
 ## If a run stops
 
 vault-mirror stops before it changes anything when the plan looks like a
-mistake, such as swapped vaults or an empty source. The error names the reason
-and the flag that allows the run. See [safety checks](how-it-works.md#safety-checks).
+mistake, such as swapped vaults, an empty source or copies changed in the
+destination. The error names the reason and the flag that allows the run. See
+[safety checks](how-it-works.md#safety-checks).
 
 ## Next steps
 

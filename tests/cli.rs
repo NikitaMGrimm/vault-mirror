@@ -293,8 +293,6 @@ fn signal(daemon: &Daemon, name: &str) {
     assert!(sent.success());
 }
 
-/// Waits for the daemon to exit, and returns whether it succeeded and what it
-/// printed.
 #[cfg(unix)]
 fn stopped(mut daemon: Daemon, lines: std::sync::mpsc::Receiver<String>) -> (bool, Vec<String>) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);

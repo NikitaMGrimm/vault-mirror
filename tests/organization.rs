@@ -136,7 +136,6 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
         .changed
     );
 
-    // Move an item to another collection, edit one, and delete a collection.
     let source_vault = source.load(&source_scope).await?;
     let github = by_name(&source_vault, "GitHub");
     let moved = Draft {

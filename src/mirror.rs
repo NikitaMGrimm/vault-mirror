@@ -568,8 +568,8 @@ impl<'a> Run<'a> {
             ));
         } else if plan.tracked_before == 0 && plan.untracked > 0 {
             self.warn(format!(
-                "The destination has {} that vault-mirror didn't make. Runs leave them as they \
-                 are, so if they are older copies of the source, delete them to avoid duplicates.",
+                "The destination has {} that vault-mirror didn't copy from this source. Runs \
+                 leave them as they are.",
                 count(plan.untracked, "item")
             ));
         }

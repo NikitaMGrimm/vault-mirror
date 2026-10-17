@@ -7,9 +7,9 @@
 | Command | What it does |
 | --- | --- |
 | `vault-mirror init [--dir DIR]` | Asks for the accounts, checks the logins, writes `vault-mirror.env` and `compose.yaml`, and shows what the first run would do. |
-| `vault-mirror run` | Does one run. `--allow-mass-delete` and `--reverse` get past a [safety check](how-it-works.md#safety-checks) for this run. |
-| `vault-mirror daemon` | Keeps running on `SCHEDULE`. On `SIGTERM` it waits for a run in progress, then stops. |
-| `vault-mirror check` | Logs in, counts what's in each vault, and shows what a run would do. It never changes either vault. |
+| `vault-mirror run` | Does one run. `--allow-overwrite`, `--allow-mass-delete` and `--reverse` get past a [safety check](how-it-works.md#safety-checks) for this run. |
+| `vault-mirror daemon` | Runs once when it starts, then on `SCHEDULE`. On `SIGTERM` or Ctrl-C it lets a run in progress finish, then stops. |
+| `vault-mirror check` | Logs in, counts what's in each vault, and shows what a run would do. It never changes either vault. It takes the same flags as `run`. |
 | `vault-mirror snapshots` | Lists the backup snapshots. |
 | `vault-mirror export --output DIR` | Decrypts a snapshot and its attachments into a new directory. |
 | `vault-mirror healthcheck [--max-age-hours 26]` | Exits successfully only if the last run succeeded within that many hours. The container image uses it as its health check. |
@@ -22,9 +22,9 @@ starts with a UTC timestamp and a level. Set `NO_COLOR` to turn colours off.
 
 ## Scheduling
 
-The container's `daemon` command runs at the times `SCHEDULE` names, not at
-startup. The image's health check gives the first run 26 hours. To use your
-own scheduler instead, have it start `vault-mirror run`.
+The container's `daemon` command runs once when it starts, then at the times
+`SCHEDULE` names. The image's health check gives the first run 26 hours. To
+use your own scheduler instead, have it start `vault-mirror run`.
 
 Only one `run`, `daemon` run, `export` or `snapshots` can use a
 backup directory at a time. Another one stops straight away without changing

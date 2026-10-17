@@ -26,7 +26,8 @@ Use these terms the way the docs do:
   to match it.
 - **run**: one backup-compare-change-verify cycle (`app::run_once`).
 - **copy**: a destination item vault-mirror made. **marker**: the hidden
-  `vault-mirror` field on every copy that names its source item.
+  `vault-mirror` field on every copy that names its pair of vaults and its
+  source item.
 - **snapshot**: one encrypted backup of one vault.
 - **scope**: a personal vault or one organization (`vault::Scope`).
 - **settings file**: `vault-mirror.env`.

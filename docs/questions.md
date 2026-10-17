@@ -11,9 +11,9 @@ No. vault-mirror only reads the source.
 Items you add there stay. vault-mirror changes and deletes only its copies, which
 it recognizes by their [marker](how-it-works.md#how-copies-are-recognized).
 
-If you edit a copy, the next run puts the source version back and warns you.
-Your edit is in that run's destination backup. To change an item for good,
-change it in the source.
+If you change a copy, runs stop before changing anything and list it. To change
+an item for good, change it in the source. To put the source version back, run
+once with `--allow-overwrite`; that run's destination backup keeps your change.
 
 ## Can it sync in both directions?
 
@@ -26,7 +26,7 @@ destination](how-it-works.md#switching-the-source-and-destination).
 ## What happens when I delete an item in the source?
 
 The next run deletes its copy, which stays in that run's destination backup. A
-run that would delete every copy stops. See
+run that would delete more than half of the copies stops. See
 [safety checks](how-it-works.md#safety-checks).
 
 ## What happens when the source server is down?
