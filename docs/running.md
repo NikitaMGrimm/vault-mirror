@@ -18,34 +18,8 @@
 Every command takes `--env-file PATH` to read a [settings
 file](configuration.md#the-settings-file), and `--help` to describe its options.
 
-## Output
-
-At a terminal, each step is one line: a coloured verb, then what happened. Long
-steps show a progress bar. The last line always starts with `Finished` and sums
-up the run:
-
-```text
-  Backing up the source vault
-       Saved snapshot 20261014T030000Z with 151 items
-  Backing up the destination vault
-     Skipped a new snapshot; the vault is unchanged since the newest one
-     Planned to update 2 items, delete 1 item; 149 items unchanged
-     Updated 2 items
-     Deleted 1 item
-    Verified the destination
-    Finished 0 created, 2 updated, 1 deleted, 149 unchanged in 6.8s
-```
-
-Elsewhere, such as in container logs or under systemd, each line starts with a
-UTC timestamp and a level instead:
-
-```text
-2026-10-14T03:00:12Z INFO Created 9 items
-2026-10-14T03:00:13Z WARN The destination refused to change the archive state of 1 item: ...
-```
-
-Set `NO_COLOR` to turn colours off. Messages contain counts, file names and
-server-side ids, but never item names, passwords or other vault content.
+Outside a terminal, such as in container logs or under systemd, each line
+starts with a UTC timestamp and a level. Set `NO_COLOR` to turn colours off.
 
 ## Scheduling
 

@@ -67,8 +67,7 @@ Nothing has been changed yet. The "Would" line is the plan.
 
 > [!IMPORTANT]
 > Keep `BACKUP_PASSPHRASE` somewhere you can reach without either vault.
-> After the first run, keep a copy of `backups/key.age` there too. Recovery
-> needs both.
+> Without it, the backups can't be read.
 
 ## Step 3: Start it
 

@@ -6,7 +6,7 @@
   part of a vault.
 - [Backups and restoring](backups.md): the backup directory, and getting data
   back out.
-- [Commands and scheduling](running.md): every command, output, and systemd.
+- [Commands and scheduling](running.md): every command, scheduling, and systemd.
 - [Limitations](limitations.md): what isn't copied, and server restrictions.
 - [Questions](questions.md): short answers to common questions.
 - [Security](../SECURITY.md): what vault-mirror can access and what it stores.

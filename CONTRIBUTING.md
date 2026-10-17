@@ -75,10 +75,7 @@ release binary and example built, run:
 python3 .github/scripts/demo.py
 ```
 
-The recorder captures `check` and `run` once against new sandbox accounts. VHS
-measures their actual terminal output before rendering. Longer output gets more
-rows, up to 24, then scrolls in readable pages. The font stays the same size.
-A failed capture or render leaves the previous GIF in place. Releases publish a
+It records `check` and `run` against new sandbox accounts. Releases publish a
 fresh recording automatically.
 
 ### Performance

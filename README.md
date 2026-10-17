@@ -31,6 +31,9 @@ vault-mirror copies your main vault, the **source**, into a second vault, the
 2. creates, updates and deletes items until the destination matches the source,
 3. reads the destination back to check the result.
 
+Changes go one way. Items you add to the destination stay, but the next run
+replaces your edits to the copies.
+
 Use it to keep a working copy on Bitwarden's cloud for when your own server is
 down, to move between servers, or to share one folder or collection with
 another account.
@@ -48,7 +51,8 @@ another account.
 ## Quick start
 
 You need Docker, your main account, and a second account for the destination.
-vault-mirror only changes the copies it makes there.
+vault-mirror stores both accounts' API keys and master passwords; see
+[Security](SECURITY.md) for what that means.
 
 1. In the web vault of each account, open **Settings → Security → Keys** and
    select **View API key**. Keep both pages open.
@@ -84,17 +88,12 @@ binaries for Linux (x86-64, arm64), macOS (Apple silicon, Intel) and Windows
 (x86-64, arm64), with checksums and [build
 provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations).
 
-With Rust installed, download the release binary with
-[cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
+With Rust installed, use [cargo-binstall](https://github.com/cargo-bins/cargo-binstall)
+or cargo:
 
 ```sh
-cargo binstall vault-mirror
-```
-
-Or build it from source:
-
-```sh
-cargo install vault-mirror --locked
+cargo binstall vault-mirror          # the release binary
+cargo install vault-mirror --locked  # or build from source
 ```
 
 The macOS binaries aren't notarized. If you downloaded one in a browser, allow
@@ -112,7 +111,7 @@ xattr -d com.apple.quarantine vault-mirror
   mirroring part of a vault.
 - [Backups and restoring](docs/backups.md): the backup directory, and getting
   data back out.
-- [Commands and scheduling](docs/running.md): every command, output, and systemd.
+- [Commands and scheduling](docs/running.md): every command, scheduling, and systemd.
 - [Limitations](docs/limitations.md): what isn't copied, and server restrictions.
 - [Questions](docs/questions.md): short answers to common questions.
 - [Security](SECURITY.md): what vault-mirror can access and what it stores.
