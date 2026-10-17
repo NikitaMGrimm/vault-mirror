@@ -374,8 +374,38 @@ async fn destination_attachments_are_backed_up_before_the_mirror_deletes_them() 
     Ok(())
 }
 
-#[tokio::test]
-async fn an_unreadable_attachment_stops_runs_and_the_last_snapshot_stays() -> Result<()> {
+/// Exports the newest snapshot of `role` with the command line. Returns the
+/// export and the content of each attachment file by name.
+fn export(backups: &Path, role: &str) -> Result<(serde_json::Value, HashMap<String, Vec<u8>>)> {
+    let parent = tempfile::tempdir()?;
+    let output = parent.path().join("export");
+    let exported = Command::new(env!("CARGO_BIN_EXE_vault-mirror"))
+        .env_clear()
+        .env("BACKUPS_DIR", backups)
+        .env("BACKUP_PASSPHRASE", "test backup passphrase")
+        .args(["export", "--from", role, "--output"])
+        .arg(&output)
+        .output()?;
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let document = serde_json::from_slice(&std::fs::read(output.join("export.json"))?)?;
+    let files = walk(&output.join("attachments"))
+        .into_iter()
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, std::fs::read(&path).unwrap())
+        })
+        .collect();
+    Ok((document, files))
+}
+
+/// An attachment that a backup of `role` cannot download stops every run
+/// before it writes anything, and leaves the last complete snapshot of that
+/// vault, even past retention, for export.
+async fn an_unreadable_attachment_in(role: &str) -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
@@ -398,49 +428,67 @@ async fn an_unreadable_attachment_stops_runs_and_the_last_snapshot_stays() -> Re
         .await?;
     let dir = tempfile::tempdir()?;
     let config = config_for(&source_account, Some(&dest_account), dir.path(), &[]);
-    assert!(
-        app::run_once(&config, RunFlags::default(), &Capture::default())
-            .await
-            .succeeded()
-    );
+    // The second run backs up the destination with its copy.
+    for _ in 0..2 {
+        let status = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
+        assert!(status.succeeded(), "{status:?}");
+    }
+    let (account, broken_item, stage) = match role {
+        "source" => (&source_account, item.id.clone(), "source backup"),
+        _ => {
+            let copy = dest.load(&PERSONAL).await?.items.remove(0);
+            (&dest_account, copy.id, "destination backup")
+        }
+    };
     let keys = keys(dir.path());
-    let store = Store::new(dir.path(), "source", &keys);
+    let store = Store::new(dir.path(), role, &keys);
     let complete = store.list()?;
 
     let broken =
-        provision::register_attachment_without_file(&sandbox.http, &source_account, &item.id)
-            .await?;
+        provision::register_attachment_without_file(&sandbox.http, account, &broken_item).await?;
+    let before = (source.load(&PERSONAL).await?, dest.load(&PERSONAL).await?);
     for _ in 0..2 {
         let refused = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
-        assert_eq!(refused.failure_stage.as_deref(), Some("source backup"));
+        assert_eq!(refused.failure_stage.as_deref(), Some(stage));
         let error = refused.error.unwrap();
         assert!(
-            error.contains(&broken) && error.contains(&item.id),
+            error.contains(&broken) && error.contains(&broken_item),
             "{error}"
         );
     }
-    let copies = dest.load(&PERSONAL).await?.items;
-    assert_eq!(copies.len(), 1);
-    assert_eq!(copies[0].attachments.len(), 1);
+    let after = (source.load(&PERSONAL).await?, dest.load(&PERSONAL).await?);
+    assert_eq!(after, before, "a refused run changed a vault");
 
     // Long past retention, a refused backup still prunes nothing.
     let later = BackupOptions {
         retention_days: 1,
         now: OffsetDateTime::now_utc() + time::Duration::days(60),
     };
-    assert!(
-        backup(&source, &PERSONAL, &store, &later, &Capture::default())
-            .await
-            .is_err()
-    );
+    let side = if role == "source" { &source } else { &dest };
+    for _ in 0..2 {
+        let refused = backup(side, &PERSONAL, &store, &later, &Capture::default()).await;
+        assert!(refused.is_err());
+    }
     assert_eq!(store.list()?, complete);
-    let (backed_up, snapshot) = latest(&store)?;
-    let attachment = &backed_up.items()[0].attachments[0];
+    let (document, files) = export(dir.path(), role)?;
+    assert_eq!(document["items"].as_array().map(Vec::len), Some(1));
+    assert_eq!(document["items"][0]["card"]["number"], "4111111111111111");
     assert_eq!(
-        snapshot.attachment(&attachment.attachment_id)?,
-        b"front and back"
+        files,
+        HashMap::from([("card.txt".to_string(), b"front and back".to_vec())])
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn an_unreadable_source_attachment_stops_runs_and_the_last_snapshot_stays() -> Result<()> {
+    an_unreadable_attachment_in("source").await
+}
+
+#[tokio::test]
+async fn an_unreadable_destination_attachment_stops_runs_and_the_last_snapshot_stays() -> Result<()>
+{
+    an_unreadable_attachment_in("dest").await
 }
 
 #[tokio::test]
