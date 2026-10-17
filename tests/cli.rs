@@ -182,10 +182,12 @@ fn a_variable_that_is_not_utf8_does_not_crash_the_command() {
 fn a_misspelt_setting_in_the_settings_file_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let settings = dir.path().join("vault-mirror.env");
-    for (line, named) in [
-        ("INCLUDE_FOLDER=Work", "INCLUDE_FOLDER"),
-        ("SCHEDULE_FILE=/run/secrets/schedule", "SCHEDULE_FILE"),
-        ("pass word=hunter2", "a name"),
+    for line in [
+        "INCLUDE_FOLDER=Work",
+        "SCHEDULE_FILE=/run/secrets/schedule",
+        "pass word=hunter2",
+        // A secret that lost its line break, left of the `=` it holds.
+        "syntheticSecret=remaining",
     ] {
         fs::write(&settings, format!("BACKUPS_DIR=backups\n{line}\n")).unwrap();
         let output = vault_mirror()
@@ -198,11 +200,12 @@ fn a_misspelt_setting_in_the_settings_file_is_refused() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{line}");
         assert!(
-            stderr.contains(&format!("line 2 sets {named}, which is not a setting")),
+            stderr.contains("line 2 sets a name that is not a setting"),
             "{stderr}"
         );
+        let (name, value) = line.split_once('=').unwrap();
         assert!(
-            !stderr.contains("hunter2") && !stderr.contains("Work"),
+            !stderr.contains(name) && !stderr.contains(value),
             "{stderr}"
         );
     }
