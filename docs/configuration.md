@@ -11,7 +11,7 @@ see [Setting up by hand](#setting-up-by-hand).
 Each line is `NAME=value`. Lines starting with `#` are comments.
 
 Values are taken literally, without quote or `$VARIABLES` expansion. Quotes,
-spaces, and dollar signs stay part of the password:
+spaces, and dollar signs stay part of the value:
 
 ```dotenv
 SOURCE_PASSWORD=it's "quoted" and $not a variable
@@ -57,7 +57,7 @@ secrets and systemd credentials. Trailing newlines in the file are ignored.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `BACKUP_PASSPHRASE` | | Required. The passphrase that protects the backup key. |
+| `BACKUP_PASSPHRASE` | required | The passphrase that protects the backup key. |
 | `RETENTION_DAYS` | `30` | How many days of daily snapshots to keep. See [Backups](backups.md#whats-in-the-backup-directory). |
 | `BACKUPS_DIR` | `backups` (`/data` in the image) | Where backups, `last-run.json` and login state live. |
 
@@ -74,8 +74,8 @@ secrets and systemd credentials. Trailing newlines in the file are ignored.
 
 Instead of `init`:
 
-1. Write `vault-mirror.env` with the required variables above,
-   `BACKUP_PASSPHRASE`, and `SCHEDULE`.
+1. Write `vault-mirror.env` with the required variables above and
+   `SCHEDULE`.
 
 2. In the same directory, create `backups` and `compose.yaml`:
 

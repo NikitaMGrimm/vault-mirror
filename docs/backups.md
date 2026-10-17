@@ -85,6 +85,8 @@ target vault's settings. Without Docker, replace
 `docker compose run --rm vault-mirror` with
 `vault-mirror --env-file vault-mirror.env`.
 
+When you're done, start the daemon again with `docker compose up -d`.
+
 ## Restore without vault-mirror
 
 These commands write secrets unencrypted. Work in a private directory and

@@ -27,7 +27,8 @@ flowchart LR
 6. **Report.** It writes the result to `last-run.json` and to your notification
    URL, if you set one.
 
-A failed step stops the run. Without a destination, the run ends after step 1.
+A failed step stops the run. Without a destination, a run only backs up the
+source.
 
 ## How copies are recognized
 
@@ -64,10 +65,14 @@ docker compose run --rm vault-mirror run --pull
 docker compose up -d
 ```
 
-A pull copies into the source every copy you changed, and every item you added
-in the destination, as far as the filter selects them. Then it mirrors as usual. It deletes nothing, so an item
-you deleted in the destination comes back from the source. Until a started
-pull finishes, runs without `--pull` refuse to start.
+A pull copies into the source every copy you changed and every item you added
+in the destination, if your folder and collection filters select them. If an
+item changed in both vaults, the destination's version wins; the source's is
+in that run's source backup. Then the run mirrors as usual.
+
+A pull deletes nothing, so an item you deleted in the destination comes back
+from the source. Until a started pull finishes, runs without `--pull` refuse to
+start.
 
 ### Switching the source and destination
 

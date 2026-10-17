@@ -9,6 +9,7 @@
 - [Commands and scheduling](running.md): every command, output, and systemd.
 - [Limitations](limitations.md): what isn't copied, and server restrictions.
 - [Questions](questions.md): short answers to common questions.
+- [Security](../SECURITY.md): what vault-mirror can access and what it stores.
 
 Can't find something? Ask in
 [Discussions](https://github.com/NikitaMGrimm/vault-mirror/discussions).
