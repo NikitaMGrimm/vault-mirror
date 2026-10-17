@@ -24,9 +24,10 @@ backups/
     └── …
 ```
 
-A **snapshot** is a full vault export without the trash, with its own copy of
-every attachment, so ten snapshots of a vault with 1 GiB of attachments take
-about 10 GiB. An unchanged vault gets no new snapshot.
+A **snapshot** contains the configured personal vault or organization without
+the trash, with its own copy of every attachment, so ten snapshots of a vault
+with 1 GiB of attachments take about 10 GiB. An unchanged vault gets no new
+snapshot.
 
 Snapshots are kept like this:
 
@@ -61,10 +62,15 @@ Export the newest snapshot and its attachments, unencrypted:
 docker compose run --rm vault-mirror export --output /data/recovered
 ```
 
-Import `export.json` with any Bitwarden client, then attach the files from
-`attachments/<attachment id>/` to their items. Delete the output when done.
+Import `export.json` into an empty vault with any Bitwarden client, then attach
+the files from `attachments/<attachment id>/` to their items. Delete the output
+when done.
 The export leaves out the hidden `vault-mirror` fields, so imported items are
 not copies. To rebuild a lost destination, mirror into an empty one instead.
+
+Snapshots record the vault before a run changes it. A destination snapshot can
+therefore be older than the current mirror. Choose the snapshot you want to
+recover before importing it.
 
 | Option | Effect |
 | --- | --- |
@@ -75,7 +81,17 @@ These commands need only `BACKUPS_DIR` and `BACKUP_PASSPHRASE`. Without Docker,
 replace `docker compose run --rm vault-mirror` with
 `vault-mirror --env-file vault-mirror.env`.
 
-When you're done, start the daemon again with `docker compose up -d`.
+If you restored into the same source account, the imported items have new ids.
+The next run can stop because it would replace more than half of the old copies.
+Preview that replacement, then apply it if the plan matches your recovery:
+
+```sh
+docker compose run --rm vault-mirror check --allow-mass-delete
+docker compose run --rm vault-mirror run --allow-mass-delete
+```
+
+The flag applies to that run only. When you're done, start the daemon again with
+`docker compose up -d`.
 
 ## An attachment without a file
 
