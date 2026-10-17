@@ -258,58 +258,72 @@ async fn daemon() -> Result<ExitCode> {
     let schedule = (config.schedule.as_deref())
         .ok_or_else(|| anyhow!("configuration: the daemon needs SCHEDULE, a cron expression"))?;
     let timetable = Timetable::new(schedule, config.timezone.as_deref())?;
-    let mut terminate = Terminate::new()?;
+    let mut stop = Stop::new()?;
     loop {
-        let next = timetable.next(chrono::Utc::now())?;
-        Console::status(
-            "Waiting",
-            &format!(
-                "for the next run at {}",
-                next.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-            ),
-        );
-        let wait = (next - chrono::Utc::now())
-            .to_std()
-            .unwrap_or(Duration::ZERO);
-        tokio::select! {
-            _ = tokio::time::sleep(wait) => {}
-            _ = tokio::signal::ctrl_c() => break,
-            _ = terminate.recv() => break,
-        }
-        // A run in progress is finished, not interrupted: the signal is
-        // only looked at between runs.
+        // A run in progress is finished, not interrupted. A stop request that
+        // arrives during it is kept, and ends the daemon right after.
         run_and_report(&config, RunFlags::default()).await;
+        let next = timetable.next(chrono::Utc::now())?;
+        tokio::select! {
+            biased;
+            () = stop.recv() => break,
+            () = async {
+                Console::status(
+                    "Waiting",
+                    &format!(
+                        "for the next run at {}",
+                        next.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    ),
+                );
+                let wait = (next - chrono::Utc::now())
+                    .to_std()
+                    .unwrap_or(Duration::ZERO);
+                tokio::time::sleep(wait).await;
+            } => {}
+        }
     }
     Console::status("Stopping", "the daemon");
     Ok(ExitCode::SUCCESS)
 }
 
-/// The signal Docker and systemd stop the daemon with. Windows has none.
+/// Requests to stop the daemon: Ctrl-C, and on Unix the signal Docker and
+/// systemd stop it with. Each receiver keeps a signal until it is asked, so
+/// one made before the first run misses none.
 #[cfg(unix)]
-struct Terminate(tokio::signal::unix::Signal);
+struct Stop {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
 
 #[cfg(unix)]
-impl Terminate {
+impl Stop {
     fn new() -> std::io::Result<Self> {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map(Self)
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
+    }
+
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.interrupt.recv() => {}
+            _ = self.terminate.recv() => {}
+        }
+    }
+}
+
+#[cfg(windows)]
+struct Stop(tokio::signal::windows::CtrlC);
+
+#[cfg(windows)]
+impl Stop {
+    fn new() -> std::io::Result<Self> {
+        tokio::signal::windows::ctrl_c().map(Self)
     }
 
     async fn recv(&mut self) {
         self.0.recv().await;
-    }
-}
-
-#[cfg(not(unix))]
-struct Terminate;
-
-#[cfg(not(unix))]
-impl Terminate {
-    fn new() -> std::io::Result<Self> {
-        Ok(Self)
-    }
-
-    async fn recv(&mut self) {
-        std::future::pending().await
     }
 }
 

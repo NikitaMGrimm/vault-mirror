@@ -207,3 +207,141 @@ fn a_misspelt_setting_in_the_settings_file_is_refused() {
         );
     }
 }
+
+/// A daemon process, killed when dropped so a failing test leaves none
+/// behind.
+#[cfg(unix)]
+struct Daemon(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A daemon whose source server answers each request with an error once
+/// `answer` lets it, and the server's notice of each request it receives.
+#[cfg(unix)]
+fn daemon_with_server(
+    dir: &std::path::Path,
+) -> (
+    Daemon,
+    std::sync::mpsc::Receiver<()>,
+    std::sync::mpsc::Sender<()>,
+    std::sync::mpsc::Receiver<String>,
+) {
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::TcpListener,
+        process::Stdio,
+        sync::mpsc,
+        thread,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (requested, requests) = mpsc::channel();
+    let (answer, answers) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let _ = stream.read(&mut [0; 4096]);
+            let _ = requested.send(());
+            if answers.recv().is_err() {
+                return;
+            }
+            let _ = stream.write_all(
+                b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            );
+        }
+    });
+    let mut daemon = Daemon(
+        vault_mirror()
+            .env("BACKUPS_DIR", dir)
+            .env("BACKUP_PASSPHRASE", "synthetic passphrase")
+            .env("SOURCE_SERVER", format!("http://{address}"))
+            .env("SOURCE_CLIENT_ID", "user.synthetic")
+            .env("SOURCE_CLIENT_SECRET", "synthetic secret")
+            .env("SOURCE_PASSWORD", "synthetic password")
+            .env("SCHEDULE", "0 3 * * *")
+            .arg("daemon")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let (line, lines) = mpsc::channel();
+    let stdout = daemon.0.stdout.take().unwrap();
+    thread::spawn(move || {
+        for text in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = line.send(text);
+        }
+    });
+    (daemon, requests, answer, lines)
+}
+
+#[cfg(unix)]
+fn signal(daemon: &Daemon, name: &str) {
+    let sent = Command::new("kill")
+        .arg(format!("-{name}"))
+        .arg(daemon.0.id().to_string())
+        .status()
+        .unwrap();
+    assert!(sent.success());
+}
+
+/// Waits for the daemon to exit, and returns whether it succeeded and what it
+/// printed.
+#[cfg(unix)]
+fn stopped(mut daemon: Daemon, lines: std::sync::mpsc::Receiver<String>) -> (bool, Vec<String>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = daemon.0.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!(
+                "the daemon did not stop: {:?}",
+                lines.try_iter().collect::<Vec<_>>()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    (status.success(), lines.iter().collect())
+}
+
+#[cfg(unix)]
+#[test]
+fn the_daemon_runs_at_once_and_stops_after_a_run_it_was_interrupted_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, requests, answer, lines) = daemon_with_server(dir.path());
+    let timeout = std::time::Duration::from_secs(30);
+    requests.recv_timeout(timeout).expect("a run at startup");
+    signal(&daemon, "INT");
+    answer.send(()).unwrap();
+    let (succeeded, printed) = stopped(daemon, lines);
+    assert!(succeeded, "{printed:?}");
+    let printed = printed.join("\n");
+    assert!(printed.contains("Stopping"), "{printed}");
+    assert!(!printed.contains("Waiting"), "{printed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_daemon_stops_between_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (daemon, requests, answer, lines) = daemon_with_server(dir.path());
+    let timeout = std::time::Duration::from_secs(30);
+    requests.recv_timeout(timeout).expect("a run at startup");
+    answer.send(()).unwrap();
+    loop {
+        let line = lines.recv_timeout(timeout).expect("a line from the daemon");
+        if line.contains("Waiting") {
+            break;
+        }
+    }
+    signal(&daemon, "TERM");
+    let (succeeded, printed) = stopped(daemon, lines);
+    assert!(succeeded, "{printed:?}");
+    assert!(printed.join("\n").contains("Stopping"));
+}
