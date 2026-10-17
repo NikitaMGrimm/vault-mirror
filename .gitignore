@@ -1,4 +1,5 @@
 /target
+__pycache__/
 /.env
 # The settings file `init` writes holds passwords, wherever it is.
 vault-mirror.env
