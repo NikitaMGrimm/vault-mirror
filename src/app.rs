@@ -206,11 +206,12 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
             status.error = Some(message.chars().take(1000).collect());
         }
     }
-    // A run turned away by the lock leaves the status file to the run that
-    // holds it.
-    if lock.is_some()
-        && let Err(error) = write_status(&config.backups_dir, &status)
-    {
+    // A run turned away by the lock leaves the status file and the
+    // notification to the run that holds it.
+    if lock.is_none() {
+        return status;
+    }
+    if let Err(error) = write_status(&config.backups_dir, &status) {
         reporter.warn(&format!("Could not write the status file: {error:#}"));
     }
     drop(lock);
@@ -225,6 +226,9 @@ async fn execute(
     progress: &mut Progress,
     now: OffsetDateTime,
 ) -> Result<()> {
+    if flags.pull && config.dest.is_none() {
+        bail!("run --pull copies from the destination, and none is configured");
+    }
     let unfinished_pull = config.backups_dir.join(UNFINISHED_PULL_FILE);
     // Destination items the pull didn't get to still hold changes that a run
     // without it would overwrite.
@@ -527,7 +531,11 @@ mod tests {
     #[tokio::test]
     async fn a_run_is_turned_away_while_another_uses_the_backup_directory() {
         let dir = tempfile::tempdir().unwrap();
+        let notified = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        notified.set_nonblocking(true).unwrap();
+        let notify_url = format!("http://{}/", notified.local_addr().unwrap());
         let env: HashMap<String, String> = [
+            ("NOTIFY_FAILURE_URL", notify_url.as_str()),
             ("SOURCE_SERVER", "http://127.0.0.1:9"),
             ("SOURCE_CLIENT_ID", "user.source"),
             ("SOURCE_CLIENT_SECRET", "source-secret"),
@@ -548,11 +556,19 @@ mod tests {
             error.contains("another vault-mirror run is using BACKUPS_DIR"),
             "{error}"
         );
-        // The status file is the running run's to write.
+        // The status file and the notification are the running run's.
         assert!(!status_path(dir.path()).exists());
+        assert!(notified.accept().is_err(), "the turned-away run notified");
+        drop(notified);
         assert!(!dir.path().join("key.age").exists());
 
         drop(running);
+        let pull = RunFlags {
+            pull: true,
+            ..RunFlags::default()
+        };
+        let refused = run_once(&config, pull, &Quiet).await;
+        assert!(refused.error.unwrap().contains("none is configured"));
         lock_backups_dir(dir.path()).unwrap();
         #[cfg(unix)]
         {
