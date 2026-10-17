@@ -7,15 +7,6 @@ vault-mirror makes one vault, the **destination**, match another, the
 
 ## A run, step by step
 
-```mermaid
-flowchart LR
-    source[("Source vault")] -- "1. back up" --> backups[("Encrypted backups")]
-    dest[("Destination vault")] -- "2. back up" --> backups
-    source -- "3. compare" --> mirror["vault-mirror"]
-    dest -- "3. compare" --> mirror
-    mirror -- "4. change, 5. verify" --> dest
-```
-
 1. **Back up the source** as an encrypted **snapshot**, with its attachments.
    An unchanged vault gets no new snapshot.
 2. **Back up the destination** the same way.
@@ -98,11 +89,5 @@ run stops and the destination stays as it was.
 | Source and destination are the same vault | A settings mistake. | Fix the settings. |
 | The run would delete every copy | The source is empty, the wrong account, or filtered to nothing. | `run --allow-mass-delete` |
 
-A flag applies to one run:
-
-```sh
-docker compose run --rm vault-mirror run --allow-mass-delete
-```
-
-Removed copies go to the server's trash, and the run's destination backup holds
-them too.
+A flag applies to one run. Removed copies go to the server's trash, and the
+run's destination backup holds them too.
