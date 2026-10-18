@@ -660,16 +660,31 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str) -> Plan {
         }
     }
 
-    // One copy per source item: the first that is as vault-mirror left it,
-    // else the first that seems so, else the first. Another copy is deleted
+    // Prefer a complete untouched copy of the current source version so an
+    // older copy does not become a duplicate when updated. Another copy is deleted
     // only if both are as vault-mirror left them, with complete markers that
     // record the same source content, attachments and archive state. Any
     // other, such as a clone someone edited, is left alone, and so is an
     // original.
     let mut dest_by_entry: HashMap<usize, (usize, Option<Marker>)> = HashMap::new();
     for (entry, mut candidates) in claims {
+        let complete = |index: usize, own: Option<&Marker>| {
+            as_left(index, own) && own.is_some_and(|own| !own.files_pending())
+        };
+        let current = &plan.entries[entry].marker;
         let chosen = (candidates.iter())
-            .position(|(index, own)| as_left(*index, own.as_ref()))
+            .position(|(index, own)| {
+                complete(*index, own.as_ref())
+                    && own.as_ref().is_some_and(|own| {
+                        (&own.content, own.archived, &own.source_files)
+                            == (&current.content, current.archived, &current.source_files)
+                    })
+            })
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .position(|(index, own)| as_left(*index, own.as_ref()))
+            })
             .or_else(|| {
                 candidates.iter().position(|(index, own)| {
                     let known = known(entry, *index, own.as_ref());
@@ -679,9 +694,6 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str) -> Plan {
             })
             .unwrap_or(0);
         let copy = candidates.remove(chosen);
-        let complete = |index: usize, own: Option<&Marker>| {
-            as_left(index, own) && own.is_some_and(|own| !own.files_pending())
-        };
         let kept = copy.1.as_ref().filter(|kept| complete(copy.0, Some(kept)));
         for (index, own) in candidates {
             let redundant = complete(index, own.as_ref())
