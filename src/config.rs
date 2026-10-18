@@ -33,6 +33,7 @@ pub struct Config {
     pub backups_dir: PathBuf,
     pub backup: BackupConfig,
     pub filter: Filter,
+    pub skip_attachments: bool,
     pub ca_cert_file: Option<PathBuf>,
     /// When `daemon` runs: a five- or six-field cron expression, evaluated in
     /// `timezone`.
@@ -196,6 +197,7 @@ impl Config {
             backups_dir: backups_dir(env.0),
             backup,
             filter,
+            skip_attachments: env.parse("SKIP_ATTACHMENTS", false)?,
             ca_cert_file: env.get("CA_CERT_FILE").map(PathBuf::from),
             schedule: env.get("SCHEDULE"),
             timezone: env.get("TZ"),
@@ -245,6 +247,7 @@ pub fn is_setting(name: &str) -> bool {
             | "EXCLUDE_FOLDERS"
             | "INCLUDE_COLLECTIONS"
             | "EXCLUDE_COLLECTIONS"
+            | "SKIP_ATTACHMENTS"
             | "CA_CERT_FILE"
             | "SCHEDULE"
             | "TZ"
@@ -468,5 +471,20 @@ mod tests {
         let config = Config::from_env(&with(&[("RETENTION_DAYS", "7")])).unwrap();
         assert_eq!(config.backup.retention_days, 7);
         assert!(error(with(&[("RETENTION_DAYS", "soon")])).contains("RETENTION_DAYS"));
+    }
+
+    #[test]
+    fn attachments_are_copied_unless_skipped_explicitly() {
+        assert!(!Config::from_env(&with(&[])).unwrap().skip_attachments);
+        let config = Config::from_env(&with(&[("SKIP_ATTACHMENTS", "true")])).unwrap();
+        assert!(config.skip_attachments);
+        let config = Config::from_env(&with(&[("SKIP_ATTACHMENTS", "false")])).unwrap();
+        assert!(!config.skip_attachments);
+        assert_eq!(
+            error(with(&[("SKIP_ATTACHMENTS", "yes")])),
+            "SKIP_ATTACHMENTS has an invalid value: yes"
+        );
+        assert!(is_setting("SKIP_ATTACHMENTS"));
+        assert!(!is_setting("SKIP_ATTACHMENTS_FILE"));
     }
 }

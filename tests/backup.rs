@@ -383,6 +383,62 @@ async fn destination_attachments_are_backed_up_before_the_mirror_deletes_them() 
     Ok(())
 }
 
+/// Skipping attachments changes what a run copies, not what it backs up.
+/// Each side's backup holds the files only that side has.
+#[tokio::test]
+async fn backups_keep_every_attachment_while_runs_skip_them() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source_account = sandbox.register(&sandbox.source_url).await?;
+    let dest_account = sandbox.register(&sandbox.dest_url).await?;
+    let source = sandbox.open(&source_account).await?;
+    let dest = sandbox.open(&dest_account).await?;
+    fixtures::seed(&source).await?;
+    let dir = tempfile::tempdir()?;
+    let config = config_for(
+        &source_account,
+        Some(&dest_account),
+        dir.path(),
+        &[("SKIP_ATTACHMENTS", "true")],
+    );
+
+    let first = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
+    assert!(first.succeeded(), "{first:?}");
+    assert_eq!(first.mirror.as_ref().unwrap().summary.attachments_copied, 0);
+    assert!(
+        (first.warnings.iter()).any(|warning| warning.contains("SKIP_ATTACHMENTS")),
+        "{:?}",
+        first.warnings
+    );
+    assert_eq!(
+        first.source_backup.as_ref().unwrap().attachments_downloaded,
+        4
+    );
+    let copy = dest.load(&PERSONAL).await?.items.remove(0);
+    assert!(copy.attachments.is_empty());
+    dest.upload_attachment(&PERSONAL, &copy, "only-copy.txt", b"the only copy")
+        .await?;
+
+    let second = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
+    assert!(second.succeeded(), "{second:?}");
+    assert!(!second.mirror.as_ref().unwrap().changed);
+    assert_eq!(
+        second.dest_backup.as_ref().unwrap().attachments_downloaded,
+        1
+    );
+    let (_, source_files) = export(dir.path(), "source")?;
+    for sample in fixtures::samples() {
+        for (name, data) in &sample.attachments {
+            assert_eq!(source_files.get(*name), Some(data), "{name}");
+        }
+    }
+    let (_, dest_files) = export(dir.path(), "dest")?;
+    assert_eq!(dest_files.len(), 1);
+    assert_eq!(dest_files["only-copy.txt"], b"the only copy");
+    Ok(())
+}
+
 /// Exports the newest snapshot of `role` with the command line. Returns the
 /// export and the content of each attachment file by name.
 fn export(backups: &Path, role: &str) -> Result<(serde_json::Value, HashMap<String, Vec<u8>>)> {

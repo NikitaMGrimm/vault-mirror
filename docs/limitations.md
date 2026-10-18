@@ -38,14 +38,16 @@ encrypted data blob aren't supported yet and stop the run too.
 
 ## Server restrictions
 
-A run never leaves part of the source out. When the destination can't hold
-something, the run fails and sends the failure notification. Except for
-archiving, these are found before the run changes anything. A failed run keeps
-the backups it made at its start.
+A run fails and sends the failure notification when the destination can't hold
+something selected for copying. Except for archiving, the run checks these
+restrictions before it changes anything. A failed run keeps the backups it
+made at its start.
 
 **Attachments need Premium on Bitwarden.** A run into a free personal
 destination stops when it has attachments to copy. Organizations don't need
-Premium.
+Premium. To mirror items without their attachments, set
+[`SKIP_ATTACHMENTS=true`](configuration.md#what-to-mirror). Encrypted backups
+still include the attachments.
 
 **Bank accounts, driver's licences and passports.** Bitwarden only shows these
 item types where it has turned them on. Until it does on the destination's
