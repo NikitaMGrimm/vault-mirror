@@ -15,14 +15,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use console::{Console, ERROR};
 use time::OffsetDateTime;
 use vault_mirror::{
-    api::build_http_client,
     app::{self, RunFlags},
     config::{self, Config},
-    mirror::{Endpoint, MirrorOptions, mirror},
-    restore::{RestoreOptions, restore},
+    mirror::{self, Endpoint},
     schedule::Timetable,
     snapshot,
-    store::{self, Keys, Snapshot, Store},
+    store::{self, FolderReceipts, Keys, Snapshot, Store},
     text::count,
 };
 
@@ -41,17 +39,19 @@ struct Cli {
     command: Command,
 }
 
+/// Each lets one run past one safety check. `check` takes them too, to show
+/// what such a run would do.
 #[derive(Args, Clone, Copy)]
 struct RunArgs {
-    /// Let this run delete every earlier copy.
+    /// Let this run delete more than half of the copies.
     #[arg(long)]
     allow_mass_delete: bool,
     /// Let this run take over copies made the other way round, after you switched the source and destination.
     #[arg(long)]
     reverse: bool,
-    /// First copy what changed in the destination back into the source, such as after using the destination while the source was down.
+    /// Let this run replace or delete copies changed in the destination. The destination backup keeps the changes.
     #[arg(long)]
-    pull: bool,
+    allow_overwrite: bool,
 }
 
 #[derive(Subcommand)]
@@ -64,18 +64,16 @@ enum Command {
     },
     /// Back up, then mirror the source into the destination, once.
     Run(RunArgs),
-    /// Keep running on SCHEDULE.
+    /// Run now, then on SCHEDULE, until stopped.
     Daemon,
     /// Log in to the configured vaults and report what a run would do, without changing them.
-    Check,
+    Check(RunArgs),
     /// List the snapshots in the backup directory.
     Snapshots {
         /// Whose backups to list.
         #[arg(long, value_enum, default_value_t = Role::Source)]
         from: Role,
     },
-    /// Write a snapshot into a vault.
-    Restore(RestoreArgs),
     /// Decrypt a snapshot and its attachments into a directory, in the clear.
     Export {
         #[command(flatten)]
@@ -100,18 +98,6 @@ struct SnapshotArgs {
     /// A snapshot id, as `snapshots` lists it, or `latest`.
     #[arg(long, default_value = "latest")]
     snapshot: String,
-}
-
-#[derive(Args)]
-struct RestoreArgs {
-    #[command(flatten)]
-    snapshot: SnapshotArgs,
-    /// The configured vault to restore into.
-    #[arg(long, value_enum)]
-    to: Role,
-    /// Restore into a vault that already has items, keeping them.
-    #[arg(long)]
-    allow_non_empty: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -183,7 +169,16 @@ fn parse_env_file(text: &str) -> Result<HashMap<String, String>> {
         let (name, value) = line
             .split_once('=')
             .ok_or_else(|| anyhow!("line {} is not NAME=value", number + 1))?;
-        settings.insert(name.trim().to_string(), value.to_string());
+        let name = name.trim();
+        // The name is not repeated: it may be part of a secret that lost its
+        // line break.
+        if !config::is_setting(name) {
+            bail!(
+                "line {} sets a name that is not a setting. Check the spelling",
+                number + 1
+            );
+        }
+        settings.insert(name.to_string(), value.to_string());
     }
     Ok(settings)
 }
@@ -200,9 +195,8 @@ async fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Init { dir } => wizard::init(&dir).await,
         Command::Run(args) => run(args).await,
         Command::Daemon => daemon().await,
-        Command::Check => check().await,
+        Command::Check(args) => check(args).await,
         Command::Snapshots { from } => snapshots(from),
-        Command::Restore(args) => restore_command(args).await,
         Command::Export { snapshot, output } => export(snapshot, &output),
         Command::Healthcheck { max_age_hours } => healthcheck(max_age_hours),
     }
@@ -212,7 +206,7 @@ fn flags(args: RunArgs) -> RunFlags {
     RunFlags {
         allow_mass_delete: args.allow_mass_delete,
         reverse: args.reverse,
-        pull: args.pull,
+        allow_overwrite: args.allow_overwrite,
     }
 }
 
@@ -237,22 +231,14 @@ fn finished(status: &app::Status) -> String {
     match &status.mirror {
         Some(app::SummaryRecord {
             summary: mirror, ..
-        }) => {
-            let pulled = match &status.pulled {
-                Some(app::SummaryRecord { summary, .. }) => format!(
-                    "{} created and {} updated in the source, then ",
-                    summary.items_created, summary.items_updated
-                ),
-                None => String::new(),
-            };
-            format!(
-                "{pulled}{} created, {} updated, {} deleted, {} unchanged in {seconds:.1}s",
-                mirror.items_created,
-                mirror.items_updated,
-                mirror.items_deleted,
-                mirror.items_unchanged
-            )
-        }
+        }) => format!(
+            "{} created, {} updated, {} deleted, {} unchanged, {} deleted in {seconds:.1}s",
+            mirror.items_created,
+            mirror.items_updated,
+            mirror.items_deleted,
+            mirror.items_unchanged,
+            count(mirror.folders_deleted, "folder")
+        ),
         None => format!("backup in {seconds:.1}s"),
     }
 }
@@ -271,40 +257,68 @@ async fn daemon() -> Result<ExitCode> {
     let schedule = (config.schedule.as_deref())
         .ok_or_else(|| anyhow!("configuration: the daemon needs SCHEDULE, a cron expression"))?;
     let timetable = Timetable::new(schedule, config.timezone.as_deref())?;
-    let mut terminate = Terminate::new()?;
+    let mut stop = Stop::new()?;
     loop {
-        let next = timetable.next(chrono::Utc::now())?;
-        Console::status(
-            "Waiting",
-            &format!(
-                "for the next run at {}",
-                next.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-            ),
-        );
-        let wait = (next - chrono::Utc::now())
-            .to_std()
-            .unwrap_or(Duration::ZERO);
-        tokio::select! {
-            _ = tokio::time::sleep(wait) => {}
-            _ = tokio::signal::ctrl_c() => break,
-            _ = terminate.recv() => break,
-        }
-        // A run in progress is finished, not interrupted: the signal is
-        // only looked at between runs.
+        // A run in progress is finished, not interrupted. A stop request that
+        // arrives during it is kept, and ends the daemon right after.
         run_and_report(&config, RunFlags::default()).await;
+        let next = timetable.next(chrono::Utc::now())?;
+        tokio::select! {
+            biased;
+            () = stop.recv() => break,
+            () = async {
+                Console::status(
+                    "Waiting",
+                    &format!(
+                        "for the next run at {}",
+                        next.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    ),
+                );
+                let wait = (next - chrono::Utc::now())
+                    .to_std()
+                    .unwrap_or(Duration::ZERO);
+                tokio::time::sleep(wait).await;
+            } => {}
+        }
     }
     Console::status("Stopping", "the daemon");
     Ok(ExitCode::SUCCESS)
 }
 
-/// The signal Docker and systemd stop the daemon with. Windows has none.
+/// Requests to stop the daemon: Ctrl-C, and on Unix the signal Docker and
+/// systemd stop it with. Each receiver keeps a signal until it is asked, so
+/// one made before the first run misses none.
 #[cfg(unix)]
-struct Terminate(tokio::signal::unix::Signal);
+struct Stop {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
 
 #[cfg(unix)]
-impl Terminate {
+impl Stop {
     fn new() -> std::io::Result<Self> {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map(Self)
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
+    }
+
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.interrupt.recv() => {}
+            _ = self.terminate.recv() => {}
+        }
+    }
+}
+
+#[cfg(windows)]
+struct Stop(tokio::signal::windows::CtrlC);
+
+#[cfg(windows)]
+impl Stop {
+    fn new() -> std::io::Result<Self> {
+        tokio::signal::windows::ctrl_c().map(Self)
     }
 
     async fn recv(&mut self) {
@@ -312,22 +326,8 @@ impl Terminate {
     }
 }
 
-#[cfg(not(unix))]
-struct Terminate;
-
-#[cfg(not(unix))]
-impl Terminate {
-    fn new() -> std::io::Result<Self> {
-        Ok(Self)
-    }
-
-    async fn recv(&mut self) {
-        std::future::pending().await
-    }
-}
-
-async fn check() -> Result<ExitCode> {
-    check_config(&config()?, true).await?;
+async fn check(args: RunArgs) -> Result<ExitCode> {
+    check_config(&config()?, flags(args), true).await?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -351,18 +351,19 @@ fn describe_vault(vault: &vault_mirror::vault::Vault) -> String {
 
 /// Logs in to the configured vaults and reports what a run would do.
 /// `init` has reported the logins already.
-async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
+async fn check_config(config: &Config, flags: RunFlags, report_logins: bool) -> Result<()> {
     let started = Instant::now();
     let http = app::http_client(config)?;
     let source = app::open_account(&config.backups_dir, &http, &config.source, "source").await?;
-    let source_scope = app::scope_of(&config.source);
+    let source = Endpoint {
+        account: &source,
+        scope: app::scope_of(&config.source),
+    };
+    let source_vault = source.account.load(&source.scope).await?;
     if report_logins {
         Console::status(
             "Logged in",
-            &format!(
-                "to the source: {}",
-                describe_vault(&source.load(&source_scope).await?)
-            ),
+            &format!("to the source: {}", describe_vault(&source_vault)),
         );
     }
     let Some(dest_config) = &config.dest else {
@@ -371,31 +372,29 @@ async fn check_config(config: &Config, report_logins: bool) -> Result<()> {
         return Ok(());
     };
     let dest = app::open_account(&config.backups_dir, &http, dest_config, "dest").await?;
-    let dest_scope = app::scope_of(dest_config);
+    let dest = Endpoint {
+        account: &dest,
+        scope: app::scope_of(dest_config),
+    };
+    let dest_vault = dest.account.load(&dest.scope).await?;
     if report_logins {
         Console::status(
             "Logged in",
-            &format!(
-                "to the destination: {}",
-                describe_vault(&dest.load(&dest_scope).await?)
-            ),
+            &format!("to the destination: {}", describe_vault(&dest_vault)),
         );
     }
 
-    let options = MirrorOptions {
-        dry_run: true,
-        filter: config.filter.clone(),
-        ..MirrorOptions::default()
-    };
-    let source = Endpoint {
-        account: &source,
-        scope: source_scope,
-    };
-    let dest = Endpoint {
-        account: &dest,
-        scope: dest_scope,
-    };
-    let outcome = mirror(&source, &dest, &options, &Console).await?;
+    let options = app::mirror_options(config, flags);
+    let outcome = mirror::check(
+        &source,
+        &dest,
+        &source_vault,
+        &dest_vault,
+        &options,
+        &FolderReceipts::new(&config.backups_dir),
+        &Console,
+    )
+    .await?;
     Console::finished(&checked(started), !outcome.warnings.is_empty());
     Ok(())
 }
@@ -439,43 +438,6 @@ fn locate_snapshot<'a>(store: &Store<'a>, role: Role, name: &str) -> Result<Snap
     };
     let id = id.ok_or_else(|| anyhow!("no snapshot {name} of the {} vault", role.name()))?;
     Ok(store.snapshot(id))
-}
-
-async fn restore_command(args: RestoreArgs) -> Result<ExitCode> {
-    let started = Instant::now();
-    let env = settings();
-    let backups = config::backups_dir(&env);
-    // A run at the same time could prune the snapshot being restored, or
-    // mirror into the vault being restored to.
-    let _lock = app::lock_backups_dir(&backups)?;
-    let keys = read_keys(&backups, &env)?;
-    let store = Store::new(&backups, args.snapshot.from.name(), &keys);
-    let backup = locate_snapshot(&store, args.snapshot.from, &args.snapshot.snapshot)?;
-
-    let http = build_http_client(&config::client_options(&env)?)?;
-    let role = args.to.name();
-    let target_config = config::vault_config(&env, &role.to_uppercase())?;
-    let account = app::open_account(&backups, &http, &target_config, role).await?;
-    let target = Endpoint {
-        account: &account,
-        scope: app::scope_of(&target_config),
-    };
-    let options = RestoreOptions {
-        allow_non_empty: args.allow_non_empty,
-    };
-    let report = restore(&target, &backup, &options, &Console).await?;
-    Console::finished(
-        &format!(
-            "restore of {}, {}, {} and {} in {:.1}s",
-            count(report.items, "item"),
-            count(report.attachments_restored, "attachment"),
-            count(report.folders_created, "new folder"),
-            count(report.collections_created, "new collection"),
-            started.elapsed().as_secs_f64()
-        ),
-        report.items_left_out + report.items_left_unarchived + report.attachments_skipped > 0,
-    );
-    Ok(ExitCode::SUCCESS)
 }
 
 fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {

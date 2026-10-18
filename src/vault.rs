@@ -6,6 +6,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use reqwest::Method;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::{
     api::{self, ApiCredentials, ServerUrls, Session},
@@ -29,7 +30,8 @@ const META_KEYS: &[&str] = &[
     "key",
     "attachments",
     "attachments2",
-    // A legacy duplicate of the type-specific block that Vaultwarden still sends.
+    // A legacy duplicate of the content, as an object or as a string that
+    // holds one. Any other string is an item this tool cannot read.
     "data",
     "edit",
     "viewPassword",
@@ -43,6 +45,43 @@ const META_KEYS: &[&str] = &[
 /// such as `login` or `card`, which are all treated as content.
 const SCALAR_CONTENT_KEYS: &[&str] = &["type", "name", "notes", "favorite", "reprompt"];
 const LIST_CONTENT_KEYS: &[&str] = &["fields", "passwordHistory"];
+
+/// Content that is encrypted at rest. A string there is ciphertext or an
+/// error, whatever it looks like. `*` stands for any key, or, followed by
+/// more parts, any entry of a list of objects. Other content strings are told
+/// apart by their shape.
+const ENCRYPTED_SLOTS: &[&str] = &[
+    "name",
+    "notes",
+    "login/username",
+    "login/password",
+    "login/totp",
+    "login/uri",
+    "login/uris/*/uri",
+    "login/uris/*/uriChecksum",
+    "login/fido2Credentials/*/credentialId",
+    "login/fido2Credentials/*/keyType",
+    "login/fido2Credentials/*/keyAlgorithm",
+    "login/fido2Credentials/*/keyCurve",
+    "login/fido2Credentials/*/keyValue",
+    "login/fido2Credentials/*/rpId",
+    "login/fido2Credentials/*/rpName",
+    "login/fido2Credentials/*/userHandle",
+    "login/fido2Credentials/*/userName",
+    "login/fido2Credentials/*/userDisplayName",
+    "login/fido2Credentials/*/counter",
+    "login/fido2Credentials/*/discoverable",
+    "fields/*/name",
+    "fields/*/value",
+    "passwordHistory/*/password",
+    // These item types hold nothing but encrypted strings.
+    "card/*",
+    "identity/*",
+    "sshKey/*",
+    "bankAccount/*",
+    "driversLicense/*",
+    "passport/*",
+];
 
 /// The largest batch the Bitwarden server accepts for bulk item operations.
 const BULK_LIMIT: usize = 500;
@@ -79,6 +118,9 @@ impl Scope {
 pub struct Folder {
     pub id: String,
     pub name: String,
+    /// SHA-256 of the encrypted server name. Reencrypting a name changes
+    /// this value even when its plaintext stays the same.
+    pub(crate) stamp: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -272,58 +314,12 @@ impl Account {
     pub async fn load(&self, scope: &Scope) -> Result<Vault> {
         let sync = self.session.get("/sync?excludeDomains=true").await?;
         let scope_key = self.scope_key(scope)?;
-        let list = |name: &str| sync_list(&sync, name);
-
-        let mut vault = Vault::default();
-        match scope {
-            Scope::Personal => {
-                for folder in list("folders")? {
-                    vault.folders.push(Folder {
-                        id: required_str(&folder, "id", "folder")?,
-                        name: scope_key
-                            .decrypt_str(&required_str(&folder, "name", "folder")?)
-                            .context("decrypting a folder name")?,
-                    });
-                }
-            }
-            Scope::Organization(org) => {
-                let collections = list("collections")?;
-                self.check_organization_visible(org, &collections, &list("ciphers")?)
-                    .await?;
-                for collection in collections {
-                    if collection.get("organizationId").and_then(Value::as_str) != Some(org) {
-                        continue;
-                    }
-                    vault.collections.push(Collection {
-                        id: required_str(&collection, "id", "collection")?,
-                        name: scope_key
-                            .decrypt_str(&required_str(&collection, "name", "collection")?)
-                            .context("decrypting a collection name")?,
-                        external_id: collection
-                            .get("externalId")
-                            .and_then(Value::as_str)
-                            .filter(|id| !id.is_empty())
-                            .map(str::to_string),
-                    });
-                }
-            }
+        if let Scope::Organization(org) = scope {
+            let list = |name: &str| sync_list(&sync, name);
+            self.check_organization_visible(org, &list("collections")?, &list("ciphers")?)
+                .await?;
         }
-        for cipher in list("ciphers")? {
-            let owner = cipher.get("organizationId").and_then(Value::as_str);
-            if owner != scope.organization_id() {
-                if *scope == Scope::Personal {
-                    vault
-                        .folders_used_elsewhere
-                        .extend(optional_str(&cipher, "folderId"));
-                }
-                continue;
-            }
-            let id = required_str(&cipher, "id", "item")?;
-            let item = decrypt_item(&cipher, scope_key)
-                .with_context(|| format!("decrypting item {id}"))?;
-            vault.items.push(item);
-        }
-        Ok(vault)
+        read_vault(&sync, scope, scope_key)
     }
 
     pub async fn create_folder(&self, name: &str) -> Result<Folder> {
@@ -335,11 +331,37 @@ impl Account {
         Ok(Folder {
             id: required_str(&created, "id", "created folder")?,
             name: name.to_string(),
+            stamp: optional_str(&created, "name")
+                .as_deref()
+                .map(encrypted_name_hash),
         })
     }
 
-    pub async fn delete_folder(&self, id: &str) -> Result<()> {
-        self.delete(&format!("/folders/{id}")).await
+    /// Deletes a folder. Returns false if it was already gone. Not retried
+    /// once the request may have arrived: a folder has no revision, so a
+    /// repeat could delete one that was meanwhile changed.
+    pub async fn delete_folder(&self, id: &str) -> Result<bool> {
+        match (self.session)
+            .send_once(Method::DELETE, &format!("/folders/{id}"), None)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error) if error.status() == Some(reqwest::StatusCode::NOT_FOUND) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Reads the personal vault for folder cleanup. Requires an explicitly empty
+    /// organization list, no known hidden item types, unique folder IDs, and
+    /// well-formed folder references.
+    pub(crate) async fn load_folder_contents(&self) -> Result<Vault> {
+        let (profile, config, sync) = tokio::try_join!(
+            self.session.get("/accounts/profile"),
+            self.session.get("/config"),
+            self.session.get("/sync?excludeDomains=true"),
+        )?;
+        check_folder_contents(&profile, &server_traits(&config), &sync)?;
+        read_vault(&sync, &Scope::Personal, &self.keys.user)
     }
 
     pub async fn create_collection(
@@ -733,6 +755,37 @@ fn sync_list(sync: &Value, name: &str) -> Result<Vec<Value>> {
         .ok_or_else(|| anyhow!("the server's sync response has no {name} list"))
 }
 
+/// Rejects known visibility gaps and malformed folder references before
+/// parsing. A personal Vault does not preserve malformed references or
+/// establish organization visibility.
+fn check_folder_contents(profile: &Value, traits: &ServerTraits, sync: &Value) -> Result<()> {
+    match profile.get("organizations") {
+        Some(Value::Array(list)) if list.is_empty() => {}
+        Some(Value::Array(_)) => {
+            bail!("the account is in an organization, whose items can be in its folders unseen")
+        }
+        _ => bail!("the account profile does not list the account's organizations"),
+    }
+    if !traits.hidden_item_types.is_empty() {
+        bail!("the server does not show every item type, so folders may hold items unseen");
+    }
+    let mut ids = HashSet::new();
+    for folder in sync_list(sync, "folders")? {
+        let id = required_str(&folder, "id", "folder")?;
+        if !ids.insert(id.clone()) {
+            bail!("the server lists folder {id} more than once");
+        }
+    }
+    for cipher in sync_list(sync, "ciphers")? {
+        match cipher.get("folderId") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(id)) if !id.is_empty() => {}
+            Some(_) => bail!("an item has a malformed folderId"),
+        }
+    }
+    Ok(())
+}
+
 /// Fails when the organization holds collections or items this account
 /// cannot see. Bitwarden's server shows an owner only the collections the
 /// owner is assigned to, and no item that is in no collection. Hidden items
@@ -756,18 +809,27 @@ fn check_organization_visible(
         all_items.with_context(context)?,
     );
     let hidden = |name: &str, all: &Value, synced: &[Value]| -> Result<usize> {
-        let all = all.get("data").and_then(Value::as_array).ok_or_else(|| {
-            anyhow!("the server's list of all {name} in organization {org} is malformed")
-        })?;
-        let visible: HashSet<&str> = synced
-            .iter()
-            .filter_map(|entry| entry.get("id").and_then(Value::as_str))
-            .collect();
-        Ok(all
-            .iter()
-            .filter_map(|entry| entry.get("id").and_then(Value::as_str))
-            .filter(|id| !visible.contains(id))
-            .count())
+        let malformed =
+            || anyhow!("the server's list of all {name} in organization {org} is malformed");
+        let all = all
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(malformed)?;
+        // Only what `read_vault` keeps is visible.
+        let mut visible = HashSet::new();
+        for entry in synced {
+            if organization_of(entry, &format!("an entry of the synced {name}"))? == Some(org) {
+                visible.extend(entry.get("id").and_then(Value::as_str));
+            }
+        }
+        let mut hidden = 0;
+        for entry in all {
+            let id = (entry.get("id").and_then(Value::as_str))
+                .filter(|id| !id.is_empty())
+                .ok_or_else(malformed)?;
+            hidden += usize::from(!visible.contains(id));
+        }
+        Ok(hidden)
     };
     let collections = hidden("collections", &all_collections, synced_collections)?;
     let items = hidden("items", &all_items, synced_items)?;
@@ -805,6 +867,10 @@ fn required_str(value: &Value, name: &str, what: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{what} has no {name}"))
 }
 
+fn encrypted_name_hash(encrypted: &str) -> String {
+    hex::encode(Sha256::digest(encrypted.as_bytes()))
+}
+
 fn optional_str(value: &Value, name: &str) -> Option<String> {
     value
         .get(name)
@@ -813,10 +879,126 @@ fn optional_str(value: &Value, name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn read_vault(sync: &Value, scope: &Scope, scope_key: &SymKey) -> Result<Vault> {
+    let list = |name: &str| sync_list(sync, name);
+    let mut vault = Vault::default();
+    match scope {
+        Scope::Personal => {
+            for folder in list("folders")? {
+                let name = required_str(&folder, "name", "folder")?;
+                vault.folders.push(Folder {
+                    id: required_str(&folder, "id", "folder")?,
+                    name: (scope_key.decrypt_str(&name)).context("decrypting a folder name")?,
+                    stamp: Some(encrypted_name_hash(&name)),
+                });
+            }
+        }
+        Scope::Organization(org) => {
+            for collection in list("collections")? {
+                if organization_of(&collection, "a collection")? != Some(org) {
+                    continue;
+                }
+                vault.collections.push(Collection {
+                    id: required_str(&collection, "id", "collection")?,
+                    name: scope_key
+                        .decrypt_str(&required_str(&collection, "name", "collection")?)
+                        .context("decrypting a collection name")?,
+                    external_id: collection
+                        .get("externalId")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string),
+                });
+            }
+        }
+    }
+    for cipher in list("ciphers")? {
+        let id = required_str(&cipher, "id", "item")?;
+        if organization_of(&cipher, &format!("item {id}"))? != scope.organization_id() {
+            if *scope == Scope::Personal {
+                vault
+                    .folders_used_elsewhere
+                    .extend(optional_str(&cipher, "folderId"));
+            }
+            continue;
+        }
+        let item =
+            decrypt_item(&cipher, scope_key).with_context(|| format!("decrypting item {id}"))?;
+        vault.items.push(item);
+    }
+    Ok(vault)
+}
+
+/// The organization an item or collection belongs to. Anything but an id or
+/// null is an error: read as no organization, it would move the object to the
+/// personal vault or out of its organization.
+fn organization_of<'a>(value: &'a Value, what: &str) -> Result<Option<&'a str>> {
+    match value.get("organizationId") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(id)) if !id.is_empty() => Ok(Some(id)),
+        Some(_) => bail!("{what} has a malformed organizationId"),
+    }
+}
+
+fn is_encrypted_slot(field: &str, pointer: &str) -> bool {
+    let at: Vec<&str> = std::iter::once(field)
+        .chain(pointer.split('/').skip(1))
+        .collect();
+    ENCRYPTED_SLOTS.iter().any(|slot| {
+        slot.split('/').count() == at.len()
+            && slot
+                .split('/')
+                .zip(&at)
+                .all(|(part, segment)| part == "*" || part == *segment)
+    })
+}
+
+/// The object an item type keeps its data in, such as `login` or `card`.
+/// Anything else there that holds content would be left out of the item.
+fn is_type_block(name: &str) -> bool {
+    // A secure note's block holds only its subtype, which is not encrypted.
+    name == "secureNote"
+        || ENCRYPTED_SLOTS.iter().any(|slot| {
+            slot.split_once('/')
+                .is_some_and(|(root, _)| root == name && !LIST_CONTENT_KEYS.contains(&root))
+        })
+}
+
+/// A list at `name`, a path within an item, that may be missing or null, but
+/// nothing else.
+fn optional_list<'a>(cipher: &'a Value, name: &str) -> Result<&'a [Value]> {
+    match cipher.pointer(&format!("/{name}")) {
+        None | Some(Value::Null) => Ok(&[]),
+        Some(Value::Array(list)) => Ok(list),
+        Some(_) => bail!("the item's {name} is not a list"),
+    }
+}
+
 fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
     let object = cipher
         .as_object()
         .ok_or_else(|| anyhow!("item is not an object"))?;
+    // Bitwarden's server sends the legacy duplicate as a string of JSON. It can
+    // also store a whole item as one encrypted string in `data`, without the
+    // other content fields. Skipping that would read the item as empty.
+    if let Some(Value::String(data)) = object.get("data")
+        && serde_json::from_str::<Map<String, Value>>(data).is_err()
+    {
+        bail!("the item is stored as an encrypted data blob, a format that is not supported yet");
+    }
+    // Content in a list of another shape would be left out of the copy, or
+    // skip the checks of its encrypted slots.
+    for list in ENCRYPTED_SLOTS
+        .iter()
+        .filter_map(|slot| slot.split_once("/*/").map(|(list, _)| list))
+    {
+        if !optional_list(cipher, list)?
+            .iter()
+            .all(|entry| entry.is_object() || entry.is_null())
+        {
+            bail!("the item's {list} holds an entry that is not an object");
+        }
+    }
     let wrapped_key = optional_str(cipher, "key");
     let own_key = wrapped_key
         .as_deref()
@@ -830,19 +1012,17 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
         if META_KEYS.contains(&name.as_str()) {
             continue;
         }
-        let node = Node::decrypt(value, key).with_context(|| format!("field {name}"))?;
+        let node = Node::decrypt(value, key, &|pointer| is_encrypted_slot(name, pointer))
+            .with_context(|| format!("field {name}"))?;
         if is_content_key(name, &node) {
             content.insert(name.clone(), node);
+        } else if is_type_block(name) && node.normalized().is_some() {
+            bail!("field {name} is not an object");
         }
     }
 
     let mut attachments = Vec::new();
-    for attachment in cipher
-        .get("attachments")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    for attachment in optional_list(cipher, "attachments")? {
         let size = match attachment.get("size") {
             Some(Value::String(text)) => text.parse().ok(),
             Some(Value::Number(number)) => number.as_u64(),
@@ -858,16 +1038,14 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
         });
     }
 
-    let collection_ids = cipher
-        .get("collectionIds")
-        .and_then(Value::as_array)
-        .map(|ids| {
-            ids.iter()
-                .filter_map(Value::as_str)
+    let collection_ids = optional_list(cipher, "collectionIds")?
+        .iter()
+        .map(|id| {
+            id.as_str()
                 .map(str::to_string)
-                .collect()
+                .ok_or_else(|| anyhow!("the item's collectionIds hold a value that is not an id"))
         })
-        .unwrap_or_default();
+        .collect::<Result<_>>()?;
 
     Ok(Item {
         id: required_str(cipher, "id", "item")?,
@@ -890,6 +1068,8 @@ pub struct ServerTraits {
     pub hidden_item_types: Vec<u64>,
     /// Whether an organization item must be in at least one collection.
     pub items_need_collections: bool,
+    /// Whether updates preserve organization members' private metadata.
+    pub organization_updates_safe: bool,
 }
 
 impl ServerTraits {
@@ -914,6 +1094,7 @@ fn server_traits(config: &Value) -> ServerTraits {
             FLAGGED_ITEM_TYPES.to_vec()
         },
         items_need_collections: !vaultwarden,
+        organization_updates_safe: vaultwarden,
     }
 }
 
@@ -931,7 +1112,7 @@ mod tests {
 
     #[test]
     fn an_organization_this_account_cannot_list_fully_is_refused() {
-        let synced = [json!({ "id": "c1" })];
+        let synced = [json!({ "id": "c1", "organizationId": "org" })];
         let all = || Ok(json!({ "data": [{ "id": "c1" }] }));
         let check = |collections, items| {
             check_organization_visible("org", collections, items, &synced, &synced)
@@ -949,6 +1130,131 @@ mod tests {
     }
 
     #[test]
+    fn only_entries_the_read_keeps_count_as_visible() {
+        let key = SymKey::generate();
+        let org = Scope::Organization("org-1".into());
+        let inventory = |id: &str| Ok(json!({ "data": [{ "id": id }] }));
+        for owner in [
+            None,
+            Some(Value::Null),
+            Some(json!("org-2")),
+            Some(json!("org-1")),
+        ] {
+            let mut cipher = full_cipher(&key);
+            let mut collection = json!({"id": "c1", "name": key.encrypt_str("Shared").unwrap()});
+            if let Some(owner) = &owner {
+                cipher["organizationId"] = owner.clone();
+                collection["organizationId"] = owner.clone();
+            }
+            let sync = json!({"collections": [collection], "ciphers": [cipher]});
+            let (collections, items) =
+                (sync_list(&sync, "collections"), sync_list(&sync, "ciphers"));
+            let visible = check_organization_visible(
+                "org-1",
+                inventory("c1"),
+                inventory("item-1"),
+                &collections.unwrap(),
+                &items.unwrap(),
+            );
+            let read = read_vault(&sync, &org, &key).unwrap();
+            let kept = (read.collections.len(), read.items.len());
+            match visible {
+                Ok(()) => assert_eq!(kept, (1, 1), "{owner:?}"),
+                Err(error) => {
+                    assert_eq!(kept, (0, 0), "{owner:?}");
+                    let message = format!("{error:#}");
+                    assert!(message.contains("1 collection and 1 item"), "{message}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_organization_inventory_row_without_an_id_is_an_error() {
+        let synced = [json!({ "id": "c1", "organizationId": "org" })];
+        for row in [
+            json!({}),
+            json!({ "id": null }),
+            json!({ "id": 7 }),
+            json!("c1"),
+        ] {
+            let all = || Ok(json!({ "data": [{ "id": "c1" }, row.clone()] }));
+            let check = |collections, items| {
+                check_organization_visible("org", collections, items, &synced, &synced)
+            };
+            let ok = || Ok(json!({ "data": [{ "id": "c1" }] }));
+            for result in [check(all(), ok()), check(ok(), all())] {
+                let message = format!("{:#}", result.unwrap_err());
+                assert!(message.contains("malformed"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn folders_count_as_empty_only_where_the_read_shows_every_item() {
+        let shown = server_traits(&json!({"server": {"name": "Vaultwarden"}}));
+        let hidden = server_traits(&json!({"server": null, "featureStates": {}}));
+        let profile = |organizations: Option<Value>| match organizations {
+            Some(list) => json!({"id": "user", "organizations": list}),
+            None => json!({"id": "user"}),
+        };
+        let sync = |folders: Value, folder_id: Value| json!({"folders": folders, "ciphers": [{"id": "item-1", "folderId": folder_id}]});
+        let folders = json!([{"id": "f1", "name": "2.x"}, {"id": "f2", "name": "2.y"}]);
+        let complete = sync(folders.clone(), json!("f1"));
+        let empty = profile(Some(json!([])));
+        assert!(check_folder_contents(&empty, &shown, &complete).is_ok());
+        assert!(check_folder_contents(&empty, &shown, &sync(folders.clone(), Value::Null)).is_ok());
+
+        let refused = [
+            (
+                profile(Some(json!([{"id": "org"}]))),
+                &shown,
+                complete.clone(),
+            ),
+            (profile(Some(Value::Null)), &shown, complete.clone()),
+            (profile(Some(json!({}))), &shown, complete.clone()),
+            (profile(None), &shown, complete.clone()),
+            (empty.clone(), &hidden, complete.clone()),
+            (empty.clone(), &shown, sync(folders.clone(), json!(7))),
+            (empty.clone(), &shown, sync(folders.clone(), json!(""))),
+            (empty.clone(), &shown, sync(folders.clone(), json!(["f1"]))),
+            (
+                empty.clone(),
+                &shown,
+                sync(json!([{"id": "f1"}, {"id": "f1"}]), Value::Null),
+            ),
+            (
+                empty.clone(),
+                &shown,
+                json!({"folders": folders, "ciphers": null}),
+            ),
+        ];
+        for (profile, traits, sync) in refused {
+            assert!(
+                check_folder_contents(&profile, traits, &sync).is_err(),
+                "{profile} {sync}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_read_is_stamped_with_its_encrypted_name() {
+        let key = SymKey::generate();
+        let (first, second) = (
+            key.encrypt_str("Work").unwrap(),
+            key.encrypt_str("Work").unwrap(),
+        );
+        let sync = json!({
+            "folders": [{"id": "f1", "name": first}, {"id": "f2", "name": second}],
+            "ciphers": [],
+        });
+        let vault = read_vault(&sync, &Scope::Personal, &key).unwrap();
+        assert_eq!(vault.folders[0].stamp, Some(encrypted_name_hash(&first)));
+        assert_ne!(vault.folders[0].stamp, vault.folders[1].stamp);
+        assert_eq!(vault.folders[0].name, vault.folders[1].name);
+    }
+
+    #[test]
     fn server_traits_tell_bitwarden_from_vaultwarden() {
         let flagged = FLAGGED_ITEM_TYPES.to_vec();
         // Bitwarden's cloud and self-hosted server send no server name.
@@ -961,6 +1267,7 @@ mod tests {
         let enabled = bitwarden(json!({"pm-32009-new-item-types": true}));
         assert!(enabled.hidden_item_types.is_empty());
         assert!(enabled.items_need_collections);
+        assert!(!enabled.organization_updates_safe);
 
         let vaultwarden = server_traits(&json!({
             "server": {"name": "Vaultwarden", "url": "https://github.com/dani-garcia/vaultwarden"},
@@ -968,6 +1275,7 @@ mod tests {
         }));
         assert!(vaultwarden.hidden_item_types.is_empty());
         assert!(!vaultwarden.items_need_collections);
+        assert!(vaultwarden.organization_updates_safe);
     }
 
     #[test]
@@ -1112,6 +1420,220 @@ mod tests {
             object.remove(name);
         }
         decrypt_item(&missing, &key).unwrap();
+    }
+
+    #[test]
+    fn a_known_encrypted_slot_holds_ciphertext_or_is_an_error() {
+        let key = SymKey::generate();
+        for pointer in [
+            "/name",
+            "/notes",
+            "/login/password",
+            "/login/totp",
+            "/login/uris/0/uri",
+            "/login/fido2Credentials/0/keyValue",
+            "/fields/0/name",
+            "/fields/1/value",
+            "/passwordHistory/0/password",
+            "/card/number",
+            "/identity/ssn",
+            "/sshKey/privateKey",
+            "/bankAccount/swiftCode",
+            "/driversLicense/licenseNumber",
+            "/passport/expirationDate",
+        ] {
+            for value in [json!("2.AAAA"), json!("hunter2"), json!(42)] {
+                let mut cipher = full_cipher(&key);
+                *cipher.pointer_mut(pointer).unwrap() = value.clone();
+                let Err(error) = decrypt_item(&cipher, &key) else {
+                    panic!("{pointer} = {value} was read as plain content");
+                };
+                let message = format!("{error:#}");
+                let (field, rest) = pointer[1..].split_once('/').unwrap_or((&pointer[1..], ""));
+                assert!(message.contains(&format!("field {field}")), "{message}");
+                if !rest.is_empty() {
+                    assert!(message.contains(&format!(" at /{rest}")), "{message}");
+                }
+                assert!(message.contains("unsupported format"), "{message}");
+                assert!(!message.contains("AAAA") && !message.contains("hunter2"));
+            }
+        }
+    }
+
+    #[test]
+    fn an_item_stored_as_an_encrypted_data_blob_is_refused() {
+        let key = SymKey::generate();
+        let blob = key.encrypt_str(r#"{"name":"GitHub"}"#).unwrap();
+        for cipher in [
+            json!({"id": "item-1", "type": 1, "data": blob}),
+            json!({"id": "item-1", "type": 1, "name": key.encrypt_str("n").unwrap(), "data": blob}),
+        ] {
+            let Err(error) = decrypt_item(&cipher, &key) else {
+                panic!("an encrypted data blob was dropped");
+            };
+            let message = format!("{error:#}");
+            assert!(message.contains("data"), "{message}");
+            assert!(message.contains("not supported"), "{message}");
+            assert!(!message.contains(&blob[2..12]), "{message}");
+        }
+    }
+
+    #[test]
+    fn the_legacy_data_duplicate_is_read_as_either_server_sends_it() {
+        let key = SymKey::generate();
+        let name = key.encrypt_str("GitHub").unwrap();
+        // Bitwarden's server sends the duplicate as a JSON string.
+        let legacy = json!({"Fields": null, "Name": name, "Type": 1});
+        for data in [Value::Null, legacy.clone(), json!(legacy.to_string())] {
+            let mut cipher = full_cipher(&key);
+            cipher["data"] = data;
+            assert_eq!(decrypt_item(&cipher, &key).unwrap().name(), "2.AAAA");
+        }
+    }
+
+    #[test]
+    fn an_item_type_block_that_is_not_an_object_is_an_error() {
+        let key = SymKey::generate();
+        let enc = key.encrypt_str("x").unwrap();
+        for block in [
+            "login",
+            "secureNote",
+            "card",
+            "identity",
+            "sshKey",
+            "bankAccount",
+            "driversLicense",
+            "passport",
+        ] {
+            for value in [
+                json!("plain"),
+                json!(enc),
+                json!([enc]),
+                json!(5),
+                json!(true),
+            ] {
+                let mut cipher = full_cipher(&key);
+                cipher[block] = value.clone();
+                let Err(error) = decrypt_item(&cipher, &key) else {
+                    panic!("{block} = {value} was left out of the item");
+                };
+                let message = format!("{error:#}");
+                assert!(message.contains(&format!("field {block}")), "{message}");
+                assert!(!message.contains("plain") && !message.contains(&enc[2..12]));
+            }
+            for value in [Value::Null, json!(""), json!([])] {
+                let mut cipher = full_cipher(&key);
+                cipher[block] = value;
+                decrypt_item(&cipher, &key).unwrap_or_else(|error| panic!("{block}: {error:#}"));
+            }
+        }
+    }
+
+    #[test]
+    fn item_lists_of_the_wrong_shape_are_errors_not_empty() {
+        let key = SymKey::generate();
+        let field = json!({"name": "2.AAAA", "value": "sentinel"});
+        for (pointer, value) in [
+            ("/fields", field.clone()),
+            ("/fields", json!("sentinel")),
+            ("/fields", json!(["sentinel"])),
+            ("/fields", json!([field, 5])),
+            ("/passwordHistory", json!({"password": "sentinel"})),
+            ("/passwordHistory", json!([["sentinel"]])),
+            ("/login/uris", json!({"uri": "sentinel"})),
+            ("/login/uris", json!(["sentinel"])),
+            ("/login/fido2Credentials", json!("sentinel")),
+            ("/login/fido2Credentials", json!([true])),
+        ] {
+            let mut cipher = full_cipher(&key);
+            *cipher.pointer_mut(pointer).unwrap() = value.clone();
+            let Err(error) = decrypt_item(&cipher, &key) else {
+                panic!("{pointer} = {value} was read as an item list");
+            };
+            let message = format!("{error:#}");
+            assert!(message.contains(&pointer[1..]), "{message}");
+            assert!(!message.contains("sentinel") && !message.contains("AAAA"));
+        }
+        for pointer in [
+            "/fields",
+            "/passwordHistory",
+            "/login/uris",
+            "/login/fido2Credentials",
+        ] {
+            for value in [Value::Null, json!([])] {
+                let mut cipher = full_cipher(&key);
+                *cipher.pointer_mut(pointer).unwrap() = value;
+                decrypt_item(&cipher, &key).unwrap_or_else(|error| panic!("{pointer}: {error:#}"));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_attachment_and_collection_lists_are_errors_not_empty() {
+        let key = SymKey::generate();
+        for (name, value) in [
+            ("attachments", json!({})),
+            ("attachments", json!("att-1")),
+            ("collectionIds", json!("c1")),
+            ("collectionIds", json!([1])),
+            ("collectionIds", json!(["c1", null])),
+        ] {
+            let mut cipher = full_cipher(&key);
+            cipher[name] = value.clone();
+            let Err(error) = decrypt_item(&cipher, &key) else {
+                panic!("{name} = {value} was read as a list");
+            };
+            assert!(format!("{error:#}").contains(name), "{error:#}");
+        }
+        for (name, value) in [
+            ("attachments", Value::Null),
+            ("attachments", json!([])),
+            ("collectionIds", Value::Null),
+            ("collectionIds", json!(["c1"])),
+        ] {
+            let mut cipher = full_cipher(&key);
+            cipher[name] = value;
+            decrypt_item(&cipher, &key).unwrap();
+        }
+    }
+
+    #[test]
+    fn malformed_ownership_is_an_error_not_another_scope() {
+        let key = SymKey::generate();
+        let org = Scope::Organization("org-1".into());
+        let sync = |cipher_owner: Value, collection_owner: Value| {
+            let mut cipher = full_cipher(&key);
+            cipher["organizationId"] = cipher_owner;
+            json!({
+                "folders": [],
+                "collections": [{
+                    "id": "c1",
+                    "organizationId": collection_owner,
+                    "name": key.encrypt_str("Shared").unwrap(),
+                }],
+                "ciphers": [cipher],
+            })
+        };
+        let personal = read_vault(&sync(Value::Null, json!("org-1")), &Scope::Personal, &key);
+        assert_eq!(personal.unwrap().items.len(), 1);
+        let shared = read_vault(&sync(json!("org-1"), json!("org-1")), &org, &key).unwrap();
+        assert_eq!((shared.items.len(), shared.collections.len()), (1, 1));
+        let other = read_vault(&sync(json!("org-2"), json!("org-2")), &org, &key).unwrap();
+        assert_eq!((other.items.len(), other.collections.len()), (0, 0));
+
+        for malformed in [
+            json!(7),
+            json!({"id": "org-1"}),
+            json!(["org-1"]),
+            json!(""),
+        ] {
+            for scope in [&Scope::Personal, &org] {
+                let item = read_vault(&sync(malformed.clone(), json!("org-1")), scope, &key);
+                assert!(item.is_err(), "item owner {malformed} in {scope:?}");
+            }
+            let collection = read_vault(&sync(json!("org-1"), malformed.clone()), &org, &key);
+            assert!(collection.is_err(), "collection owner {malformed}");
+        }
     }
 
     #[test]

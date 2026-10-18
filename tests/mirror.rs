@@ -3,16 +3,46 @@ mod common;
 use anyhow::Result;
 use common::*;
 use vault_mirror::{
-    mirror::{Endpoint, Filter, MirrorOptions, mirror_onto},
+    mirror::{Filter, MirrorOptions},
     node::Node,
-    plan::{self, MARKER_FIELD, Safety, marker_of},
-    vault::{Account, Draft, Scope},
+    plan::{MARKER_FIELD, Safety},
+    vault::{Account, Draft, Item, Scope},
 };
 
 const PERSONAL: Scope = Scope::Personal;
 
 fn options() -> MirrorOptions {
     MirrorOptions::default()
+}
+
+fn overwrite() -> MirrorOptions {
+    MirrorOptions {
+        safety: Safety {
+            allow_overwrite: true,
+            ..Safety::default()
+        },
+        ..options()
+    }
+}
+
+/// `item` with a marker as a run leaves it that stopped before its
+/// attachments were copied and checked.
+fn pending(item: &Item) -> Draft {
+    let mut content = item.content.clone();
+    let Some(Node::List(fields)) = content.get_mut("fields") else {
+        panic!("no fields")
+    };
+    let marker = fields.last_mut().unwrap();
+    let Node::Map(marker) = marker else { panic!() };
+    let value = marker["value"].as_str().unwrap();
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    let value = format!("{} ? ?", parts[..4].join(" "));
+    marker.insert("value".into(), Node::secret(value));
+    Draft {
+        content,
+        folder_id: item.folder_id.clone(),
+        collection_ids: vec![],
+    }
 }
 
 async fn attachment_bytes(
@@ -67,11 +97,7 @@ async fn a_vault_is_mirrored_completely_and_then_left_alone() -> Result<()> {
             "{name}"
         );
         assert_eq!(mirrored.archived, sample.archived, "{name}");
-        assert_eq!(
-            marker_of(mirrored).unwrap().source_id,
-            original.id,
-            "{name}"
-        );
+        assert_eq!(copied_from(mirrored).unwrap(), original.id, "{name}");
         // Everything but the marker is the content the source holds.
         let mut content = mirrored.content.clone();
         let Some(Node::List(fields)) = content.get_mut("fields") else {
@@ -216,7 +242,7 @@ async fn source_changes_are_carried_over_in_place() -> Result<()> {
 }
 
 #[tokio::test]
-async fn changes_to_copies_in_the_destination_are_undone_and_reported() -> Result<()> {
+async fn changes_to_copies_in_the_destination_are_replaced_only_when_allowed() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
@@ -253,24 +279,44 @@ async fn changes_to_copies_in_the_destination_are_undone_and_reported() -> Resul
         },
     )
     .await?;
-    dest.create_folder("Not in the source").await?;
-    dest.set_archived(&[by_name(&vault, "Archived note").id.clone()], false)
+    let own_folder = dest.create_folder("Not in the source").await?;
+    let note = by_name(&vault, "Archived note");
+    dest.set_archived(std::slice::from_ref(&note.id), false)
         .await?;
+    let changed = dest.load(&PERSONAL).await?;
 
-    let outcome = run(&source, &dest, &options()).await?;
+    let mut ids = [visa.id.clone(), github.id.clone(), note.id.clone()];
+    ids.sort();
+    for error in [
+        check(&source, &dest, &options()).await.unwrap_err(),
+        run(&source, &dest, &options()).await.unwrap_err(),
+    ] {
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&format!(
+                "3 copies changed in the destination since vault-mirror wrote them, and the \
+                 run would replace or delete them ({})",
+                ids.join(", ")
+            )),
+            "{message}"
+        );
+        assert!(message.contains("--allow-overwrite"), "{message}");
+    }
+    assert_eq!(dest.load(&PERSONAL).await?, changed);
+
+    let preview = check(&source, &dest, &overwrite()).await?;
+    assert!(!preview.changed);
+    assert_eq!(dest.load(&PERSONAL).await?, changed);
+    let outcome = run(&source, &dest, &overwrite()).await?;
     assert!(outcome.changed);
+    assert_eq!(preview.summary, outcome.summary);
     // Identity and the trashed key are recreated, and the item added in the
     // destination stays. The trashed copy stays in the trash.
     assert_eq!(outcome.summary.items_created, 2);
     assert_eq!(outcome.summary.items_deleted, 0);
     assert_eq!(outcome.summary.items_updated, 3);
-    assert_eq!(outcome.summary.folders_deleted, 1);
     assert!(
-        outcome
-            .warnings
-            .iter()
-            // The card number, and the attachment deleted from GitHub.
-            .any(|w| w.starts_with("2 copies changed in the destination")),
+        (outcome.warnings.iter()).any(|w| w.starts_with("Replacing 3 copies changed")),
         "{:?}",
         outcome.warnings
     );
@@ -285,23 +331,20 @@ async fn changes_to_copies_in_the_destination_are_undone_and_reported() -> Resul
     assert_eq!(by_name(&after, "GitHub").attachments.len(), 2);
     assert!(by_name(&after, "Archived note").archived);
     assert_eq!(after.items.iter().filter(|item| item.in_trash).count(), 1);
+    assert!(after.folders.contains(&own_folder));
     assert!(!run(&source, &dest, &options()).await?.changed);
     Ok(())
 }
 
 #[tokio::test]
-async fn a_dry_run_reports_the_plan_and_changes_nothing() -> Result<()> {
+async fn a_check_reports_the_plan_and_changes_nothing() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
     let (source, dest) = sandbox.pair().await?;
     fixtures::seed(&source).await?;
 
-    let dry = MirrorOptions {
-        dry_run: true,
-        ..options()
-    };
-    let outcome = run(&source, &dest, &dry).await?;
+    let outcome = check(&source, &dest, &options()).await?;
     assert!(!outcome.changed);
     assert_eq!(outcome.summary.items_created, fixtures::samples().len());
     let vault = dest.load(&PERSONAL).await?;
@@ -331,7 +374,10 @@ async fn items_vault_mirror_did_not_make_are_left_alone() -> Result<()> {
     assert_eq!(first.summary.items_created, fixtures::samples().len());
     assert_eq!(first.summary.items_deleted, 0);
     assert!(
-        first.warnings.iter().any(|w| w.contains("didn't make")),
+        first
+            .warnings
+            .iter()
+            .any(|w| w.contains("didn't copy from this source")),
         "{:?}",
         first.warnings
     );
@@ -367,7 +413,7 @@ async fn swapped_source_and_destination_are_refused() -> Result<()> {
     assert!(format!("{error:#}").contains("swapped"), "{error:#}");
     let vault = source.load(&PERSONAL).await?;
     assert_eq!(vault.items.len(), fixtures::samples().len());
-    assert!(vault.items.iter().all(|item| marker_of(item).is_none()));
+    assert!(vault.items.iter().all(|item| copied_from(item).is_none()));
 
     let error = run(&source, &source, &options()).await.unwrap_err();
     assert!(format!("{error:#}").contains("same vault"), "{error:#}");
@@ -400,7 +446,7 @@ async fn one_vault_reached_through_two_addresses_is_refused() -> Result<()> {
     assert!(format!("{error:#}").contains("same items"), "{error:#}");
     let vault = source.load(&PERSONAL).await?;
     assert_eq!(vault.items.len(), fixtures::samples().len());
-    assert!(vault.items.iter().all(|item| marker_of(item).is_none()));
+    assert!(vault.items.iter().all(|item| copied_from(item).is_none()));
     Ok(())
 }
 
@@ -648,8 +694,8 @@ async fn newer_item_types_are_mirrored() -> Result<()> {
         }
     }
 
-    let first = run(&source, &dest, &options()).await?;
     if dest.server_traits().await?.hidden_item_types.is_empty() {
+        let first = run(&source, &dest, &options()).await?;
         assert_eq!(first.summary.items_created, items.len());
         let mirrored = dest.load(&PERSONAL).await?;
         for (_, name, key, block) in &items {
@@ -660,17 +706,18 @@ async fn newer_item_types_are_mirrored() -> Result<()> {
                 "{name}"
             );
         }
+        assert!(!run(&source, &dest, &options()).await?.changed);
     } else {
         // A destination that would accept the items but never show them
-        // gets none, instead of a new invisible copy on every run.
-        assert_eq!(first.summary.items_created, 0);
+        // gets none, instead of a new invisible copy on every run, and the
+        // run fails rather than look complete.
+        let error = run(&source, &dest, &options()).await.unwrap_err();
         assert!(
-            first.warnings.iter().any(|w| w.contains("left out")),
-            "{:?}",
-            first.warnings
+            format!("{error:#}").contains("cannot hold 3 items"),
+            "{error:#}"
         );
+        assert!(dest.load(&PERSONAL).await?.items.is_empty());
     }
-    assert!(!run(&source, &dest, &options()).await?.changed);
     Ok(())
 }
 
@@ -717,57 +764,58 @@ async fn a_folder_filter_mirrors_part_of_the_vault() -> Result<()> {
     assert_eq!(folders(&mirrored), ["Empty", "Work", "Work/Infra"]);
     assert!(!run(&source, &dest, &not_private).await?.changed);
 
-    // Folder names are vault content, so the warning names the setting.
-    let typo = run(&source, &dest, &filtered(&[], &["Persönlich ✈", "Wrok"])).await?;
-    assert_eq!(
-        typo.warnings,
-        ["1 name in EXCLUDE_FOLDERS matches no folder in the source. Check the spelling."]
-    );
+    // A misspelt name stops the run, which would otherwise delete the
+    // copies it no longer selects. Folder names are vault content, so the
+    // error names the setting.
+    let before = dest.load(&PERSONAL).await?;
+    for typo in [filtered(&["Wrok"], &[]), filtered(&[], &["Wrok"])] {
+        let error = run(&source, &dest, &typo).await.unwrap_err();
+        let setting = match typo.filter.include.is_empty() {
+            true => "EXCLUDE_FOLDERS",
+            false => "INCLUDE_FOLDERS",
+        };
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "planning failed: 1 name in {setting} matches no folder in the source. Check the \
+                 spelling"
+            )
+        );
+    }
+    assert_eq!(dest.load(&PERSONAL).await?, before);
     Ok(())
 }
 
-/// Bitwarden accepts attachments only from premium accounts. A destination
-/// without premium gets everything else, and a warning, instead of a failed
-/// run.
+/// Bitwarden accepts attachments only from premium accounts. A run into a
+/// destination without premium fails before it changes anything, rather
+/// than leave the attachments out and look complete.
 #[tokio::test]
-async fn a_destination_without_premium_gets_everything_but_attachments() -> Result<()> {
+async fn a_destination_without_premium_gets_no_partial_copy() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
     let source = sandbox
         .open(&sandbox.register(&sandbox.source_url).await?)
         .await?;
-    let dest = sandbox
+    let mut dest = sandbox
         .open(&sandbox.register_free(&sandbox.dest_url).await?)
         .await?;
     fixtures::seed(&source).await?;
+    // Vaultwarden makes every account premium.
+    dest.premium = false;
 
-    let first = run(&source, &dest, &options()).await?;
-    assert_eq!(first.summary.items_created, fixtures::samples().len());
-    if dest.premium {
-        assert_eq!(first.summary.attachments_copied, 4);
-        assert!(first.warnings.is_empty(), "{:?}", first.warnings);
-    } else {
-        assert_eq!(first.summary.attachments_copied, 0);
-        assert!(
-            first.warnings.iter().any(|w| w.contains("no premium")),
-            "{:?}",
-            first.warnings
-        );
-        let mirrored = dest.load(&PERSONAL).await?;
-        assert!(
-            mirrored
-                .items
-                .iter()
-                .all(|item| item.attachments.is_empty())
-        );
-    }
-    assert!(!run(&source, &dest, &options()).await?.changed);
+    let error = run(&source, &dest, &options()).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no premium subscription"),
+        "{error:#}"
+    );
+    assert!(format!("{error:#}").contains("4 attachments"), "{error:#}");
+    assert!(dest.load(&PERSONAL).await?.items.is_empty());
     Ok(())
 }
 
-/// A destination that loses premium keeps the attachments it already has,
-/// and new ones are left out with a warning.
+/// A destination that loses premium keeps the attachments it already has.
+/// A run that would copy new ones fails before it changes anything.
 #[tokio::test]
 async fn attachments_stay_when_the_destination_loses_premium() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
@@ -787,12 +835,8 @@ async fn attachments_stay_when_the_destination_loses_premium() -> Result<()> {
     source
         .upload_attachment(&PERSONAL, item, "new.txt", b"new")
         .await?;
-    let outcome = run(&source, &dest, &options()).await?;
-    assert!(
-        outcome.warnings.iter().any(|w| w.contains("no premium")),
-        "{:?}",
-        outcome.warnings
-    );
+    let error = run(&source, &dest, &options()).await.unwrap_err();
+    assert!(format!("{error:#}").contains("no premium"), "{error:#}");
     let mirrored = dest.load(&PERSONAL).await?;
     assert_eq!(
         attachment_bytes(&dest, &mirrored, "Extra note 0", "kept.txt").await?,
@@ -810,10 +854,65 @@ async fn attachments_stay_when_the_destination_loses_premium() -> Result<()> {
     Ok(())
 }
 
-/// A run that stops while replacing attachments leaves the item marked as
-/// pending, so the next run copies them again instead of trusting the files.
+/// A run that stops while copying attachments leaves a marker that vouches
+/// for none. Without files, the next run copies them all. With files,
+/// nothing tells those the stopped run uploaded from ones someone added
+/// since, so the next run refuses until it is allowed to replace them.
 #[tokio::test]
 async fn an_interrupted_attachment_copy_is_repaired() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    seed_extra(&source, 2).await?;
+    let vault = source.load(&PERSONAL).await?;
+    for name in ["Extra note 0", "Extra note 1"] {
+        source
+            .upload_attachment(&PERSONAL, by_name(&vault, name), "file.txt", b"old")
+            .await?;
+    }
+    run(&source, &dest, &options()).await?;
+
+    let vault = source.load(&PERSONAL).await?;
+    for name in ["Extra note 0", "Extra note 1"] {
+        let item = by_name(&vault, name);
+        source
+            .delete_attachment(&item.id, &item.attachments[0].id)
+            .await?;
+        source
+            .upload_attachment(&PERSONAL, item, "file.txt", b"new")
+            .await?;
+    }
+    let dest_vault = dest.load(&PERSONAL).await?;
+    let emptied = by_name(&dest_vault, "Extra note 0");
+    dest.delete_attachment(&emptied.id, &emptied.attachments[0].id)
+        .await?;
+    let emptied = dest.get_item(&PERSONAL, &emptied.id).await?;
+    dest.update_item(&PERSONAL, &emptied, &pending(&emptied))
+        .await?;
+    let kept = by_name(&dest_vault, "Extra note 1");
+    dest.update_item(&PERSONAL, kept, &pending(kept)).await?;
+
+    let error = run(&source, &dest, &options()).await.unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains(&format!("({})", kept.id)), "{message}");
+    assert!(message.contains("--allow-overwrite"), "{message}");
+    run(&source, &dest, &overwrite()).await?;
+    let mirrored = dest.load(&PERSONAL).await?;
+    for name in ["Extra note 0", "Extra note 1"] {
+        assert_eq!(
+            attachment_bytes(&dest, &mirrored, name, "file.txt").await?,
+            b"new"
+        );
+    }
+    assert!(!run(&source, &dest, &options()).await?.changed);
+    Ok(())
+}
+
+/// A run copies attachment files out of the source backup it just made, so
+/// it copies what the backup holds even if the source changes meanwhile.
+#[tokio::test]
+async fn attachments_are_copied_from_the_source_backup() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
@@ -822,100 +921,33 @@ async fn an_interrupted_attachment_copy_is_repaired() -> Result<()> {
     let vault = source.load(&PERSONAL).await?;
     let item = by_name(&vault, "Extra note 0");
     source
-        .upload_attachment(&PERSONAL, item, "file.txt", b"old")
+        .upload_attachment(&PERSONAL, item, "file.txt", b"backed up")
         .await?;
-    run(&source, &dest, &options()).await?;
-
-    let vault = source.load(&PERSONAL).await?;
-    let item = by_name(&vault, "Extra note 0");
+    let source_read = protect(&source, &PERSONAL).await?;
+    let dest_read = protect(&dest, &PERSONAL).await?;
+    let item = by_name(&source_read.vault, "Extra note 0");
     source
         .delete_attachment(&item.id, &item.attachments[0].id)
         .await?;
-    source
-        .upload_attachment(&PERSONAL, item, "file.txt", b"new")
-        .await?;
+    // Added after the backup, so the run leaves it for the next one.
+    seed_extra(&source, 2).await?;
 
-    // What a run leaves when it stops after writing the item and before
-    // replacing its attachments.
-    let source_vault = source.load(&PERSONAL).await?;
-    let dest_vault = dest.load(&PERSONAL).await?;
-    let plan = plan::plan(&source_vault, &dest_vault, plan::Mode::Personal);
-    let update = &plan.updates[0];
-    assert!(update.sync_attachments);
-    let draft = plan.entries[update.entry].pending_draft(
-        &source_vault,
-        &Default::default(),
-        &Default::default(),
-    )?;
-    dest.update_item(&PERSONAL, &dest_vault.items[update.dest], &draft)
-        .await?;
-
-    assert!(run(&source, &dest, &options()).await?.changed);
-    let mirrored = dest.load(&PERSONAL).await?;
-    assert_eq!(
-        attachment_bytes(&dest, &mirrored, "Extra note 0", "file.txt").await?,
-        b"new"
-    );
-    assert!(!run(&source, &dest, &options()).await?.changed);
-    Ok(())
-}
-
-/// The mirror plans against the destination backup. An item added after the
-/// backup was read is left alone, and so is a folder it was put in that the
-/// plan meant to delete.
-#[tokio::test]
-async fn an_item_added_after_the_backup_is_left_alone() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let (source, dest) = sandbox.pair().await?;
-    fixtures::seed(&source).await?;
-    run(&source, &dest, &options()).await?;
-    let folder_id = |vault: &vault_mirror::vault::Vault| {
-        vault
-            .folders
-            .iter()
-            .find(|f| f.name == "Empty")
-            .map(|f| f.id.clone())
-    };
-    let source_folder = folder_id(&source.load(&PERSONAL).await?).unwrap();
-    source.delete_folder(&source_folder).await?;
-
-    let backed_up = dest.load(&PERSONAL).await?;
-    let dest_folder = folder_id(&backed_up);
-    let mut content = fixtures::named("Bare login without folder").content;
-    content.insert("name".into(), Node::secret("Added meanwhile"));
-    let added = dest
-        .create_item(
-            &PERSONAL,
-            &Draft {
-                content,
-                folder_id: dest_folder.clone(),
-                collection_ids: vec![],
-            },
-        )
-        .await?;
-    let endpoint = |account| Endpoint {
-        account,
-        scope: PERSONAL,
-    };
-    let outcome = mirror_onto(
-        &endpoint(&source),
-        &endpoint(&dest),
-        Some(backed_up),
+    let outcome = run_protected(
+        &source,
+        PERSONAL,
+        &dest,
+        PERSONAL,
+        (&source_read, &dest_read),
         &options(),
-        &Capture::default(),
     )
     .await?;
-    assert_eq!(outcome.summary.folders_deleted, 0);
-    assert!(!outcome.changed);
-
-    // Later runs see it, and leave it too.
-    run(&source, &dest, &options()).await?;
-    let after = dest.load(&PERSONAL).await?;
-    let kept = after.items.iter().find(|item| item.id == added.id).unwrap();
-    assert_eq!(kept.folder_id, dest_folder);
-    assert_eq!(folder_id(&after), dest_folder);
+    assert_eq!(outcome.summary.items_created, 1);
+    let mirrored = dest.load(&PERSONAL).await?;
+    assert_eq!(mirrored.items.len(), 1);
+    assert_eq!(
+        attachment_bytes(&dest, &mirrored, "Extra note 0", "file.txt").await?,
+        b"backed up"
+    );
     Ok(())
 }
 
@@ -934,8 +966,9 @@ async fn a_copy_edited_after_the_backup_is_not_deleted() -> Result<()> {
         .delete_items(&[by_name(&originals, "Identity").id.clone()])
         .await?;
 
-    let backed_up = dest.load(&PERSONAL).await?;
-    let copy = by_name(&backed_up, "Identity");
+    let source_read = protect(&source, &PERSONAL).await?;
+    let dest_read = protect(&dest, &PERSONAL).await?;
+    let copy = by_name(&dest_read.vault, "Identity");
     let mut edited = Draft {
         content: copy.content.clone(),
         folder_id: copy.folder_id.clone(),
@@ -945,19 +978,17 @@ async fn a_copy_edited_after_the_backup_is_not_deleted() -> Result<()> {
         .content
         .insert("notes".into(), Node::secret("edited meanwhile"));
     dest.update_item(&PERSONAL, copy, &edited).await?;
-    let endpoint = |account| Endpoint {
-        account,
-        scope: PERSONAL,
-    };
-    let error = mirror_onto(
-        &endpoint(&source),
-        &endpoint(&dest),
-        Some(backed_up),
+    let error = run_protected(
+        &source,
+        PERSONAL,
+        &dest,
+        PERSONAL,
+        (&source_read, &dest_read),
         &options(),
-        &Capture::default(),
     )
     .await
     .expect_err("the edited copy must stop the deletion");
+    let error = error.downcast::<vault_mirror::mirror::MirrorError>()?;
     assert_eq!(error.stage, "deleting obsolete items");
     let after = dest.load(&PERSONAL).await?;
     assert_eq!(
@@ -965,8 +996,11 @@ async fn a_copy_edited_after_the_backup_is_not_deleted() -> Result<()> {
         Some("edited meanwhile")
     );
 
-    // The next run plans from the edited copy, so it may delete it.
-    run(&source, &dest, &options()).await?;
+    // The next run's backup holds the edit, and it deletes the copy only
+    // when allowed to.
+    let error = run(&source, &dest, &options()).await.unwrap_err();
+    assert!(format!("{error:#}").contains("--allow-overwrite"));
+    run(&source, &dest, &overwrite()).await?;
     let after = dest.load(&PERSONAL).await?;
     assert!((after.items.iter()).all(|item| item.in_trash || item.name() != "Identity"));
     Ok(())
@@ -1070,10 +1104,7 @@ async fn archived_items_with_attachments_stay_archived() -> Result<()> {
         .set_archived(std::slice::from_ref(&item.id), true)
         .await?;
 
-    let first = run(&source, &dest, &options()).await?;
-    if first.warnings.iter().any(|w| w.contains("archive")) {
-        return Ok(());
-    }
+    run(&source, &dest, &options()).await?;
     let mirrored = dest.load(&PERSONAL).await?;
     let copy = by_name(&mirrored, "Extra note 0");
     assert!(copy.archived);

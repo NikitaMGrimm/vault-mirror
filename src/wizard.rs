@@ -11,7 +11,10 @@ use std::{
 
 use anyhow::{Result, anyhow, bail};
 use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
-use vault_mirror::{app, config::Config};
+use vault_mirror::{
+    app::{self, RunFlags},
+    config::Config,
+};
 
 use crate::{Console, check_config, describe_vault};
 
@@ -150,7 +153,7 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
         let config = Config::from_env(&settings).map_err(|error| anyhow!("{error}"))?;
         // The files are written either way; a safety stop here is about the
         // vaults' contents, not the settings.
-        if let Err(error) = check_config(&config, false).await {
+        if let Err(error) = check_config(&config, RunFlags::default(), false).await {
             Console::error(&format!("{error:#}"));
             println!(
                 "\nOnce that is resolved, check again with `docker compose run --rm vault-mirror check`."

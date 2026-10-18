@@ -12,6 +12,15 @@ pub fn count(n: usize, noun: &str) -> String {
     }
 }
 
+/// Up to five ids, and how many more there are.
+pub fn listed(ids: &[impl AsRef<str>]) -> String {
+    let ids: Vec<&str> = ids.iter().map(AsRef::as_ref).collect();
+    match ids.len() {
+        0..=5 => ids.join(", "),
+        n => format!("{} and {} more", ids[..5].join(", "), n - 5),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

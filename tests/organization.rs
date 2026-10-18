@@ -2,13 +2,10 @@ mod common;
 
 use anyhow::Result;
 use common::*;
-use serde_json::json;
 use vault_mirror::{
     crypto::KdfParams,
-    mirror::{Endpoint, MirrorOptions, pull},
+    mirror::MirrorOptions,
     node::Node,
-    restore::{RestoreOptions, restore},
-    store::{Keys, Store},
     vault::{Account, Draft, Scope, Vault},
 };
 
@@ -96,8 +93,6 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
     assert!(first.warnings.is_empty(), "{:?}", first.warnings);
     assert_eq!(first.summary.items_created, 3);
     assert_eq!(first.summary.collections_created, 3);
-    // Both organizations start with the collection the server creates.
-    assert_eq!(first.summary.collections_deleted, 0);
     assert_eq!(first.summary.attachments_copied, 2);
 
     let vault = dest.load(&dest_scope).await?;
@@ -141,7 +136,6 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
         .changed
     );
 
-    // Move an item to another collection, edit one, and drop a collection.
     let source_vault = source.load(&source_scope).await?;
     let github = by_name(&source_vault, "GitHub");
     let moved = Draft {
@@ -167,6 +161,19 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
         .unwrap();
     source.delete_collection(&source_org, &empty.id).await?;
 
+    if !dest.server_traits().await?.organization_updates_safe {
+        let before = dest.load(&dest_scope).await?;
+        let refused = run_scoped(&source, source_scope, &dest, dest_scope.clone(), &options)
+            .await
+            .unwrap_err();
+        assert!(
+            dest.load(&dest_scope).await? == before,
+            "a refused run changed the destination"
+        );
+        assert!(format!("{refused:#}").contains("cannot safely update organization copies"));
+        return Ok(());
+    }
+
     let second = run_scoped(
         &source,
         source_scope.clone(),
@@ -176,7 +183,6 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
     )
     .await?;
     assert_eq!(second.summary.items_updated, 2);
-    assert_eq!(second.summary.collections_deleted, 1);
     let vault = dest.load(&dest_scope).await?;
     assert_eq!(collections_of(&vault, "GitHub"), ["Team B"]);
     assert_eq!(
@@ -188,12 +194,128 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
         by_name(&vault, "Passkey login").content["notes"].as_str(),
         Some("edited in the organization")
     );
-    assert!(vault.collections.iter().all(|c| c.name != "Empty team"));
+    // Collections are left for you to delete.
+    assert!(vault.collections.iter().any(|c| c.name == "Empty team"));
     assert!(
         !run_scoped(&source, source_scope, &dest, dest_scope, &options)
             .await?
             .changed
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_copy_stays_in_the_folder_its_member_put_it_in() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, source_scope, source_org) = organization(&sandbox, &sandbox.source_url).await?;
+    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
+    let team = source.create_collection(&source_org, "Team", None).await?;
+    for name in ["GitHub", "Visa"] {
+        let draft = Draft {
+            content: fixtures::named(name).content,
+            folder_id: None,
+            collection_ids: vec![team.id.clone()],
+        };
+        source.create_item(&source_scope, &draft).await?;
+    }
+    let options = MirrorOptions::default();
+    let run = || {
+        run_scoped(
+            &source,
+            source_scope.clone(),
+            &dest,
+            dest_scope.clone(),
+            &options,
+        )
+    };
+    run().await?;
+
+    // A folder is the member's own, not part of the organization.
+    let mine = dest.create_folder("Mine").await?;
+    for copy in dest.load(&dest_scope).await?.items {
+        let filed = Draft {
+            content: copy.content.clone(),
+            folder_id: Some(mine.id.clone()),
+            collection_ids: copy.collection_ids.clone(),
+        };
+        dest.update_item(&dest_scope, &copy, &filed).await?;
+    }
+    assert!(!run().await?.changed);
+
+    for copy in dest.load(&dest_scope).await?.items {
+        assert_eq!(copy.folder_id.as_ref(), Some(&mine.id));
+    }
+
+    let vault = source.load(&source_scope).await?;
+    let github = by_name(&vault, "GitHub");
+    let mut edited = Draft {
+        content: github.content.clone(),
+        folder_id: None,
+        collection_ids: github.collection_ids.clone(),
+    };
+    edited
+        .content
+        .insert("notes".into(), Node::secret("edited"));
+    let github = source.update_item(&source_scope, github, &edited).await?;
+    source
+        .upload_attachment(&source_scope, &github, "codes.txt", b"1234")
+        .await?;
+    let visa = by_name(&vault, "Visa");
+    source
+        .set_archived(std::slice::from_ref(&visa.id), true)
+        .await?;
+
+    if !dest.server_traits().await?.organization_updates_safe {
+        source
+            .create_item(
+                &source_scope,
+                &Draft {
+                    content: fixtures::named("Visa").content,
+                    folder_id: None,
+                    collection_ids: vec![team.id.clone()],
+                },
+            )
+            .await?;
+        let before = (
+            source.load(&source_scope).await?,
+            dest.load(&dest_scope).await?,
+        );
+        let mut permitted = MirrorOptions::default();
+        permitted.safety.allow_overwrite = true;
+        permitted.safety.allow_mass_delete = true;
+        permitted.safety.allow_reverse = true;
+        for options in [&options, &permitted] {
+            let refused = run_scoped(
+                &source,
+                source_scope.clone(),
+                &dest,
+                dest_scope.clone(),
+                options,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                (
+                    source.load(&source_scope).await?,
+                    dest.load(&dest_scope).await?
+                ) == before,
+                "a refused run changed a vault"
+            );
+            assert!(format!("{refused:#}").contains("cannot safely update organization copies"));
+        }
+        return Ok(());
+    }
+
+    assert_eq!(run().await?.summary.items_updated, 2);
+    let copies = dest.load(&dest_scope).await?;
+    for copy in &copies.items {
+        assert_eq!(copy.folder_id.as_ref(), Some(&mine.id), "{}", copy.name());
+    }
+    assert_eq!(by_name(&copies, "GitHub").attachments.len(), 1);
+    assert!(by_name(&copies, "Visa").archived);
+    assert!(!run().await?.changed);
     Ok(())
 }
 
@@ -395,145 +517,27 @@ async fn items_in_no_collection_are_never_lost_silently() -> Result<()> {
 
     source.create_item(&source_scope, &note(vec![])).await?;
     let options = MirrorOptions::default();
-    let first = run_scoped(
-        &source,
-        source_scope.clone(),
-        &dest,
-        dest_scope.clone(),
-        &options,
-    )
-    .await?;
+    let run = || {
+        run_scoped(
+            &source,
+            source_scope.clone(),
+            &dest,
+            dest_scope.clone(),
+            &options,
+        )
+    };
     if dest.server_traits().await?.items_need_collections {
-        assert_eq!(first.summary.items_created, 0);
+        let error = run().await.unwrap_err();
         assert!(
-            first
-                .warnings
-                .iter()
-                .any(|w| w.contains("in no collection")),
-            "{:?}",
-            first.warnings
+            format!("{error:#}").contains("1 item of the source is in no collection"),
+            "{error:#}"
         );
+        assert!(dest.load(&dest_scope).await?.items.is_empty());
     } else {
+        let first = run().await?;
         assert_eq!(first.summary.items_created, 1);
         assert!(first.warnings.is_empty(), "{:?}", first.warnings);
-    }
-    assert!(
-        !run_scoped(&source, source_scope, &dest, dest_scope, &options)
-            .await?
-            .changed
-    );
-    Ok(())
-}
-
-/// A destination item in no collection is left out of a pull, with a
-/// warning, when the source server refuses such items, instead of stopping
-/// every pull.
-#[tokio::test]
-async fn a_pull_leaves_out_items_in_no_collection_that_the_source_refuses() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let (source, source_scope, _) = organization(&sandbox, &sandbox.source_url).await?;
-    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
-    if dest.server_traits().await?.items_need_collections {
-        eprintln!("skipping: the destination server hides items in no collection");
-        return Ok(());
-    }
-    let note = Draft {
-        content: [
-            ("type".to_string(), Node::Number(2.into())),
-            ("name".to_string(), Node::secret("Loose note")),
-            (
-                "secureNote".to_string(),
-                Node::Map([("type".to_string(), Node::Number(0.into()))].into()),
-            ),
-        ]
-        .into(),
-        folder_id: None,
-        collection_ids: vec![],
-    };
-    dest.create_item(&dest_scope, &note).await?;
-
-    let source_vault = source.load(&source_scope).await?;
-    let dest_vault = dest.load(&dest_scope).await?;
-    let pulled = pull(
-        &Endpoint {
-            account: &source,
-            scope: source_scope,
-        },
-        &Endpoint {
-            account: &dest,
-            scope: dest_scope,
-        },
-        &source_vault,
-        &dest_vault,
-        &MirrorOptions::default(),
-        &Capture::default(),
-    )
-    .await?;
-    let refused = source.server_traits().await?.items_need_collections;
-    assert_eq!(pulled.summary.items_created, usize::from(!refused));
-    assert_eq!(
-        pulled
-            .warnings
-            .iter()
-            .any(|w| w.contains("out of the pull")),
-        refused
-    );
-    Ok(())
-}
-
-/// A restore leaves out what the target server would accept but not show,
-/// and says so, instead of reporting items that cannot be found.
-#[tokio::test]
-async fn a_restore_leaves_out_items_the_target_would_hide() -> Result<()> {
-    let Some(sandbox) = sandbox().await else {
-        return Ok(());
-    };
-    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
-    let note = |id: &str, name: &str, collection_ids: &[&str]| {
-        json!({"id": id, "type": 2, "name": name, "secureNote": {"type": 0},
-            "collectionIds": collection_ids})
-    };
-    let dir = tempfile::tempdir()?;
-    let keys = Keys::open(dir.path(), "test backup passphrase")?;
-    let store = Store::new(dir.path(), "source", &keys);
-    let id = store
-        .begin(time::OffsetDateTime::now_utc())?
-        .finish(&json!({
-            "encrypted": false,
-            "collections": [{"id": "c1", "name": "Shared"}],
-            "items": [note("i1", "Loose note", &[]), note("i2", "Shared note", &["c1"])],
-            "vaultMirror": {"scope": "organization", "plainStrings": {}, "attachments": []},
-        }))?;
-    let capture = Capture::default();
-    let report = restore(
-        &Endpoint {
-            account: &dest,
-            scope: dest_scope.clone(),
-        },
-        &store.snapshot(&id),
-        &RestoreOptions {
-            allow_non_empty: false,
-        },
-        &capture,
-    )
-    .await?;
-
-    let restored = dest.load(&dest_scope).await?;
-    assert_eq!(restored.items.len(), report.items);
-    if dest.server_traits().await?.items_need_collections {
-        assert_eq!((report.items, report.items_left_out), (1, 1));
-        assert!(
-            capture
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|line| line.starts_with("warn:") && line.contains("1 item ")),
-        );
-    } else {
-        assert_eq!((report.items, report.items_left_out), (2, 0));
+        assert!(!run().await?.changed);
     }
     Ok(())
 }

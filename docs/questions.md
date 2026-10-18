@@ -4,23 +4,21 @@
 
 ## Does vault-mirror change my source vault?
 
-Only when you ask: with `restore --to source`, or with `run --pull`, which copies
-changes made in the destination back into the source.
+No. vault-mirror only reads the source.
 
 ## What happens to items I add or change in the destination?
 
 Items you add there stay. vault-mirror changes and deletes only its copies, which
 it recognizes by their [marker](how-it-works.md#how-copies-are-recognized).
 
-If you edit a copy, the next run puts the source version back and warns you.
-Your edit is in that run's destination backup. To change an item for good,
-change it in the source.
+If you change a copy, runs stop before changing anything and list it. To change
+an item for good, change it in the source. To put the source version back, run
+once with `--allow-overwrite`; that run's destination backup keeps your change.
 
 ## Can it sync in both directions?
 
 No. The source always wins. If you used the destination while the source was
-down, `run --pull` copies your changes back once. See
-[After an outage](how-it-works.md#after-an-outage).
+down, see [After an outage](how-it-works.md#after-an-outage).
 
 To make the other vault the source for good, see [Switching the source and
 destination](how-it-works.md#switching-the-source-and-destination).
@@ -28,7 +26,7 @@ destination](how-it-works.md#switching-the-source-and-destination).
 ## What happens when I delete an item in the source?
 
 The next run deletes its copy, which stays in that run's destination backup. A
-run that would delete every copy stops. See
+run that would delete more than half of the copies stops. See
 [safety checks](how-it-works.md#safety-checks).
 
 ## What happens when the source server is down?

@@ -113,8 +113,8 @@ impl KdfParams {
 /// Returns true when `value` has the shape of a Bitwarden encrypted string:
 /// a type number, a dot, and base64 parts separated by `|`.
 ///
-/// The vault model is decrypted without a schema, so this decides which JSON
-/// strings are ciphertext. Plain values the server stores next to ciphertext
+/// This decides which strings are ciphertext in item fields that the vault
+/// model does not know to be encrypted. Plain values the server stores there
 /// are ids, dates, numbers, booleans and short enum values, none of which
 /// have this shape. The check is deliberately looser than a parse, so that
 /// truncated or otherwise damaged ciphertext also counts: a value that passes

@@ -26,7 +26,8 @@ Use these terms the way the docs do:
   to match it.
 - **run**: one backup-compare-change-verify cycle (`app::run_once`).
 - **copy**: a destination item vault-mirror made. **marker**: the hidden
-  `vault-mirror` field on every copy that names its source item.
+  `vault-mirror` field on every copy that names its pair of vaults and its
+  source item.
 - **snapshot**: one encrypted backup of one vault.
 - **scope**: a personal vault or one organization (`vault::Scope`).
 - **settings file**: `vault-mirror.env`.
@@ -63,7 +64,7 @@ Use these terms the way the docs do:
 | `src/vault.rs` | Decrypted vault model and the server operations that change it |
 | `src/plan.rs` | Pure diff of source and destination, and the safety rules |
 | `src/mirror.rs` | Runs a plan, then re-reads and verifies the destination |
-| `src/snapshot.rs`, `src/store.rs`, `src/backup.rs`, `src/restore.rs` | Encrypted backups |
+| `src/snapshot.rs`, `src/store.rs`, `src/backup.rs` | Encrypted backups |
 | `tests/` | End-to-end tests against the sandbox servers, and the command line |
 | `tests/common/` | Sandbox setup, test accounts (`provision.rs`) and sample items (`fixtures.rs`) |
 | `examples/sandbox.rs` | Prints a settings file for two new sandbox accounts, for trying things by hand |

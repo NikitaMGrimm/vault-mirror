@@ -10,7 +10,6 @@ pub mod crypto;
 pub mod mirror;
 pub mod node;
 pub mod plan;
-pub mod restore;
 pub mod schedule;
 pub mod snapshot;
 pub mod store;

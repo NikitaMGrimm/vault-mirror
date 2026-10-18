@@ -216,3 +216,35 @@ fn text(value: &Value, name: &str) -> Result<String> {
         .map(str::to_string)
         .ok_or_else(|| anyhow!("response has no {name}"))
 }
+
+/// Registers a second attachment on item `item_id` the way an upload starts,
+/// and never sends its file, as an upload that failed part way leaves it.
+/// Its name and key are those of the item's first attachment.
+pub async fn register_attachment_without_file(
+    http: &reqwest::Client,
+    account: &TestAccount,
+    item_id: &str,
+) -> Result<String> {
+    let urls = ServerUrls::from_server(&account.server)?;
+    let item = get(
+        http,
+        &urls,
+        &account.access_token,
+        &format!("/ciphers/{item_id}"),
+    )
+    .await?;
+    let first = &item["attachments"][0];
+    let slot = post(
+        http.post(format!("{}/ciphers/{item_id}/attachment/v2", urls.api))
+            .bearer_auth(&account.access_token)
+            .json(&json!({
+                "key": first["key"],
+                "fileName": first["fileName"],
+                "fileSize": 100,
+                "adminRequest": false,
+            })),
+        "registering an attachment",
+    )
+    .await?;
+    text(&slot, "attachmentId")
+}

@@ -5,15 +5,18 @@
 pub mod fixtures;
 pub mod provision;
 
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 use anyhow::Result;
 use provision::TestAccount;
 use vault_mirror::{
     api::{ClientOptions, ServerUrls, build_http_client},
+    backup::{BackupOptions, backup},
     crypto::KdfParams,
-    mirror::{Endpoint, MirrorOptions, Outcome, Reporter, mirror},
+    mirror::{self, Endpoint, MirrorOptions, Outcome, Protected, Reporter},
     node::Node,
+    plan::is_mirror_marker,
+    store::{FolderReceipts, Keys, Store},
     vault::{Account, Draft, Item, Scope, Vault},
 };
 
@@ -199,12 +202,73 @@ pub async fn run(source: &Account, dest: &Account, options: &MirrorOptions) -> R
     run_scoped(source, Scope::Personal, dest, Scope::Personal, options).await
 }
 
+/// One backup directory and key for all of a test binary's runs, since the
+/// key takes a while to make.
+static BACKUPS: LazyLock<(tempfile::TempDir, Keys)> = LazyLock::new(|| {
+    let dir = tempfile::tempdir().expect("backup directory");
+    let keys = Keys::open(dir.path(), "test backup passphrase").expect("backup key");
+    (dir, keys)
+});
+
+/// The record of the folders runs created, shared by a test binary's runs.
+/// Each pair of test accounts has its own part of it.
+pub fn folders() -> FolderReceipts {
+    FolderReceipts::new(BACKUPS.0.path())
+}
+
+/// Reads `account`'s vault and backs it up, as a run does before it mirrors.
+pub async fn protect(account: &Account, scope: &Scope) -> Result<Protected<'static>> {
+    let (dir, keys) = &*BACKUPS;
+    let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+    let options = BackupOptions {
+        retention_days: 30,
+        now: time::OffsetDateTime::now_utc(),
+    };
+    let (_, read) = backup(account, scope, &store, &options, &Capture::default()).await?;
+    Ok(read)
+}
+
+/// Backs up both vaults and mirrors, as a run does.
 pub async fn run_scoped(
     source: &Account,
     source_scope: Scope,
     dest: &Account,
     dest_scope: Scope,
     options: &MirrorOptions,
+) -> Result<Outcome> {
+    let source_read = protect(source, &source_scope).await?;
+    let dest_read = protect(dest, &dest_scope).await?;
+    run_protected(
+        source,
+        source_scope,
+        dest,
+        dest_scope,
+        (&source_read, &dest_read),
+        options,
+    )
+    .await
+}
+
+/// Mirrors from reads backed up before.
+pub async fn run_protected(
+    source: &Account,
+    source_scope: Scope,
+    dest: &Account,
+    dest_scope: Scope,
+    reads: (&Protected<'_>, &Protected<'_>),
+    options: &MirrorOptions,
+) -> Result<Outcome> {
+    let endpoints = ((source, source_scope), (dest, dest_scope));
+    run_recorded(endpoints, reads, options, &folders()).await
+}
+
+/// Mirrors from reads backed up before, with `folders` as the record of the
+/// folders runs created.
+pub async fn run_recorded(
+    ((source, source_scope), (dest, dest_scope)): ((&Account, Scope), (&Account, Scope)),
+    (source_read, dest_read): (&Protected<'_>, &Protected<'_>),
+    options: &MirrorOptions,
+    folders: &FolderReceipts,
 ) -> Result<Outcome> {
     let source = Endpoint {
         account: source,
@@ -214,7 +278,49 @@ pub async fn run_scoped(
         account: dest,
         scope: dest_scope,
     };
-    Ok(mirror(&source, &dest, options, &Capture::default()).await?)
+    Ok(mirror::mirror(
+        &source,
+        &dest,
+        source_read,
+        dest_read,
+        options,
+        folders,
+        &Capture::default(),
+    )
+    .await?)
+}
+
+/// Reports what a run would do, changing nothing.
+pub async fn check(source: &Account, dest: &Account, options: &MirrorOptions) -> Result<Outcome> {
+    let source = Endpoint {
+        account: source,
+        scope: Scope::Personal,
+    };
+    let dest = Endpoint {
+        account: dest,
+        scope: Scope::Personal,
+    };
+    let (source_vault, dest_vault) = (
+        source.account.load(&source.scope).await?,
+        dest.account.load(&dest.scope).await?,
+    );
+    Ok(mirror::check(
+        &source,
+        &dest,
+        &source_vault,
+        &dest_vault,
+        options,
+        &folders(),
+        &Capture::default(),
+    )
+    .await?)
+}
+
+/// The source item id in `item`'s marker, if it is a copy.
+pub fn copied_from(item: &Item) -> Option<String> {
+    let marker = item.fields().iter().rev().find(|f| is_mirror_marker(f))?;
+    let value = marker.as_map()?.get("value")?.as_str()?;
+    Some(value.split_whitespace().nth(1)?.to_string())
 }
 
 pub fn by_name<'a>(vault: &'a Vault, name: &str) -> &'a Item {
