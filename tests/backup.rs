@@ -415,7 +415,10 @@ async fn backups_keep_every_attachment_while_runs_skip_them() -> Result<()> {
         first.source_backup.as_ref().unwrap().attachments_downloaded,
         4
     );
-    let copy = dest.load(&PERSONAL).await?.items.remove(0);
+    // Bitwarden's server unarchives an item it uploads an attachment to.
+    let copy = (dest.load(&PERSONAL).await?.items.into_iter())
+        .find(|item| !item.archived)
+        .unwrap();
     assert!(copy.attachments.is_empty());
     dest.upload_attachment(&PERSONAL, &copy, "only-copy.txt", b"the only copy")
         .await?;
