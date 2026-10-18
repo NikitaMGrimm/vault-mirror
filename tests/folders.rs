@@ -139,7 +139,7 @@ async fn folders_a_run_made_go_once_nothing_needs_them() -> Result<()> {
     assert_eq!(dest.load(&PERSONAL).await?, before);
     let outcome = run(&source, &dest, &options()).await?;
     assert!(outcome.changed);
-    assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    assert!(outcome.warnings.is_empty(), "folder cleanup must not warn");
     assert_eq!(outcome.summary.folders_deleted, 1);
     assert_eq!(outcome.summary.items_unchanged, samples);
     assert_eq!(
@@ -429,7 +429,8 @@ async fn an_account_in_an_organization_keeps_its_folders() -> Result<()> {
         .open(&sandbox.register(&sandbox.source_url).await?)
         .await?;
     let dest_account = sandbox.register(&sandbox.dest_url).await?;
-    create_organization(&sandbox, &dest_account, "Folder Test Org").await?;
+    let organization = uuid::Uuid::new_v4().to_string();
+    create_organization(&sandbox, &dest_account, &organization).await?;
     let dest = sandbox.open(&dest_account).await?;
     fixtures::seed(&source).await?;
     run(&source, &dest, &options()).await?;
@@ -445,8 +446,7 @@ async fn an_account_in_an_organization_keeps_its_folders() -> Result<()> {
         assert!(
             (outcome.warnings.iter())
                 .any(|w| w.starts_with("Kept 1 folder") && w.contains("organization")),
-            "{:?}",
-            outcome.warnings
+            "organization membership must warn that the obsolete folder is kept"
         );
     }
     assert!(names(&dest.load(&PERSONAL).await?).contains(&"Empty"));
@@ -590,18 +590,16 @@ async fn a_folder_deletion_without_an_answer_is_not_counted_or_repeated() -> Res
     assert_eq!(outcome.summary.folders_deleted, 0);
     assert!(
         (outcome.warnings.iter()).any(|w| w.contains("may have reached the server")),
-        "{:?}",
-        outcome.warnings
+        "a lost deletion response must be reported as uncertain"
     );
     assert!(
         !(outcome.warnings.iter()).any(|w| w.starts_with("Kept")),
-        "{:?}",
-        outcome.warnings
+        "an unconfirmed deletion must not be reported as kept"
     );
 
     let again = run(&source, &dest, &options()).await?;
     assert!(!again.changed);
-    assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+    assert!(again.warnings.is_empty(), "the next run must not warn");
     assert_eq!(again.summary.folders_deleted, 0);
     assert_eq!(
         proxy.deletes.load(Ordering::SeqCst),
