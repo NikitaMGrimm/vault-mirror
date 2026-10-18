@@ -205,7 +205,7 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
 }
 
 #[tokio::test]
-async fn a_copy_stays_in_the_folder_its_member_put_it_in() -> Result<()> {
+async fn a_copy_keeps_the_folder_and_favorite_its_member_chose() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
@@ -231,12 +231,18 @@ async fn a_copy_stays_in_the_folder_its_member_put_it_in() -> Result<()> {
         )
     };
     run().await?;
+    let favorite = |vault: &Vault, name: &str| by_name(vault, name).content["favorite"].clone();
+    let copies = dest.load(&dest_scope).await?;
+    // The source GitHub item is a favorite of its member, not of the organization.
+    assert_eq!(favorite(&copies, "GitHub"), Node::Bool(false));
 
-    // A folder is the member's own, not part of the organization.
+    // Folders and favorites are the member's own, not part of the organization.
     let mine = dest.create_folder("Mine").await?;
-    for copy in dest.load(&dest_scope).await?.items {
+    for copy in copies.items {
+        let mut content = copy.content.clone();
+        content.insert("favorite".into(), Node::Bool(copy.name() == "Visa"));
         let filed = Draft {
-            content: copy.content.clone(),
+            content,
             folder_id: Some(mine.id.clone()),
             collection_ids: copy.collection_ids.clone(),
         };
@@ -313,6 +319,8 @@ async fn a_copy_stays_in_the_folder_its_member_put_it_in() -> Result<()> {
     for copy in &copies.items {
         assert_eq!(copy.folder_id.as_ref(), Some(&mine.id), "{}", copy.name());
     }
+    assert_eq!(favorite(&copies, "GitHub"), Node::Bool(false));
+    assert_eq!(favorite(&copies, "Visa"), Node::Bool(true));
     assert_eq!(by_name(&copies, "GitHub").attachments.len(), 1);
     assert!(by_name(&copies, "Visa").archived);
     assert!(!run().await?.changed);
