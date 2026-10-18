@@ -4,6 +4,14 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.8.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.7.0...v0.8.0) - 2026-10-18
+
+### Fixed
+
+- *(organization)* preserve member favorites ([#65](https://github.com/NikitaMGrimm/vault-mirror/pull/65))
+- preserve copy safety and convergence after reversals ([#64](https://github.com/NikitaMGrimm/vault-mirror/pull/64))
+- [**breaking**] protect vault data during one-way mirroring ([#62](https://github.com/NikitaMGrimm/vault-mirror/pull/62))
+
 ## [0.7.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.6.1...v0.7.0) - 2026-10-17
 
 ### Changed
