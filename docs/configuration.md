@@ -127,7 +127,8 @@ On Bitwarden's servers, that means, for both organizations:
 3. Make sure every item is in a collection.
 
 Members, groups, permissions, favorites and folders aren't copied between
-organizations.
+organizations. A destination member's favorites and folders stay as they set
+them.
 
 ## Mirroring part of a vault
 

@@ -10,6 +10,7 @@ use futures_util::{StreamExt, TryStreamExt, stream};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    node::Node,
     plan::{
         self, DeleteReason, FolderCleanup, Mode, Plan, Receipt, Safety, Summary, comparable,
         differing_paths,
@@ -822,21 +823,29 @@ impl<'a> Run<'a> {
                 collection_ids.insert(collection.name, collection.id);
             }
         }
+        // In an organization a folder or favorite is each member's own and
+        // not mirrored. A new copy has neither, and a replacement keeps the
+        // destination member's.
         let draft = |entry_index: usize, archived: bool, files: Option<&[_]>| {
-            plan.entries[entry_index].draft(
+            let mut draft = plan.entries[entry_index].draft(
                 source_vault,
                 &folder_ids,
                 &collection_ids,
                 archived,
                 files,
-            )
+            )?;
+            if mode == Mode::Organization {
+                draft.content.insert("favorite".into(), Node::Bool(false));
+            }
+            anyhow::Ok(draft)
         };
-        // What replaces `item`, in its own archive state. In an organization
-        // a folder is each member's own and not mirrored, so it stays.
         let replacement = |entry_index: usize, item: &Item, files: Option<&[_]>| {
             let mut draft = draft(entry_index, item.archived, files)?;
             if mode == Mode::Organization {
                 draft.folder_id = item.folder_id.clone();
+                if let Some(favorite) = item.content.get("favorite") {
+                    draft.content.insert("favorite".into(), favorite.clone());
+                }
             }
             anyhow::Ok(draft)
         };
