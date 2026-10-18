@@ -118,8 +118,9 @@ here in the same pull request.
   vault twice, copies changed in the destination, or a run that deletes more
   than half of the copies.
 - Name the flag that allows a refused run once. The daemon takes no flags.
-- When the destination can't hold part of the source, fail the run. Never
-  report a partial copy as a success.
+- When the destination can't hold selected source content, fail the run.
+  `SKIP_ATTACHMENTS=true` explicitly excludes attachment synchronization,
+  with a warning. Backups still include every attachment.
 
 ### Documentation
 

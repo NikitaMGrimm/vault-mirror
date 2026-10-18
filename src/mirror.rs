@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     node::Node,
     plan::{
-        self, DeleteReason, FolderCleanup, Mode, Plan, Receipt, Safety, Summary, comparable,
-        differing_paths,
+        self, DeleteReason, FileWrite, FolderCleanup, Mode, Plan, Receipt, Safety, Summary,
+        comparable, differing_paths,
     },
     store::{FolderReceipts, Receipts, Snapshot},
     text::{count, listed},
@@ -69,6 +69,8 @@ pub struct MirrorOptions {
     pub safety: Safety,
     /// The folders, or in an organization the collections, to mirror.
     pub filter: Filter,
+    /// Leave attachments out: copies keep theirs and new copies get none.
+    pub skip_attachments: bool,
 }
 
 /// Names of folders, or of collections in an organization, that select what
@@ -565,8 +567,22 @@ impl<'a> Run<'a> {
                     .context("reading the source server's settings")
             },
         )?;
+        if self.options.skip_attachments {
+            self.warn(
+                "SKIP_ATTACHMENTS is on. Retained copies keep their attachments and new copies \
+                 get none. Backups still include every attachment. Set \
+                 SKIP_ATTACHMENTS=false to copy them again."
+                    .to_string(),
+            );
+        }
         let pair = plan::pair(&vault_key(self.source), &vault_key(self.dest));
-        let plan = plan::plan(&source_vault, dest_vault, mode, &pair);
+        let plan = plan::plan(
+            &source_vault,
+            dest_vault,
+            mode,
+            &pair,
+            self.options.skip_attachments,
+        );
         check_source_shows(&plan, dest_vault, &source_traits)?;
         check_dest_holds(
             &source_vault,
@@ -826,7 +842,7 @@ impl<'a> Run<'a> {
         // In an organization a folder or favorite is each member's own and
         // not mirrored. A new copy has neither, and a replacement keeps the
         // destination member's.
-        let draft = |entry_index: usize, archived: bool, files: Option<&[_]>| {
+        let draft = |entry_index: usize, archived: bool, files: FileWrite<'_>| {
             let mut draft = plan.entries[entry_index].draft(
                 source_vault,
                 &folder_ids,
@@ -839,7 +855,7 @@ impl<'a> Run<'a> {
             }
             anyhow::Ok(draft)
         };
-        let replacement = |entry_index: usize, item: &Item, files: Option<&[_]>| {
+        let replacement = |entry_index: usize, item: &Item, files: FileWrite<'_>| {
             let mut draft = draft(entry_index, item.archived, files)?;
             if mode == Mode::Organization {
                 draft.folder_id = item.folder_id.clone();
@@ -849,11 +865,7 @@ impl<'a> Run<'a> {
             }
             anyhow::Ok(draft)
         };
-        let has_files = |entry_index: usize| {
-            !source_vault.items[plan.entries[entry_index].source]
-                .attachments
-                .is_empty()
-        };
+        let copies_files = |entry_index: usize| plan.entries[entry_index].copies_files();
 
         self.stage = "writing items";
         // Each write yields the entry it was for and the destination item as
@@ -863,7 +875,13 @@ impl<'a> Run<'a> {
         // gets a marker that vouches for no attachments first, and its final
         // one once they are done and checked.
         let drafts = (plan.creates.iter())
-            .map(|&entry_index| draft(entry_index, false, (!has_files(entry_index)).then_some(&[])))
+            .map(|&entry_index| {
+                let files = match copies_files(entry_index) {
+                    true => FileWrite::Pending,
+                    false => FileWrite::Kept,
+                };
+                draft(entry_index, false, files)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let folder_names: HashMap<String, String> = folder_ids
             .iter()
@@ -887,9 +905,9 @@ impl<'a> Run<'a> {
             async move {
                 let existing = &dest_vault.items[update.dest];
                 let draft = if update.sync_attachments {
-                    replacement(update.entry, existing, None)?
+                    replacement(update.entry, existing, FileWrite::Pending)?
                 } else if update.write_content {
-                    replacement(update.entry, existing, Some(&existing.attachments))?
+                    replacement(update.entry, existing, FileWrite::Kept)?
                 } else {
                     return anyhow::Ok((update.entry, existing.clone()));
                 };
@@ -922,7 +940,7 @@ impl<'a> Run<'a> {
             })
             .collect();
         let transfers: Vec<(usize, &Item, &[String])> = (written[..created].iter())
-            .filter(|(entry_index, _)| has_files(*entry_index))
+            .filter(|(entry_index, _)| copies_files(*entry_index))
             .map(|(entry_index, item)| (*entry_index, item, &[][..]))
             .chain(
                 (written[created..].iter()).filter_map(|(entry_index, item)| {
@@ -952,7 +970,8 @@ impl<'a> Run<'a> {
                         copy_attachments((source_files, source_item), (dest, dest_item), old, mode)
                             .await?;
                     uploads.add(copied);
-                    let draft = replacement(entry_index, &stored, Some(&stored.attachments))?;
+                    let draft =
+                        replacement(entry_index, &stored, FileWrite::Copied(&stored.attachments))?;
                     let finished = dest
                         .account
                         .update_item(&dest.scope, &stored, &draft)
@@ -1014,10 +1033,14 @@ impl<'a> Run<'a> {
         // so a run that stops before the state is set takes no copy for
         // changed by hand. Now the state is set, the marker follows.
         stream::iter(changing.into_iter().map(|(entry_index, item)| {
-            let replacement = &replacement;
+            let (replacement, copies_files) = (&replacement, &copies_files);
             async move {
                 let stored = reread(dest, item, mode).await?;
-                let draft = replacement(*entry_index, &stored, Some(&stored.attachments))?;
+                let files = match copies_files(*entry_index) {
+                    true => FileWrite::Copied(&stored.attachments),
+                    false => FileWrite::Kept,
+                };
+                let draft = replacement(*entry_index, &stored, files)?;
                 (dest.account.update_item(&dest.scope, &stored, &draft).await)
                     .with_context(|| format!("updating destination item {}", item.id))?;
                 anyhow::Ok(())
@@ -1070,7 +1093,13 @@ impl<'a> Run<'a> {
     async fn verify(&mut self, source_vault: &Vault, pair: &str, mode: Mode) -> Result<()> {
         let dest = self.dest;
         let dest_vault = dest.account.load(&dest.scope).await?;
-        let again = plan::plan(source_vault, &dest_vault, mode, pair);
+        let again = plan::plan(
+            source_vault,
+            &dest_vault,
+            mode,
+            pair,
+            self.options.skip_attachments,
+        );
         if !again.has_changes() {
             return Ok(());
         }

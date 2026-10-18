@@ -86,7 +86,11 @@ const PAIR: &str = "111111111111111111111111111111111111111111111111111111111111
 const OTHER_PAIR: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
 fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
-    super::plan(source, dest, mode, PAIR)
+    super::plan(source, dest, mode, PAIR, false)
+}
+
+fn skipping(source: &Vault, dest: &Vault) -> Plan {
+    super::plan(source, dest, Mode::Personal, PAIR, true)
 }
 
 fn marker(item: &Item) -> Option<Marker> {
@@ -106,10 +110,14 @@ fn check(plan: &Plan, dest: &Vault, safety: &Safety) -> Result<(), SafetyViolati
     check_safety(plan, dest, safety)
 }
 
+fn apply(source: &Vault, dest: &Vault, mode: Mode) -> Vault {
+    applied(source, dest, mode, false)
+}
+
 /// Applies a plan as a run that finishes does, without a server: the
 /// destination ends up holding exactly what the final drafts describe.
-fn apply(source: &Vault, dest: &Vault, mode: Mode) -> Vault {
-    let plan = plan(source, dest, mode);
+fn applied(source: &Vault, dest: &Vault, mode: Mode, skip_attachments: bool) -> Vault {
+    let plan = super::plan(source, dest, mode, PAIR, skip_attachments);
     let mut next = dest.clone();
     let taken: HashSet<String> = (dest.items.iter().map(|i| i.id.clone()))
         .chain(dest.folders.iter().map(|f| f.id.clone()))
@@ -144,8 +152,12 @@ fn apply(source: &Vault, dest: &Vault, mode: Mode) -> Vault {
 
     let write = |item: &mut Item, entry: &Entry, files: Vec<Attachment>| {
         let archived = source.items[entry.source].archived;
+        let written = match entry.copies_files() {
+            true => FileWrite::Copied(&files),
+            false => FileWrite::Kept,
+        };
         let draft = entry
-            .draft(source, &folder_ids, &collection_ids, archived, Some(&files))
+            .draft(source, &folder_ids, &collection_ids, archived, written)
             .unwrap();
         item.content = draft.content;
         item.folder_id = draft.folder_id;
@@ -161,7 +173,10 @@ fn apply(source: &Vault, dest: &Vault, mode: Mode) -> Vault {
     for &entry_index in &plan.creates {
         let entry = &plan.entries[entry_index];
         let mut item = login(&fresh("dest-item"), "", "");
-        let files = copies(entry, &mut fresh);
+        let files = match entry.copies_files() {
+            true => copies(entry, &mut fresh),
+            false => vec![],
+        };
         write(&mut item, entry, files);
         next.items.push(item);
     }
@@ -186,7 +201,14 @@ fn apply(source: &Vault, dest: &Vault, mode: Mode) -> Vault {
 /// copying any attachment.
 fn pending(source: &Vault, copy: &Item) -> Item {
     let entry = &plan(source, &Vault::default(), Mode::Personal).entries[0];
-    let draft = (entry.draft(source, &HashMap::new(), &HashMap::new(), false, None)).unwrap();
+    let draft = (entry.draft(
+        source,
+        &HashMap::new(),
+        &HashMap::new(),
+        false,
+        FileWrite::Pending,
+    ))
+    .unwrap();
     Item {
         content: draft.content,
         attachments: vec![],
@@ -582,7 +604,7 @@ fn attachments_no_marker_vouches_for_are_not_replaced_unasked() {
     );
 
     // With its source item gone, the copy is not deleted unasked either.
-    let plan = super::plan(&vault(vec![]), &dest, Mode::Personal, PAIR);
+    let plan = super::plan(&vault(vec![]), &dest, Mode::Personal, PAIR, false);
     assert!(plan.deletes[0].changed_in_dest.files);
 }
 
@@ -643,6 +665,303 @@ fn attachment_sizes_on_the_destination_do_not_matter() {
     assert_converged(&source, &dest, Mode::Personal);
 }
 
+fn receipt(item: &Item) -> [String; 2] {
+    let marker = marker(item).unwrap();
+    [marker.source_files, marker.dest_files]
+}
+
+fn edit_notes(vault: &mut Vault, notes: &str) {
+    vault.items[0].content.insert("notes".into(), text(notes));
+}
+
+#[test]
+fn copies_made_while_attachments_are_skipped_get_them_later() {
+    let mut source = vault(vec![login("s1", "One", "pw1"), login("s2", "Two", "pw2")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let skipped = skipping(&source, &Vault::default());
+    assert_eq!(skipped.creates, [0, 1]);
+    assert_eq!(skipped.summary(&source).attachments_copied, 0);
+    let dest = applied(&source, &Vault::default(), Mode::Personal, true);
+    assert!(dest.items.iter().all(|item| item.attachments.is_empty()));
+    assert_eq!(receipt(&dest.items[0]), ["?", "-"]);
+    assert_eq!(receipt(&dest.items[1]), ["-", "-"]);
+    assert!(!skipping(&source, &dest).has_changes());
+
+    // A file added to the copy meanwhile is the destination's.
+    let mut added = dest.clone();
+    added.items[0].attachments = vec![attachment("mine", "mine.txt", 5)];
+    assert!(!skipping(&source, &added).has_changes());
+    let refused = plan(&source, &added, Mode::Personal);
+    assert!(refused.updates[0].changed_in_dest.files);
+    assert!(matches!(
+        check(&refused, &added, &Safety::default()),
+        Err(SafetyViolation::Overwrites(_))
+    ));
+
+    let resumed = plan(&source, &dest, Mode::Personal);
+    assert_eq!(resumed.updates.len(), 1);
+    assert!(resumed.updates[0].sync_attachments && !resumed.updates[0].changed_in_dest.any());
+    assert_eq!(resumed.summary(&source).attachments_copied, 1);
+    assert_eq!(check(&resumed, &dest, &Safety::default()), Ok(()));
+    let after = apply(&source, &dest, Mode::Personal);
+    assert_eq!(after.items[0].attachments.len(), 1);
+    assert_converged(&source, &after, Mode::Personal);
+}
+
+const FILE_CHANGES: [fn(&mut Vec<Attachment>); 4] = [
+    |files| files.push(attachment("added", "more.txt", 5)),
+    |files| files.clear(),
+    |files| files[0] = attachment("replaced", "scan.pdf", 100),
+    |files| files[0].file_name = "renamed.pdf".into(),
+];
+
+#[test]
+fn source_attachment_changes_wait_until_attachments_are_copied_again() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let dest = mirrored(&source, Mode::Personal);
+    for (index, change) in FILE_CHANGES.iter().enumerate() {
+        let mut changed = source.clone();
+        change(&mut changed.items[0].attachments);
+        assert!(!skipping(&changed, &dest).has_changes(), "{index}");
+
+        edit_notes(&mut changed, "edited");
+        changed.items[0].archived = true;
+        let skipped = skipping(&changed, &dest);
+        let update = &skipped.updates[0];
+        assert!(update.write_content && !update.sync_attachments, "{index}");
+        assert_eq!(update.set_archived, Some(true));
+        assert_eq!(skipped.summary(&changed).attachments_copied, 0);
+        let after = applied(&changed, &dest, Mode::Personal, true);
+        assert_eq!(after.items[0].attachments, dest.items[0].attachments);
+        assert_eq!(receipt(&after.items[0]), receipt(&dest.items[0]), "{index}");
+        assert!(!skipping(&changed, &after).has_changes(), "{index}");
+
+        let resumed = plan(&changed, &after, Mode::Personal);
+        let update = &resumed.updates[0];
+        assert!(
+            update.sync_attachments && !update.changed_in_dest.any(),
+            "{index}"
+        );
+        let resumed = apply(&changed, &after, Mode::Personal);
+        assert_converged(&changed, &resumed, Mode::Personal);
+    }
+}
+
+#[test]
+fn destination_attachment_edits_survive_skipped_writes_and_still_need_permission() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let dest = mirrored(&source, Mode::Personal);
+    let mut changed = source.clone();
+    edit_notes(&mut changed, "edited");
+    for (index, change) in FILE_CHANGES.iter().enumerate() {
+        let mut edited = dest.clone();
+        change(&mut edited.items[0].attachments);
+        let skipped = skipping(&changed, &edited);
+        assert!(!skipped.updates[0].changed_in_dest.any(), "{index}");
+        assert_eq!(check(&skipped, &edited, &Safety::default()), Ok(()));
+        let after = applied(&changed, &edited, Mode::Personal, true);
+        assert_eq!(after.items[0].attachments, edited.items[0].attachments);
+        assert_eq!(receipt(&after.items[0]), receipt(&dest.items[0]), "{index}");
+        assert!(!skipping(&changed, &after).has_changes(), "{index}");
+
+        let resumed = plan(&changed, &after, Mode::Personal);
+        assert!(resumed.updates[0].changed_in_dest.files, "{index}");
+        assert!(matches!(
+            check(&resumed, &after, &Safety::default()),
+            Err(SafetyViolation::Overwrites(_))
+        ));
+        let stale = skipping(&vault(vec![]), &after);
+        assert!(stale.deletes[0].changed_in_dest.files, "{index}");
+        assert!(matches!(
+            check(&stale, &after, &Safety::default()),
+            Err(SafetyViolation::Overwrites(_))
+        ));
+        let replaced = apply(&changed, &after, Mode::Personal);
+        assert_converged(&changed, &replaced, Mode::Personal);
+    }
+}
+
+#[test]
+fn interrupted_attachment_copies_stay_unvouched_while_skipped() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let copy = mirrored(&source, Mode::Personal).items.remove(0);
+    let mut changed = source.clone();
+    edit_notes(&mut changed, "edited");
+    for files in [vec![], vec![attachment("d1", "scan.pdf", 164)]] {
+        let dest = vault(vec![Item {
+            attachments: files.clone(),
+            ..pending(&source, &copy)
+        }]);
+        let skipped = skipping(&changed, &dest);
+        assert!(!skipped.updates[0].changed_in_dest.any());
+        let after = applied(&changed, &dest, Mode::Personal, true);
+        assert_eq!(after.items[0].attachments, files);
+        assert_eq!(receipt(&after.items[0]), ["?", "?"]);
+        assert!(!skipping(&changed, &after).has_changes());
+
+        let resumed = plan(&changed, &after, Mode::Personal);
+        assert!(resumed.updates[0].sync_attachments);
+        assert_eq!(resumed.updates[0].changed_in_dest.files, !files.is_empty());
+    }
+
+    // Skipping vouches for nothing new. Copying settles the removal.
+    let mut emptied = source.clone();
+    emptied.items[0].attachments.clear();
+    let dest = vault(vec![pending(&source, &copy)]);
+    assert!(!skipping(&emptied, &dest).has_changes());
+    let settled = plan(&emptied, &dest, Mode::Personal);
+    assert!(!settled.updates[0].sync_attachments && !settled.updates[0].changed_in_dest.any());
+    let after = apply(&emptied, &dest, Mode::Personal);
+    assert_eq!(receipt(&after.items[0]), ["-", "-"]);
+    assert_converged(&emptied, &after, Mode::Personal);
+}
+
+/// After the vaults switch roles, a skipped write can vouch only for files
+/// the other side's marker proves unchanged.
+#[test]
+fn skipped_reversals_keep_only_attachment_evidence_they_prove() {
+    let reverse = Safety {
+        allow_reverse: true,
+        ..Safety::default()
+    };
+    for changed_side in ["neither", "new source", "new destination"] {
+        let mut a = vault(vec![login("a1", "One", "pw1")]);
+        a.items[0].attachments = vec![attachment("f1", "scan.pdf", 100)];
+        let mut b = mirrored(&a, Mode::Personal);
+        edit_notes(&mut b, "edited in b");
+        match changed_side {
+            "new source" => b.items[0].attachments = vec![attachment("f2", "scan.pdf", 120)],
+            "new destination" => a.items[0].attachments = vec![attachment("f3", "scan.pdf", 130)],
+            _ => {}
+        }
+        let switched = skipping(&b, &a);
+        assert_eq!(switched.reversed, 1);
+        let update = &switched.updates[0];
+        assert!(!update.sync_attachments && !update.changed_in_dest.any());
+        assert_eq!(check(&switched, &a, &reverse), Ok(()));
+        let a2 = applied(&b, &a, Mode::Personal, true);
+        assert_eq!(a2.items[0].attachments, a.items[0].attachments);
+        assert!(!skipping(&b, &a2).has_changes(), "{changed_side}");
+
+        let resumed = plan(&b, &a2, Mode::Personal);
+        match changed_side {
+            "neither" => assert!(!resumed.has_changes()),
+            "new source" => {
+                assert_eq!(receipt(&a2.items[0])[0], "?");
+                assert!(resumed.updates[0].sync_attachments);
+                assert_eq!(check(&resumed, &a2, &Safety::default()), Ok(()));
+                let copied = apply(&b, &a2, Mode::Personal);
+                assert_converged(&b, &copied, Mode::Personal);
+            }
+            _ => {
+                assert_eq!(receipt(&a2.items[0]), ["?", "?"]);
+                assert!(resumed.updates[0].changed_in_dest.files);
+            }
+        }
+
+        let back = skipping(&a2, &b);
+        assert_eq!(back.reversed, 0);
+        assert_eq!(check(&back, &b, &Safety::default()), Ok(()));
+        let b2 = applied(&a2, &b, Mode::Personal, true);
+        assert_eq!(b2.items[0].attachments, b.items[0].attachments);
+        assert!(!skipping(&a2, &b2).has_changes(), "{changed_side}");
+        let copying = plan(&a2, &b2, Mode::Personal);
+        assert_eq!(
+            copying.updates.iter().any(|u| u.changed_in_dest.files),
+            changed_side != "neither",
+            "{changed_side}"
+        );
+    }
+}
+
+#[test]
+fn skipped_writes_carry_the_newest_markers_uncertainty() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    a.items[0].attachments = vec![attachment("f1", "scan.pdf", 100)];
+    let mut b = mirrored(&a, Mode::Personal);
+    a = apply(&b, &a, Mode::Personal);
+    let next = plan(&a, &b, Mode::Personal);
+    let draft = next.entries[0]
+        .draft(
+            &a,
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+            FileWrite::Pending,
+        )
+        .unwrap();
+    b.items[0].content = draft.content;
+    // The newer marker is pending: on the copy itself, then on its source.
+    for (source, dest) in [(&a, &b), (&b, &a)] {
+        let mut source = source.clone();
+        edit_notes(&mut source, "edited");
+        let skipped = skipping(&source, dest);
+        assert_eq!(check(&skipped, dest, &Safety::default()), Ok(()));
+        let after = applied(&source, dest, Mode::Personal, true);
+        assert_eq!(after.items[0].attachments, dest.items[0].attachments);
+        assert_eq!(receipt(&after.items[0]), ["?", "?"]);
+        assert!(
+            plan(&source, &after, Mode::Personal).updates[0]
+                .changed_in_dest
+                .files
+        );
+    }
+
+    // Markers of one generation that disagree vouch for nothing either.
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    a.items[0].attachments = vec![attachment("f1", "file.txt", 10)];
+    let mut b = mirrored(&a, Mode::Personal);
+    b.items[0].attachments = vec![attachment("f2", "file.txt", 20)];
+    a = apply(&b, &a, Mode::Personal);
+    edit_notes(&mut a, "edited");
+    for item in [&mut a.items[0], &mut b.items[0]] {
+        let mut own = marker(item).unwrap();
+        own.history = History::Ordered {
+            generation: NonZeroU64::new(7).unwrap(),
+            source_archived: false,
+        };
+        set_marker(item, own);
+    }
+    let skipped = skipping(&a, &b);
+    assert!(!skipped.updates[0].changed_in_dest.files);
+    let after = applied(&a, &b, Mode::Personal, true);
+    assert_eq!(receipt(&after.items[0]), ["?", "?"]);
+    assert!(
+        plan(&a, &after, Mode::Personal).updates[0]
+            .changed_in_dest
+            .files
+    );
+}
+
+#[test]
+fn copies_made_without_their_attachments_are_never_complete_duplicates() {
+    let mut source = vault(vec![login("s1", "One", "pw1"), login("s2", "Two", "pw2")]);
+    source.items[0].attachments = vec![attachment("a1", "scan.pdf", 100)];
+    let dest = applied(&source, &Vault::default(), Mode::Personal, true);
+    for skip_attachments in [false, true] {
+        for clones_first in [false, true] {
+            let mut duplicated = dest.clone();
+            let clones = (dest.items.iter()).map(|item| Item {
+                id: format!("clone of {}", item.id),
+                ..item.clone()
+            });
+            duplicated.items = match clones_first {
+                true => clones.chain(dest.items.clone()).collect(),
+                false => dest.items.iter().cloned().chain(clones).collect(),
+            };
+            let planned = super::plan(&source, &duplicated, Mode::Personal, PAIR, skip_attachments);
+            assert_eq!(planned.detached, 1);
+            let deleted: Vec<_> = (planned.deletes.iter())
+                .map(|delete| marker(&duplicated.items[delete.dest]).unwrap().source_id)
+                .collect();
+            assert_eq!(deleted, ["s2"]);
+        }
+    }
+}
+
 #[test]
 fn archive_state_is_mirrored_and_recorded_in_the_marker() {
     let mut source = vault(vec![login("s1", "One", "pw1")]);
@@ -685,8 +1004,14 @@ fn a_run_stopped_while_archiving_left_no_change_in_the_destination() {
     source.items[0].archived = true;
     let entry = &plan(&source, &Vault::default(), Mode::Personal).entries[0];
     let written = |archived: bool| {
-        let draft =
-            (entry.draft(&source, &HashMap::new(), &HashMap::new(), false, Some(&[]))).unwrap();
+        let draft = (entry.draft(
+            &source,
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+            FileWrite::Copied(&[]),
+        ))
+        .unwrap();
         Item {
             content: draft.content,
             archived,
@@ -892,7 +1217,13 @@ fn a_draft_without_its_folder_fails_without_naming_it() {
     source.items[0].folder_id = Some("f1".into());
     let plan = plan(&source, &Vault::default(), Mode::Personal);
     let error = plan.entries[0]
-        .draft(&source, &HashMap::new(), &HashMap::new(), false, Some(&[]))
+        .draft(
+            &source,
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+            FileWrite::Copied(&[]),
+        )
         .unwrap_err();
     assert_eq!(error, PlanError::MissingFolder);
     assert!(!error.to_string().contains("Work"));
@@ -936,11 +1267,11 @@ fn switching_source_and_destination_takes_over_the_copies() {
 
     let original = apply(&mirror, &original, Mode::Personal);
     assert_converged(&mirror, &original, Mode::Personal);
-    let again = super::plan(&mirror, &original, Mode::Personal, PAIR);
+    let again = super::plan(&mirror, &original, Mode::Personal, PAIR, false);
     assert_eq!(check(&again, &original, &Safety::default()), Ok(()));
 
     // And back: each item still has one marker, and nothing is duplicated.
-    let back = super::plan(&original, &mirror, Mode::Personal, PAIR);
+    let back = super::plan(&original, &mirror, Mode::Personal, PAIR, false);
     assert_eq!(back.reversed, 0);
     assert_eq!(check(&back, &mirror, &Safety::default()), Ok(()));
     assert!(!back.has_changes());
@@ -1085,10 +1416,22 @@ fn interrupted_archive_markers_remember_the_source_state_in_both_directions() {
         let next = plan(&b, &a, Mode::Personal);
         let entry = &next.entries[0];
         let initial = entry
-            .draft(&b, &HashMap::new(), &HashMap::new(), !wanted, Some(&[]))
+            .draft(
+                &b,
+                &HashMap::new(),
+                &HashMap::new(),
+                !wanted,
+                FileWrite::Copied(&[]),
+            )
             .unwrap();
         let final_draft = entry
-            .draft(&b, &HashMap::new(), &HashMap::new(), wanted, Some(&[]))
+            .draft(
+                &b,
+                &HashMap::new(),
+                &HashMap::new(),
+                wanted,
+                FileWrite::Copied(&[]),
+            )
             .unwrap();
         let final_item = Item {
             content: final_draft.content,
@@ -1133,7 +1476,13 @@ fn incomplete_archive_copies_are_not_deleted_as_complete_duplicates() {
     source.items[0].archived = true;
     let next = plan(&source, &Vault::default(), Mode::Personal);
     let draft = next.entries[0]
-        .draft(&source, &HashMap::new(), &HashMap::new(), false, Some(&[]))
+        .draft(
+            &source,
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+            FileWrite::Copied(&[]),
+        )
         .unwrap();
     let first = Item {
         content: draft.content,
@@ -1161,7 +1510,13 @@ fn newer_pending_attachments_cannot_be_certified_by_an_older_marker() {
     a = apply(&b, &a, Mode::Personal);
     let next = plan(&a, &b, Mode::Personal);
     let draft = next.entries[0]
-        .draft(&a, &HashMap::new(), &HashMap::new(), false, None)
+        .draft(
+            &a,
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+            FileWrite::Pending,
+        )
         .unwrap();
     b.items[0].content = draft.content;
     for (source, dest) in [(&a, &b), (&b, &a)] {
@@ -1285,7 +1640,13 @@ fn marker_generation_exhaustion_fails_only_a_needed_write() {
     let next = plan(&a, &b, Mode::Personal);
     assert_eq!(next.updates.len(), 1);
     assert_eq!(
-        next.entries[0].draft(&a, &HashMap::new(), &HashMap::new(), false, Some(&[])),
+        next.entries[0].draft(
+            &a,
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+            FileWrite::Copied(&[])
+        ),
         Err(PlanError::GenerationExhausted)
     );
 }
@@ -1486,11 +1847,11 @@ fn markers_of_another_pair_of_vaults_grant_nothing() {
     let source = numbered(2);
     let mirror = mirrored(&source, Mode::Personal);
     // The same copies, as another mirror into this destination made them.
-    let foreign = super::plan(&source, &mirror, Mode::Personal, OTHER_PAIR);
+    let foreign = super::plan(&source, &mirror, Mode::Personal, OTHER_PAIR, false);
     assert_eq!(foreign.creates.len(), 2);
     assert_eq!((foreign.untracked, foreign.tracked_before), (2, 0));
     assert!(foreign.updates.is_empty() && foreign.deletes.is_empty());
-    let gone = super::plan(&vault(vec![]), &mirror, Mode::Personal, OTHER_PAIR);
+    let gone = super::plan(&vault(vec![]), &mirror, Mode::Personal, OTHER_PAIR, false);
     assert!(gone.deletes.is_empty());
     assert!(marker_of(&mirror.items[0], OTHER_PAIR).is_none());
     // Copying a copy on, into a third vault, carries no marker of the first pair.
@@ -1505,11 +1866,17 @@ fn markers_of_another_pair_of_vaults_grant_nothing() {
 }
 
 fn apply_pair(source: &Vault, pair: &str) -> Vault {
-    let plan = super::plan(source, &Vault::default(), Mode::Personal, pair);
+    let plan = super::plan(source, &Vault::default(), Mode::Personal, pair, false);
     let items = (plan.entries.iter())
         .map(|entry| {
-            let draft =
-                (entry.draft(source, &HashMap::new(), &HashMap::new(), false, Some(&[]))).unwrap();
+            let draft = (entry.draft(
+                source,
+                &HashMap::new(),
+                &HashMap::new(),
+                false,
+                FileWrite::Copied(&[]),
+            ))
+            .unwrap();
             Item {
                 content: draft.content,
                 ..login(&format!("third-{}", entry.source), "", "")
@@ -1599,7 +1966,7 @@ fn what_vault_mirror_did_not_make_is_left_alone() {
     assert_eq!(kept, &dest.items[0]);
 
     // Later runs leave it alone too.
-    let again = super::plan(&source, &after, Mode::Personal, PAIR);
+    let again = super::plan(&source, &after, Mode::Personal, PAIR, false);
     assert!(!again.has_changes());
     assert_eq!(again.untracked, 1);
 }
@@ -1628,7 +1995,13 @@ fn deleting_more_than_half_of_the_copies_is_refused() {
         let mut dest = mirrored(&numbered(copies), Mode::Personal);
         // Neither the user's items nor another pair's copies count.
         dest.items.push(login("mine", "Mine", "pw"));
-        let others = super::plan(&numbered(3), &Vault::default(), Mode::Personal, OTHER_PAIR);
+        let others = super::plan(
+            &numbered(3),
+            &Vault::default(),
+            Mode::Personal,
+            OTHER_PAIR,
+            false,
+        );
         assert_eq!(others.creates.len(), 3);
         dest.items
             .extend(apply_pair(&numbered(3), OTHER_PAIR).items);

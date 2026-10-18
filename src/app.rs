@@ -144,6 +144,7 @@ pub fn mirror_options(config: &Config, flags: RunFlags) -> MirrorOptions {
             allow_overwrite: flags.allow_overwrite,
         },
         filter: config.filter.clone(),
+        skip_attachments: config.skip_attachments,
     }
 }
 

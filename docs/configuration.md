@@ -55,6 +55,16 @@ secrets and systemd credentials. Trailing newlines in the file are ignored.
 | --- | --- | --- |
 | `INCLUDE_FOLDERS`, `EXCLUDE_FOLDERS` | | Comma-separated folder names. See [Mirroring part of a vault](#mirroring-part-of-a-vault). |
 | `INCLUDE_COLLECTIONS`, `EXCLUDE_COLLECTIONS` | | The same, for collections in an organization. |
+| `SKIP_ATTACHMENTS` | `false` | Set to `true` to mirror items without copying or removing their attachments. Backups still include all attachments. |
+
+With `SKIP_ATTACHMENTS=true`, `run`, `check` and `daemon` leave existing
+destination attachments in place. New copies have none. Each run warns that
+attachment copying is disabled. Set it to `false` or remove it to copy
+attachments again. Destination attachment edits still need `--allow-overwrite`
+before a run replaces those files or deletes their item.
+
+This setting does not prevent obsolete copies from going to the trash with
+their attachments. The destination backup keeps them.
 
 ### Backups
 

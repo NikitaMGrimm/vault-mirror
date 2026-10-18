@@ -25,6 +25,13 @@ fn overwrite() -> MirrorOptions {
     }
 }
 
+fn skipping() -> MirrorOptions {
+    MirrorOptions {
+        skip_attachments: true,
+        ..options()
+    }
+}
+
 /// `item` with a marker as a run leaves it that stopped before its
 /// attachments were copied and checked.
 fn pending(item: &Item) -> Draft {
@@ -909,6 +916,157 @@ async fn a_destination_without_premium_gets_no_partial_copy() -> Result<()> {
     );
     assert!(format!("{error:#}").contains("4 attachments"), "{error:#}");
     assert!(dest.load(&PERSONAL).await?.items.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_destination_without_premium_takes_the_items_when_attachments_are_skipped() -> Result<()>
+{
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let source = sandbox
+        .open(&sandbox.register(&sandbox.source_url).await?)
+        .await?;
+    let mut dest = sandbox
+        .open(&sandbox.register_free(&sandbox.dest_url).await?)
+        .await?;
+    seed_extra(&source, 2).await?;
+    let vault = source.load(&PERSONAL).await?;
+    for name in ["Extra note 0", "Extra note 1"] {
+        source
+            .upload_attachment(&PERSONAL, by_name(&vault, name), "file.txt", b"file")
+            .await?;
+    }
+    // Vaultwarden makes every account premium.
+    dest.premium = false;
+
+    let first = run(&source, &dest, &skipping()).await?;
+    assert!(first.changed);
+    assert_eq!(
+        (
+            first.summary.items_created,
+            first.summary.attachments_copied
+        ),
+        (2, 0)
+    );
+    assert_eq!(first.warnings.len(), 1, "{:?}", first.warnings);
+    assert!(first.warnings[0].contains("SKIP_ATTACHMENTS"));
+    let mirrored = dest.load(&PERSONAL).await?;
+    assert_eq!(mirrored.items.len(), 2);
+    assert!(
+        mirrored
+            .items
+            .iter()
+            .all(|item| item.attachments.is_empty())
+    );
+
+    let again = run(&source, &dest, &skipping()).await?;
+    assert!(!again.changed);
+    assert_eq!(again.warnings.len(), 1);
+    let checked = check(&source, &dest, &skipping()).await?;
+    assert_eq!(
+        (
+            checked.summary.items_updated,
+            checked.summary.items_unchanged
+        ),
+        (0, 2)
+    );
+
+    let error = run(&source, &dest, &options()).await.unwrap_err();
+    assert!(format!("{error:#}").contains("no premium"), "{error:#}");
+    assert!(format!("{error:#}").contains("2 attachments"), "{error:#}");
+    Ok(())
+}
+
+/// Skipped attachments stay as they are while their items are edited, moved
+/// and archived. Copying them again replaces what changed in the source,
+/// and files added in the destination only when allowed.
+#[tokio::test]
+async fn skipped_attachments_stay_through_item_writes_and_are_copied_later() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, dest) = sandbox.pair().await?;
+    seed_extra(&source, 2).await?;
+    let vault = source.load(&PERSONAL).await?;
+    for name in ["Extra note 0", "Extra note 1"] {
+        source
+            .upload_attachment(&PERSONAL, by_name(&vault, name), "file.txt", b"first")
+            .await?;
+    }
+    run(&source, &dest, &options()).await?;
+    let before = dest.load(&PERSONAL).await?;
+
+    let vault = source.load(&PERSONAL).await?;
+    let item = by_name(&vault, "Extra note 0");
+    let moved = source.create_folder("Moved").await?;
+    let mut content = item.content.clone();
+    content.insert("notes".into(), Node::secret("edited"));
+    let draft = Draft {
+        content,
+        folder_id: Some(moved.id),
+        collection_ids: vec![],
+    };
+    let edited = source.update_item(&PERSONAL, item, &draft).await?;
+    source
+        .delete_attachment(&item.id, &item.attachments[0].id)
+        .await?;
+    source
+        .upload_attachment(&PERSONAL, &edited, "file.txt", b"second")
+        .await?;
+    source
+        .set_archived(std::slice::from_ref(&item.id), true)
+        .await?;
+    let own = by_name(&before, "Extra note 1");
+    dest.upload_attachment(&PERSONAL, own, "mine.txt", b"mine")
+        .await?;
+
+    let outcome = run(&source, &dest, &skipping()).await?;
+    assert!(outcome.changed);
+    assert_eq!(
+        (
+            outcome.summary.items_updated,
+            outcome.summary.attachments_copied
+        ),
+        (1, 0)
+    );
+    let after = dest.load(&PERSONAL).await?;
+    let copy = by_name(&after, "Extra note 0");
+    assert!(copy.archived);
+    assert_eq!(folder_of(&after, copy).as_deref(), Some("Moved"));
+    assert_eq!(copy.content.get("notes"), Some(&Node::secret("edited")));
+    assert_eq!(
+        copy.attachments,
+        by_name(&before, "Extra note 0").attachments
+    );
+    assert_eq!(
+        attachment_bytes(&dest, &after, "Extra note 0", "file.txt").await?,
+        b"first"
+    );
+    assert_eq!(by_name(&after, "Extra note 1").attachments.len(), 2);
+    assert_eq!(
+        attachment_bytes(&dest, &after, "Extra note 1", "mine.txt").await?,
+        b"mine"
+    );
+    assert!(!run(&source, &dest, &skipping()).await?.changed);
+
+    let error = run(&source, &dest, &options()).await.unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains(&format!("({})", own.id)), "{message}");
+    assert!(message.contains("--allow-overwrite"), "{message}");
+    assert_eq!(dest.load(&PERSONAL).await?, after);
+    let copied = run(&source, &dest, &overwrite()).await?;
+    assert_eq!(copied.summary.attachments_copied, 2);
+    let after = dest.load(&PERSONAL).await?;
+    for (name, data) in [("Extra note 0", &b"second"[..]), ("Extra note 1", b"first")] {
+        assert_eq!(by_name(&after, name).attachments.len(), 1);
+        assert_eq!(
+            attachment_bytes(&dest, &after, name, "file.txt").await?,
+            data
+        );
+    }
+    assert!(!run(&source, &dest, &options()).await?.changed);
     Ok(())
 }
 

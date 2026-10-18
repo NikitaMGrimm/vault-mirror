@@ -272,6 +272,40 @@ pub fn marker_of(item: &Item, pair: &str) -> Option<Marker> {
         .find(|marker| marker.pair == pair)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileReceipt {
+    source: String,
+    dest: String,
+}
+
+impl FileReceipt {
+    fn of(marker: &Marker) -> Self {
+        Self {
+            source: marker.source_files.clone(),
+            dest: marker.dest_files.clone(),
+        }
+    }
+
+    fn unknown() -> Self {
+        Self {
+            source: UNKNOWN.into(),
+            dest: UNKNOWN.into(),
+        }
+    }
+}
+
+/// What a write tells the copy's marker about its attachments.
+#[derive(Debug, Clone, Copy)]
+pub enum FileWrite<'a> {
+    /// They are about to be copied or removed, so nothing vouches for them.
+    Pending,
+    /// The copy holds these, copied from the source item and checked.
+    Copied(&'a [Attachment]),
+    /// The run leaves them alone, so the marker keeps what the plan found
+    /// it can still vouch for.
+    Kept,
+}
+
 /// A live source item with everything the comparison needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
@@ -282,6 +316,9 @@ pub struct Entry {
     /// What a copy that holds the source item and its files carries.
     pub marker: Marker,
     order_floor: u64,
+    /// The attachment receipt a copy keeps when the run leaves its
+    /// attachments alone. None when the run copies them.
+    kept: Option<FileReceipt>,
 }
 
 /// What changed in a copy since vault-mirror last wrote it, and the run
@@ -386,7 +423,6 @@ impl Plan {
     }
 
     pub fn summary(&self, source: &Vault) -> Summary {
-        let attachments = |entry: usize| source.items[self.entries[entry].source].attachments.len();
         Summary {
             items_created: self.creates.len(),
             items_updated: self.updates.len(),
@@ -395,13 +431,10 @@ impl Plan {
             folders_created: self.folders_to_create.len(),
             folders_deleted: 0,
             collections_created: self.collections_to_create.len(),
-            attachments_copied: (self.creates.iter().copied())
-                .chain(
-                    (self.updates.iter())
-                        .filter(|update| update.sync_attachments)
-                        .map(|update| update.entry),
-                )
-                .map(attachments)
+            // Every entry that copies files is created or updated.
+            attachments_copied: (self.entries.iter())
+                .filter(|entry| entry.copies_files())
+                .map(|entry| source.items[entry.source].attachments.len())
                 .sum(),
         }
     }
@@ -421,23 +454,33 @@ impl Plan {
 }
 
 impl Entry {
+    /// Whether the run copies the source item's attachments to the copy.
+    pub fn copies_files(&self) -> bool {
+        self.kept.is_none()
+    }
+
     /// What to write to the destination for this entry: the source item's
-    /// content with a marker for a copy in the `archived` state. `files` are
-    /// the copy's attachments, once they are the source item's. Without them
-    /// nothing vouches for its attachments, so that a run interrupted before
-    /// they are copied and checked does not take them for complete.
+    /// content with a marker for a copy in the `archived` state. A marker
+    /// written before the attachments are copied and checked vouches for
+    /// none, so that a run interrupted meanwhile does not take them for
+    /// complete.
     pub fn draft(
         &self,
         source: &Vault,
         folder_ids: &HashMap<String, String>,
         collection_ids: &HashMap<String, String>,
         archived: bool,
-        files: Option<&[Attachment]>,
+        files: FileWrite<'_>,
     ) -> Result<Draft, PlanError> {
         let source_item = &source.items[self.source];
-        let (source_files, dest_files) = match files {
-            Some(files) => (self.marker.source_files.clone(), dest_files(files)),
-            None => (UNKNOWN.into(), UNKNOWN.into()),
+        let receipt = match files {
+            FileWrite::Pending => FileReceipt::unknown(),
+            FileWrite::Copied(files) => FileReceipt {
+                source: self.marker.source_files.clone(),
+                dest: dest_files(files),
+            },
+            // A copy whose files were due to be copied has nothing to keep.
+            FileWrite::Kept => self.kept.clone().unwrap_or_else(FileReceipt::unknown),
         };
         let generation = self
             .order_floor
@@ -450,8 +493,8 @@ impl Entry {
                 source_archived: source_item.archived,
             },
             archived,
-            source_files,
-            dest_files,
+            source_files: receipt.source,
+            dest_files: receipt.dest,
             ..self.marker.clone()
         };
         let mut content = unmarked(source_item);
@@ -486,10 +529,16 @@ impl Entry {
     }
 
     /// Whether `copy` carries the marker this entry would write for it now,
-    /// holding the source item's files in the source item's archive state.
+    /// in the source item's archive state, with the files the run leaves it
+    /// or else the source item's.
     pub fn marks(&self, copy: &Item) -> bool {
+        let receipt = self.kept.clone().unwrap_or_else(|| FileReceipt {
+            source: self.marker.source_files.clone(),
+            dest: dest_files(&copy.attachments),
+        });
         let wanted = Marker {
-            dest_files: dest_files(&copy.attachments),
+            source_files: receipt.source,
+            dest_files: receipt.dest,
             ..self.marker.clone()
         };
         marker_of(copy, &self.marker.pair).is_some_and(|mut marker| {
@@ -574,6 +623,9 @@ struct Known {
     content: Option<String>,
     archived: Option<bool>,
     files: Files,
+    /// What a marker written now can still vouch for about the copy's files
+    /// if the run leaves them alone.
+    receipt: FileReceipt,
 }
 
 /// The destination item's attachments, as far as the markers tell.
@@ -609,6 +661,11 @@ impl Known {
                             } else {
                                 Files::Unknown
                             },
+                            receipt: if own.files == link.files {
+                                own.receipt
+                            } else {
+                                FileReceipt::unknown()
+                            },
                         }
                     }
                 }
@@ -623,7 +680,9 @@ impl Known {
         Self {
             content: Some(marker.content.clone()),
             archived: Some(marker.archived),
-            files: if marker.source_files == UNKNOWN || marker.dest_files == UNKNOWN {
+            // A copy made while attachments were skipped knows its own files
+            // but not which source files they stand for.
+            files: if marker.dest_files == UNKNOWN {
                 Files::Unknown
             } else if marker.dest_files != dest_files(&dest.attachments) {
                 Files::Changed
@@ -632,29 +691,48 @@ impl Known {
                     current: marker.source_files == source_files(source),
                 }
             },
+            receipt: FileReceipt::of(marker),
         }
     }
 
     fn link(marker: &Marker, source: &Item, dest: &Item) -> Self {
+        let files = if marker.source_files == UNKNOWN || marker.dest_files == UNKNOWN {
+            Files::Unknown
+        } else if marker.source_files != source_files(dest) {
+            Files::Changed
+        } else {
+            Files::Unchanged {
+                current: marker.dest_files == dest_files(&source.attachments),
+            }
+        };
+        // The marker hashes each side as the other way round. Only files it
+        // proves unchanged can be hashed again for this direction.
+        let receipt = match files {
+            Files::Unchanged { current } => FileReceipt {
+                source: if current {
+                    source_files(source)
+                } else {
+                    UNKNOWN.into()
+                },
+                dest: dest_files(&dest.attachments),
+            },
+            Files::Changed | Files::Unknown => FileReceipt::unknown(),
+        };
         Self {
             content: Some(marker.content.clone()),
             // The marker's archived field describes the other side, possibly
             // before its archive endpoint finished.
             archived: marker.history.source_archived(),
-            files: if marker.source_files == UNKNOWN || marker.dest_files == UNKNOWN {
-                Files::Unknown
-            } else if marker.source_files != source_files(dest) {
-                Files::Changed
-            } else {
-                Files::Unchanged {
-                    current: marker.dest_files == dest_files(&source.attachments),
-                }
-            },
+            files,
+            receipt,
         }
     }
 }
 
-pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str) -> Plan {
+/// With `skip_attachments`, copies keep the attachments they have and new
+/// copies get none, while their markers keep the evidence a later run that
+/// copies attachments needs.
+pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str, skip_attachments: bool) -> Plan {
     let source_places = Places::new(source, mode);
     let dest_places = Places::new(dest, mode);
     // When the destination has two containers with one name, new copies go
@@ -695,12 +773,22 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str) -> Plan {
         let order_floor = link.as_ref().map_or(0, |link| link.history.generation());
         links.push((item, link));
         entry_by_source_id.insert(&item.id, plan.entries.len());
+        // What a new copy that gets no attachments vouches for. Skipped
+        // files leave it empty, and still due.
+        let kept = (skip_attachments || item.attachments.is_empty()).then(|| FileReceipt {
+            source: match item.attachments.is_empty() {
+                true => NO_FILES.into(),
+                false => UNKNOWN.into(),
+            },
+            dest: NO_FILES.into(),
+        });
         plan.entries.push(Entry {
             source: index,
             order_floor,
             folder,
             collections,
             marker,
+            kept,
         });
     }
     let known = |entry: usize, dest_index: usize, own: Option<&Marker>| {
@@ -868,8 +956,17 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str) -> Plan {
             },
             files => files,
         };
-        changed_in_dest.files = matches!(files, Files::Changed | Files::Unknown);
-        let sync_attachments = files != Files::Unchanged { current: true };
+        entry.kept = if skip_attachments {
+            Some(known.receipt)
+        } else {
+            (files == Files::Unchanged { current: true }).then(|| FileReceipt {
+                source: entry.marker.source_files.clone(),
+                dest: dest_files(&dest_item.attachments),
+            })
+        };
+        let sync_attachments = entry.copies_files();
+        changed_in_dest.files =
+            sync_attachments && matches!(files, Files::Changed | Files::Unknown);
         let write_content = !entry.marks(dest_item) || dest_content != entry.marker.content;
         let set_archived =
             (dest_item.archived != source_item.archived).then_some(source_item.archived);

@@ -346,3 +346,52 @@ fn the_daemon_stops_between_runs() {
     assert!(succeeded, "{printed:?}");
     assert!(printed.join("\n").contains("Stopping"));
 }
+
+/// Settings with server addresses vault-mirror refuses before it connects,
+/// and `extra` lines.
+fn unreachable_settings(dir: &std::path::Path, extra: &str) -> std::path::PathBuf {
+    let settings = dir.join("vault-mirror.env");
+    let mut text = format!(
+        "BACKUPS_DIR={}\nBACKUP_PASSPHRASE=synthetic passphrase\n",
+        dir.display()
+    );
+    for side in ["SOURCE", "DEST"] {
+        text.push_str(&format!(
+            "{side}_SERVER=ftp://synthetic.invalid\n{side}_CLIENT_ID=user.synthetic\n\
+             {side}_CLIENT_SECRET=synthetic secret\n{side}_PASSWORD=synthetic password\n"
+        ));
+    }
+    text.push_str(extra);
+    fs::write(&settings, text).unwrap();
+    settings
+}
+
+#[test]
+fn attachments_can_be_skipped_from_the_settings_file_or_the_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let check = |extra: &str, env: Option<&str>| {
+        let settings = unreachable_settings(dir.path(), extra);
+        let mut command = vault_mirror();
+        if let Some(value) = env {
+            command.env("SKIP_ATTACHMENTS", value);
+        }
+        let output = command
+            .arg("--env-file")
+            .arg(&settings)
+            .arg("check")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let invalid = "configuration: SKIP_ATTACHMENTS has an invalid value: maybe";
+
+    let past_settings = "expected an http or https URL";
+
+    let stderr = check("SKIP_ATTACHMENTS=true\n", None);
+    assert!(stderr.contains(past_settings), "{stderr}");
+    assert!(check("SKIP_ATTACHMENTS=maybe\n", None).contains(invalid));
+    assert!(check("SKIP_ATTACHMENTS=true\n", Some("maybe")).contains(invalid));
+    let stderr = check("SKIP_ATTACHMENTS=maybe\n", Some("false"));
+    assert!(stderr.contains(past_settings), "{stderr}");
+}
