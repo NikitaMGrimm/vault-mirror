@@ -93,6 +93,15 @@ fn marker(item: &Item) -> Option<Marker> {
     marker_of(item, PAIR)
 }
 
+fn set_marker(item: &mut Item, marker: Marker) {
+    let mut content = unmarked(item);
+    let Some(Node::List(fields)) = content.get_mut("fields") else {
+        panic!()
+    };
+    fields.push(marker.to_field());
+    item.content = content;
+}
+
 fn check(plan: &Plan, dest: &Vault, safety: &Safety) -> Result<(), SafetyViolation> {
     check_safety(plan, dest, safety)
 }
@@ -977,6 +986,404 @@ fn switching_back_after_attachments_changed_copies_them_once() {
 }
 
 #[test]
+fn switching_back_after_content_changed_uses_the_last_written_baseline() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    let mut b = mirrored(&a, Mode::Personal);
+    b.items[0].content.insert("notes".into(), text("second"));
+    a = apply(&b, &a, Mode::Personal);
+    a.items[0].content.insert("notes".into(), text("third"));
+
+    let back = plan(&a, &b, Mode::Personal);
+    assert_eq!(check(&back, &b, &Safety::default()), Ok(()));
+    assert_eq!(back.updates.len(), 1);
+    b = apply(&a, &b, Mode::Personal);
+    assert_converged(&a, &b, Mode::Personal);
+    assert_eq!(b.items[0].content["notes"], text("third"));
+
+    b.items[0].content.insert("notes".into(), text("second"));
+    let changed = plan(&a, &b, Mode::Personal);
+    assert!(changed.updates[0].changed_in_dest.content);
+    assert!(matches!(
+        check(&changed, &b, &Safety::default()),
+        Err(SafetyViolation::Overwrites(_))
+    ));
+}
+
+#[test]
+fn switching_back_after_archiving_uses_the_last_written_baseline() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    let mut b = mirrored(&a, Mode::Personal);
+    b.items[0].archived = true;
+    a = apply(&b, &a, Mode::Personal);
+    a.items[0].archived = false;
+
+    let back = plan(&a, &b, Mode::Personal);
+    assert_eq!(check(&back, &b, &Safety::default()), Ok(()));
+    assert_eq!(back.updates.len(), 1);
+    b = apply(&a, &b, Mode::Personal);
+    assert_converged(&a, &b, Mode::Personal);
+    assert!(!b.items[0].archived);
+
+    b.items[0].archived = true;
+    let changed = plan(&a, &b, Mode::Personal);
+    assert!(changed.updates[0].changed_in_dest.archive);
+    assert!(matches!(
+        check(&changed, &b, &Safety::default()),
+        Err(SafetyViolation::Overwrites(_))
+    ));
+}
+
+#[test]
+fn repeated_reversals_protect_edits_back_to_each_older_baseline() {
+    let mut source = vault(vec![login("a1", "One", "pw1")]);
+    let mut dest = mirrored(&source, Mode::Personal);
+    let mut older = vec![source.items[0].content["notes"].clone()];
+    for version in 1..=5 {
+        std::mem::swap(&mut source, &mut dest);
+        source.items[0]
+            .content
+            .insert("notes".into(), text(&format!("version {version}")));
+        let before_id = dest.items[0].id.clone();
+        let next = plan(&source, &dest, Mode::Personal);
+        assert_eq!(
+            check(
+                &next,
+                &dest,
+                &Safety {
+                    allow_reverse: true,
+                    ..Safety::default()
+                }
+            ),
+            Ok(())
+        );
+        dest = apply(&source, &dest, Mode::Personal);
+        assert_eq!(dest.items[0].id, before_id);
+        assert_converged(&source, &dest, Mode::Personal);
+        for baseline in &older {
+            let mut edited = dest.clone();
+            edited.items[0]
+                .content
+                .insert("notes".into(), baseline.clone());
+            let next = plan(&source, &edited, Mode::Personal);
+            assert!(next.updates[0].changed_in_dest.content);
+            assert!(matches!(
+                check(&next, &edited, &Safety::default()),
+                Err(SafetyViolation::Overwrites(_))
+            ));
+        }
+        older.push(source.items[0].content["notes"].clone());
+    }
+}
+
+#[test]
+fn interrupted_archive_markers_remember_the_source_state_in_both_directions() {
+    for wanted in [true, false] {
+        let mut a = vault(vec![login("a1", "One", "pw1")]);
+        a.items[0].archived = !wanted;
+        let mut b = mirrored(&a, Mode::Personal);
+        b.items[0].archived = wanted;
+        let next = plan(&b, &a, Mode::Personal);
+        let entry = &next.entries[0];
+        let initial = entry
+            .draft(&b, &HashMap::new(), &HashMap::new(), !wanted, Some(&[]))
+            .unwrap();
+        let final_draft = entry
+            .draft(&b, &HashMap::new(), &HashMap::new(), wanted, Some(&[]))
+            .unwrap();
+        let final_item = Item {
+            content: final_draft.content,
+            ..a.items[0].clone()
+        };
+        for after_endpoint in [false, true] {
+            let mut interrupted = a.clone();
+            interrupted.items[0].content = initial.content.clone();
+            interrupted.items[0].archived = if after_endpoint { wanted } else { !wanted };
+            assert_eq!(
+                marker(&interrupted.items[0]).unwrap().history,
+                marker(&final_item).unwrap().history
+            );
+            let retry = plan(&b, &interrupted, Mode::Personal);
+            assert!(!retry.updates[0].changed_in_dest.any());
+            let repaired = apply(&b, &interrupted, Mode::Personal);
+            assert_converged(&b, &repaired, Mode::Personal);
+
+            let back = plan(&interrupted, &b, Mode::Personal);
+            assert!(
+                back.updates
+                    .iter()
+                    .all(|update| !update.changed_in_dest.any())
+            );
+            if after_endpoint {
+                let mut edited = b.clone();
+                edited.items[0].archived = !wanted;
+                let refused = plan(&interrupted, &edited, Mode::Personal);
+                assert!(refused.updates[0].changed_in_dest.archive);
+                assert!(matches!(
+                    check(&refused, &edited, &Safety::default()),
+                    Err(SafetyViolation::Overwrites(_))
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn incomplete_archive_copies_are_not_deleted_as_complete_duplicates() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    source.items[0].archived = true;
+    let next = plan(&source, &Vault::default(), Mode::Personal);
+    let draft = next.entries[0]
+        .draft(&source, &HashMap::new(), &HashMap::new(), false, Some(&[]))
+        .unwrap();
+    let first = Item {
+        content: draft.content,
+        ..login("copy1", "", "")
+    };
+    let second = Item {
+        id: "copy2".into(),
+        ..first.clone()
+    };
+    let dest = vault(vec![first, second]);
+    let next = plan(&source, &dest, Mode::Personal);
+    assert!(next.deletes.is_empty());
+    assert_eq!(next.detached, 1);
+    let after = apply(&source, &dest, Mode::Personal);
+    assert_eq!(after.items.len(), 2);
+    assert!(!after.items[1].archived);
+    assert!(!plan(&source, &after, Mode::Personal).has_changes());
+}
+
+#[test]
+fn newer_pending_attachments_cannot_be_certified_by_an_older_marker() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    a.items[0].attachments = vec![attachment("f1", "scan.pdf", 100)];
+    let mut b = mirrored(&a, Mode::Personal);
+    a = apply(&b, &a, Mode::Personal);
+    let next = plan(&a, &b, Mode::Personal);
+    let draft = next.entries[0]
+        .draft(&a, &HashMap::new(), &HashMap::new(), false, None)
+        .unwrap();
+    b.items[0].content = draft.content;
+    for (source, dest) in [(&a, &b), (&b, &a)] {
+        let next = plan(source, dest, Mode::Personal);
+        assert!(next.updates[0].sync_attachments);
+        assert!(next.updates[0].changed_in_dest.files);
+        assert!(matches!(
+            check(&next, dest, &Safety::default()),
+            Err(SafetyViolation::Overwrites(_))
+        ));
+        let mut empty = dest.clone();
+        empty.items[0].attachments.clear();
+        let repair = plan(source, &empty, Mode::Personal);
+        assert!(!repair.updates[0].changed_in_dest.files);
+        assert_converged(
+            source,
+            &apply(source, &empty, Mode::Personal),
+            Mode::Personal,
+        );
+    }
+}
+
+#[test]
+fn legacy_copies_stay_unchanged_and_needed_writes_establish_order() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    a.items[0].attachments = vec![attachment("f1", "file.txt", 10)];
+    let mut b = mirrored(&a, Mode::Personal);
+    let mut legacy = marker(&b.items[0]).unwrap();
+    legacy.history = History::Unordered;
+    set_marker(&mut b.items[0], legacy);
+    assert_converged(&a, &b, Mode::Personal);
+    b.items[0].content.insert("notes".into(), text("second"));
+    a = apply(&b, &a, Mode::Personal);
+    a.items[0].content.insert("notes".into(), text("third"));
+    let next = plan(&a, &b, Mode::Personal);
+    assert_eq!(check(&next, &b, &Safety::default()), Ok(()));
+    b = apply(&a, &b, Mode::Personal);
+    assert_converged(&a, &b, Mode::Personal);
+    let reverse = plan(&b, &a, Mode::Personal);
+    assert_eq!(check(&reverse, &a, &Safety::default()), Ok(()));
+    a = apply(&b, &a, Mode::Personal);
+    assert_converged(&b, &a, Mode::Personal);
+}
+
+#[test]
+fn unordered_or_equal_generation_conflicts_do_not_authorize_overwrites() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    a.items[0].attachments = vec![attachment("f1", "file.txt", 10)];
+    let mut b = mirrored(&a, Mode::Personal);
+    b.items[0].content.insert("notes".into(), text("second"));
+    b.items[0].archived = true;
+    b.items[0].attachments = vec![attachment("f2", "file.txt", 20)];
+    a = apply(&b, &a, Mode::Personal);
+    a.items[0].content.insert("notes".into(), text("third"));
+    a.items[0].archived = false;
+    for ordered in [false, true] {
+        let mut source = a.clone();
+        let mut dest = b.clone();
+        for item in [&mut source.items[0], &mut dest.items[0]] {
+            let mut own = marker(item).unwrap();
+            own.history = if ordered {
+                History::Ordered {
+                    generation: NonZeroU64::new(7).unwrap(),
+                    source_archived: own.history.source_archived().unwrap(),
+                }
+            } else {
+                History::Unordered
+            };
+            set_marker(item, own);
+        }
+        let next = plan(&source, &dest, Mode::Personal);
+        assert_eq!(
+            next.updates[0].changed_in_dest,
+            Changes {
+                content: true,
+                archive: true,
+                files: true
+            }
+        );
+        assert!(matches!(
+            check(&next, &dest, &Safety::default()),
+            Err(SafetyViolation::Overwrites(_))
+        ));
+    }
+}
+
+#[test]
+fn only_an_exact_reverse_link_supplies_a_baseline_but_all_observed_order_is_kept() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    let mut b = mirrored(&a, Mode::Personal);
+    a = apply(&b, &a, Mode::Personal);
+    let mut link = marker(&a.items[0]).unwrap();
+    link.source_id = "another-copy".into();
+    link.history = History::Ordered {
+        generation: NonZeroU64::new(20).unwrap(),
+        source_archived: false,
+    };
+    set_marker(&mut a.items[0], link);
+    b.items[0]
+        .content
+        .insert("notes".into(), text("destination edit"));
+    let next = plan(&a, &b, Mode::Personal);
+    assert!(next.updates[0].changed_in_dest.content);
+    let after = apply(&a, &b, Mode::Personal);
+    assert_eq!(marker(&after.items[0]).unwrap().history.generation(), 21);
+    assert_converged(&a, &after, Mode::Personal);
+}
+
+#[test]
+fn marker_generation_exhaustion_fails_only_a_needed_write() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    let mut b = mirrored(&a, Mode::Personal);
+    let mut own = marker(&b.items[0]).unwrap();
+    own.history = History::Ordered {
+        generation: NonZeroU64::new(u64::MAX).unwrap(),
+        source_archived: false,
+    };
+    set_marker(&mut b.items[0], own);
+    assert_converged(&a, &b, Mode::Personal);
+    a.items[0].content.insert("notes".into(), text("changed"));
+    let next = plan(&a, &b, Mode::Personal);
+    assert_eq!(next.updates.len(), 1);
+    assert_eq!(
+        next.entries[0].draft(&a, &HashMap::new(), &HashMap::new(), false, Some(&[])),
+        Err(PlanError::GenerationExhausted)
+    );
+}
+
+#[test]
+fn a_clone_listed_first_cannot_make_a_reverted_linked_copy_deletable() {
+    for component in ["content", "archive", "attachments"] {
+        let mut a = vault(vec![login("a1", "One", "pw1")]);
+        a.items[0].attachments = vec![attachment("f1", "file.txt", 10)];
+        let initial = mirrored(&a, Mode::Personal);
+        let mut b = initial.clone();
+        match component {
+            "content" => {
+                b.items[0].content.insert("notes".into(), text("state2"));
+            }
+            "archive" => b.items[0].archived = true,
+            "attachments" => b.items[0].attachments = vec![attachment("f2", "file.txt", 20)],
+            _ => unreachable!(),
+        }
+        a = apply(&b, &a, Mode::Personal);
+        a.items[0].content.insert("notes".into(), text("state1"));
+        if component == "attachments" {
+            a.items[0].attachments = vec![attachment("f3", "file.txt", 30)];
+        }
+        b = initial;
+        let reverted = plan(&a, &b, Mode::Personal);
+        assert!(reverted.updates[0].changed_in_dest.any(), "{component}");
+        let clone = Item {
+            id: "clone".into(),
+            ..b.items[0].clone()
+        };
+        b.items.insert(0, clone);
+        let next = plan(&a, &b, Mode::Personal);
+        assert!(next.deletes.is_empty(), "{component}");
+        assert_eq!(next.detached, 1);
+        assert_eq!(next.updates.len(), 1);
+        assert_eq!(b.items[next.updates[0].dest].id, "clone");
+        assert_eq!(check(&next, &b, &Safety::default()), Ok(()));
+        let after = apply(&a, &b, Mode::Personal);
+        assert_eq!(after.items.len(), 2);
+        assert_eq!(after.items[1], b.items[1]);
+        assert!(!plan(&a, &after, Mode::Personal).has_changes());
+    }
+}
+
+#[test]
+fn mixed_version_copies_converge_in_either_server_order() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    let older = mirrored(&source, Mode::Personal).items.remove(0);
+    source.items[0]
+        .content
+        .insert("notes".into(), text("newer"));
+    let current = mirrored(&source, Mode::Personal).items.remove(0);
+
+    for old_first in [true, false] {
+        let old = Item {
+            id: "older".into(),
+            ..older.clone()
+        };
+        let new = Item {
+            id: "current".into(),
+            ..current.clone()
+        };
+        let dest = vault(if old_first {
+            vec![old, new]
+        } else {
+            vec![new, old]
+        });
+        let planned = plan(&source, &dest, Mode::Personal);
+        assert_eq!(check(&planned, &dest, &Safety::default()), Ok(()));
+        assert!(planned.deletes.is_empty());
+        assert_eq!(planned.detached, 1);
+        assert!(planned.updates.is_empty());
+        let after = apply(&source, &dest, Mode::Personal);
+        assert!(!plan(&source, &after, Mode::Personal).has_changes());
+        assert_eq!(after.items.len(), 2);
+        assert_eq!(
+            after
+                .items
+                .iter()
+                .find(|i| i.id == "older")
+                .unwrap()
+                .content,
+            older.content
+        );
+        assert_eq!(
+            after
+                .items
+                .iter()
+                .find(|i| i.id == "current")
+                .unwrap()
+                .content,
+            current.content
+        );
+    }
+}
+
+#[test]
 fn switching_over_a_replaced_attachment_counts_as_a_change_in_the_destination() {
     let mut a = vault(vec![login("a1", "One", "pw1")]);
     a.items[0].attachments = vec![attachment("f1", "scan.pdf", 100)];
@@ -1257,6 +1664,27 @@ fn deleting_more_than_half_of_the_copies_is_refused() {
             total: 40
         })
     );
+}
+
+#[test]
+fn markers_accept_exactly_the_legacy_or_ordered_format() {
+    let legacy = format!("{PAIR} s1 {} 0 - -", "ab".repeat(32));
+    let ordered = format!("{legacy} 42 1");
+    for value in [&legacy, &ordered] {
+        assert_eq!(Marker::parse(value).unwrap().render(), *value);
+    }
+    for suffix in [
+        " 1",
+        " 0 1",
+        " -1 1",
+        " +1 1",
+        " 18446744073709551616 1",
+        " x 1",
+        " 1 2",
+        " 1 1 extra",
+    ] {
+        assert!(Marker::parse(&format!("{legacy}{suffix}")).is_none());
+    }
 }
 
 #[test]

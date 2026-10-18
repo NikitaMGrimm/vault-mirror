@@ -82,6 +82,11 @@ See [Backups and restoring](backups.md).
 
 ### Switching the source and destination
 
+Use the updated vault-mirror binary for runs in both directions. Do not use an
+older version after upgrading. Unchanged copies keep their existing markers.
+If older markers leave the last copied state unclear, a run may need
+`--allow-overwrite`.
+
 To make the destination your main vault, swap the `SOURCE_` and `DEST_`
 settings. The first run after the swap stops, because swapped settings are
 usually a mistake. If you meant it, run once with `--reverse`:

@@ -5,7 +5,10 @@
 //! and records the state vault-mirror left the copy in, so a run needs
 //! nothing but the two vaults to tell which side changed since.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    num::NonZeroU64,
+};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -40,6 +43,34 @@ pub struct Marker {
     /// The copy's attachments as vault-mirror left them. Attachment ids
     /// differ between the two items, so each side gets its own hash.
     pub dest_files: String,
+    history: History,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum History {
+    Unordered,
+    Ordered {
+        generation: NonZeroU64,
+        source_archived: bool,
+    },
+}
+
+impl History {
+    fn generation(self) -> u64 {
+        match self {
+            Self::Unordered => 0,
+            Self::Ordered { generation, .. } => generation.get(),
+        }
+    }
+
+    fn source_archived(self) -> Option<bool> {
+        match self {
+            Self::Unordered => None,
+            Self::Ordered {
+                source_archived, ..
+            } => Some(source_archived),
+        }
+    }
 }
 
 fn is_hash(part: &str) -> bool {
@@ -63,6 +94,22 @@ impl Marker {
             },
             source_files: parts.next()?.to_string(),
             dest_files: parts.next()?.to_string(),
+            history: match parts.next() {
+                None => History::Unordered,
+                Some(generation) => {
+                    if !generation.bytes().all(|b| b.is_ascii_digit()) {
+                        return None;
+                    }
+                    History::Ordered {
+                        generation: generation.parse().ok()?,
+                        source_archived: match parts.next()? {
+                            "0" => false,
+                            "1" => true,
+                            _ => return None,
+                        },
+                    }
+                }
+            },
         };
         let valid = parts.next().is_none()
             && is_hash(&marker.pair)
@@ -73,7 +120,7 @@ impl Marker {
     }
 
     fn render(&self) -> String {
-        format!(
+        let mut value = format!(
             "{} {} {} {} {} {}",
             self.pair,
             self.source_id,
@@ -81,7 +128,15 @@ impl Marker {
             u8::from(self.archived),
             self.source_files,
             self.dest_files
-        )
+        );
+        if let History::Ordered {
+            generation,
+            source_archived,
+        } = self.history
+        {
+            value.push_str(&format!(" {generation} {}", u8::from(source_archived)));
+        }
+        value
     }
 
     fn to_field(&self) -> Node {
@@ -226,6 +281,7 @@ pub struct Entry {
     pub collections: Vec<String>,
     /// What a copy that holds the source item and its files carries.
     pub marker: Marker,
+    order_floor: u64,
 }
 
 /// What changed in a copy since vault-mirror last wrote it, and the run
@@ -383,7 +439,16 @@ impl Entry {
             Some(files) => (self.marker.source_files.clone(), dest_files(files)),
             None => (UNKNOWN.into(), UNKNOWN.into()),
         };
+        let generation = self
+            .order_floor
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+            .ok_or(PlanError::GenerationExhausted)?;
         let marker = Marker {
+            history: History::Ordered {
+                generation,
+                source_archived: source_item.archived,
+            },
             archived,
             source_files,
             dest_files,
@@ -427,14 +492,24 @@ impl Entry {
             dest_files: dest_files(&copy.attachments),
             ..self.marker.clone()
         };
-        marker_of(copy, &self.marker.pair).as_ref() == Some(&wanted)
+        marker_of(copy, &self.marker.pair).is_some_and(|mut marker| {
+            let archive_matches = marker
+                .history
+                .source_archived()
+                .is_none_or(|archived| archived == wanted.archived);
+            // Chronology alone must not turn an unchanged copy into a write.
+            marker.history = wanted.history;
+            archive_matches && marker == wanted
+        })
     }
 }
 
-/// Folder and collection names are vault content, so these errors, which
-/// reach the status file and notifications, don't name them.
+/// These errors reach the status file and notifications and must not name
+/// vault content such as folders or collections.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PlanError {
+    #[error("the copy's marker generation is exhausted")]
+    GenerationExhausted,
     #[error("the destination is missing a folder that a copy belongs in")]
     MissingFolder,
     #[error("the destination is missing a collection that a copy belongs in")]
@@ -494,13 +569,10 @@ impl<'a> Places<'a> {
     }
 }
 
-/// What the markers tell about a destination item paired with a source item:
-/// its own marker, or for an original only the source item's, which records
-/// the same pair the other way round.
 struct Known {
-    /// The destination item's content when vault-mirror last wrote it.
-    content: String,
-    archived: bool,
+    /// None when the latest evidence cannot establish a baseline.
+    content: Option<String>,
+    archived: Option<bool>,
     files: Files,
 }
 
@@ -517,37 +589,67 @@ enum Files {
 
 impl Known {
     fn new(own: Option<&Marker>, link: Option<&Marker>, source: &Item, dest: &Item) -> Self {
-        let marker = own
-            .or(link)
-            .expect("a pair is linked by at least one marker");
-        let files = if let Some(link) = link
-            && link.source_files == source_files(dest)
-            && link.dest_files == dest_files(&source.attachments)
-        {
-            // Both items' attachments are as the source item's marker
-            // recorded them, however old the destination's own marker is.
-            Files::Unchanged { current: true }
-        } else {
-            match (own, link) {
-                (Some(own), _) if own.files_pending() => Files::Unknown,
-                (Some(own), _) if own.dest_files == dest_files(&dest.attachments) => {
-                    Files::Unchanged {
-                        current: own.source_files == source_files(source),
+        match (own, link) {
+            (Some(own), Some(link)) => {
+                match own.history.generation().cmp(&link.history.generation()) {
+                    std::cmp::Ordering::Greater => Self::own(own, source, dest),
+                    std::cmp::Ordering::Less => Self::link(link, source, dest),
+                    std::cmp::Ordering::Equal => {
+                        let own = Self::own(own, source, dest);
+                        let link = Self::link(link, source, dest);
+                        Self {
+                            content: own
+                                .content
+                                .filter(|content| Some(content) == link.content.as_ref()),
+                            archived: own
+                                .archived
+                                .filter(|archived| Some(*archived) == link.archived),
+                            files: if own.files == link.files {
+                                own.files
+                            } else {
+                                Files::Unknown
+                            },
+                        }
                     }
                 }
-                (Some(_), _) => Files::Changed,
-                // The original was the source side of that marker.
-                (None, Some(link)) if link.source_files == UNKNOWN => Files::Unknown,
-                (None, Some(link)) if link.source_files == source_files(dest) => {
-                    Files::Unchanged { current: false }
-                }
-                (None, _) => Files::Changed,
             }
-        };
+            (Some(own), None) => Self::own(own, source, dest),
+            (None, Some(link)) => Self::link(link, source, dest),
+            (None, None) => unreachable!("a pair is linked by at least one marker"),
+        }
+    }
+
+    fn own(marker: &Marker, source: &Item, dest: &Item) -> Self {
         Self {
-            content: marker.content.clone(),
-            archived: marker.archived,
-            files,
+            content: Some(marker.content.clone()),
+            archived: Some(marker.archived),
+            files: if marker.source_files == UNKNOWN || marker.dest_files == UNKNOWN {
+                Files::Unknown
+            } else if marker.dest_files != dest_files(&dest.attachments) {
+                Files::Changed
+            } else {
+                Files::Unchanged {
+                    current: marker.source_files == source_files(source),
+                }
+            },
+        }
+    }
+
+    fn link(marker: &Marker, source: &Item, dest: &Item) -> Self {
+        Self {
+            content: Some(marker.content.clone()),
+            // The marker's archived field describes the other side, possibly
+            // before its archive endpoint finished.
+            archived: marker.history.source_archived(),
+            files: if marker.source_files == UNKNOWN || marker.dest_files == UNKNOWN {
+                Files::Unknown
+            } else if marker.source_files != source_files(dest) {
+                Files::Changed
+            } else {
+                Files::Unchanged {
+                    current: marker.dest_files == dest_files(&source.attachments),
+                }
+            },
         }
     }
 }
@@ -582,6 +684,7 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str) -> Plan {
             archived: item.archived,
             source_files: source_files(item),
             dest_files: NO_FILES.to_string(),
+            history: History::Unordered,
         };
         let link = marker_of(item, pair);
         if let Some(link) = &link {
@@ -589,10 +692,12 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str) -> Plan {
                 .entry(link.source_id.clone())
                 .or_insert(plan.entries.len());
         }
+        let order_floor = link.as_ref().map_or(0, |link| link.history.generation());
         links.push((item, link));
         entry_by_source_id.insert(&item.id, plan.entries.len());
         plan.entries.push(Entry {
             source: index,
+            order_floor,
             folder,
             collections,
             marker,
@@ -660,28 +765,53 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str) -> Plan {
         }
     }
 
-    // One copy per source item: the first that is as vault-mirror left it,
-    // else the first that seems so, else the first. Another copy is deleted
+    // Prefer a complete untouched copy of the current source version so an
+    // older copy does not become a duplicate when updated. Another copy is deleted
     // only if both are as vault-mirror left them, with complete markers that
     // record the same source content, attachments and archive state. Any
     // other, such as a clone someone edited, is left alone, and so is an
     // original.
     let mut dest_by_entry: HashMap<usize, (usize, Option<Marker>)> = HashMap::new();
     for (entry, mut candidates) in claims {
+        let complete = |index: usize, own: Option<&Marker>| {
+            let baseline = known(entry, index, own);
+            let item = &dest.items[index];
+            as_left(index, own)
+                && Some(dest_places.content(item)) == baseline.content
+                && Some(item.archived) == baseline.archived
+                && matches!(baseline.files, Files::Unchanged { .. })
+                && own.is_some_and(|own| {
+                    !own.files_pending()
+                        && own.source_files != UNKNOWN
+                        && own
+                            .history
+                            .source_archived()
+                            .is_none_or(|archived| archived == own.archived)
+                })
+        };
+        let current = &plan.entries[entry].marker;
         let chosen = (candidates.iter())
-            .position(|(index, own)| as_left(*index, own.as_ref()))
+            .position(|(index, own)| {
+                complete(*index, own.as_ref())
+                    && own.as_ref().is_some_and(|own| {
+                        (&own.content, own.archived, &own.source_files)
+                            == (&current.content, current.archived, &current.source_files)
+                    })
+            })
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .position(|(index, own)| as_left(*index, own.as_ref()))
+            })
             .or_else(|| {
                 candidates.iter().position(|(index, own)| {
                     let known = known(entry, *index, own.as_ref());
-                    dest_places.content(&dest.items[*index]) == known.content
+                    Some(dest_places.content(&dest.items[*index])) == known.content
                         && known.files != Files::Changed
                 })
             })
             .unwrap_or(0);
         let copy = candidates.remove(chosen);
-        let complete = |index: usize, own: Option<&Marker>| {
-            as_left(index, own) && own.is_some_and(|own| !own.files_pending())
-        };
         let kept = copy.1.as_ref().filter(|kept| complete(copy.0, Some(kept)));
         for (index, own) in candidates {
             let redundant = complete(index, own.as_ref())
@@ -716,14 +846,18 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str) -> Plan {
         let source_item = &source.items[plan.entries[entry_index].source];
         let dest_item = &dest.items[*dest_index];
         let known = known(entry_index, *dest_index, own.as_ref());
-        let entry = &plan.entries[entry_index];
+        let entry = &mut plan.entries[entry_index];
+        if let Some(own) = own {
+            entry.order_floor = entry.order_floor.max(own.history.generation());
+        }
         // The marker alone is not trusted: a destination item edited by hand
         // still carries the old marker.
         let dest_content = dest_places.content(dest_item);
         let mut changed_in_dest = Changes {
             // A change that the source made too is lost by no one.
-            content: dest_content != known.content && dest_content != entry.marker.content,
-            archive: dest_item.archived != known.archived
+            content: Some(&dest_content) != known.content.as_ref()
+                && dest_content != entry.marker.content,
+            archive: Some(dest_item.archived) != known.archived
                 && dest_item.archived != source_item.archived,
             files: false,
         };

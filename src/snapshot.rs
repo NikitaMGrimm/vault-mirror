@@ -504,6 +504,28 @@ mod tests {
         assert_eq!(restored.content, expected);
     }
 
+    #[test]
+    fn ordered_markers_are_left_out_of_exports() {
+        let mut vault = vault();
+        let Some(Node::List(fields)) = vault.items[0].content.get_mut("fields") else {
+            panic!()
+        };
+        let Some(Node::Map(marker)) = fields.last_mut() else {
+            panic!()
+        };
+        let value = format!("{} 42 1", marker["value"].as_str().unwrap());
+        marker.insert("value".into(), Node::secret(value));
+        let document = build(&vault, &Scope::Personal).unwrap();
+        let restored = parse(&document).unwrap();
+        let mut expected = vault.items[0].content.clone();
+        let Some(Node::List(fields)) = expected.get_mut("fields") else {
+            panic!()
+        };
+        fields.pop();
+        assert_eq!(restored.items[0].content, expected);
+        assert_eq!(document["items"][0]["fields"].as_array().unwrap().len(), 2);
+    }
+
     /// Clear text after a marker moves up a place when the marker is taken
     /// out, and the list of clear text has to say where it is now.
     #[test]
