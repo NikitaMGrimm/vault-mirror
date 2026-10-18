@@ -977,6 +977,106 @@ fn switching_back_after_attachments_changed_copies_them_once() {
 }
 
 #[test]
+fn switching_back_after_content_changed_uses_the_last_written_baseline() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    let mut b = mirrored(&a, Mode::Personal);
+    b.items[0].content.insert("notes".into(), text("second"));
+    a = apply(&b, &a, Mode::Personal);
+    a.items[0].content.insert("notes".into(), text("third"));
+
+    let back = plan(&a, &b, Mode::Personal);
+    assert_eq!(check(&back, &b, &Safety::default()), Ok(()));
+    assert_eq!(back.updates.len(), 1);
+    b = apply(&a, &b, Mode::Personal);
+    assert_converged(&a, &b, Mode::Personal);
+    assert_eq!(b.items[0].content["notes"], text("third"));
+
+    b.items[0].content.insert("notes".into(), text("second"));
+    let changed = plan(&a, &b, Mode::Personal);
+    assert!(changed.updates[0].changed_in_dest.content);
+    assert!(matches!(
+        check(&changed, &b, &Safety::default()),
+        Err(SafetyViolation::Overwrites(_))
+    ));
+}
+
+#[test]
+fn switching_back_after_archiving_uses_the_last_written_baseline() {
+    let mut a = vault(vec![login("a1", "One", "pw1")]);
+    let mut b = mirrored(&a, Mode::Personal);
+    b.items[0].archived = true;
+    a = apply(&b, &a, Mode::Personal);
+    a.items[0].archived = false;
+
+    let back = plan(&a, &b, Mode::Personal);
+    assert_eq!(check(&back, &b, &Safety::default()), Ok(()));
+    assert_eq!(back.updates.len(), 1);
+    b = apply(&a, &b, Mode::Personal);
+    assert_converged(&a, &b, Mode::Personal);
+    assert!(!b.items[0].archived);
+
+    b.items[0].archived = true;
+    let changed = plan(&a, &b, Mode::Personal);
+    assert!(changed.updates[0].changed_in_dest.archive);
+    assert!(matches!(
+        check(&changed, &b, &Safety::default()),
+        Err(SafetyViolation::Overwrites(_))
+    ));
+}
+
+#[test]
+fn mixed_version_copies_converge_in_either_server_order() {
+    let mut source = vault(vec![login("s1", "One", "pw1")]);
+    let older = mirrored(&source, Mode::Personal).items.remove(0);
+    source.items[0]
+        .content
+        .insert("notes".into(), text("newer"));
+    let current = mirrored(&source, Mode::Personal).items.remove(0);
+
+    for old_first in [true, false] {
+        let old = Item {
+            id: "older".into(),
+            ..older.clone()
+        };
+        let new = Item {
+            id: "current".into(),
+            ..current.clone()
+        };
+        let dest = vault(if old_first {
+            vec![old, new]
+        } else {
+            vec![new, old]
+        });
+        let planned = plan(&source, &dest, Mode::Personal);
+        assert_eq!(check(&planned, &dest, &Safety::default()), Ok(()));
+        assert!(planned.deletes.is_empty());
+        assert_eq!(planned.detached, 1);
+        assert!(planned.updates.is_empty());
+        let after = apply(&source, &dest, Mode::Personal);
+        assert!(!plan(&source, &after, Mode::Personal).has_changes());
+        assert_eq!(after.items.len(), 2);
+        assert_eq!(
+            after
+                .items
+                .iter()
+                .find(|i| i.id == "older")
+                .unwrap()
+                .content,
+            older.content
+        );
+        assert_eq!(
+            after
+                .items
+                .iter()
+                .find(|i| i.id == "current")
+                .unwrap()
+                .content,
+            current.content
+        );
+    }
+}
+
+#[test]
 fn switching_over_a_replaced_attachment_counts_as_a_change_in_the_destination() {
     let mut a = vault(vec![login("a1", "One", "pw1")]);
     a.items[0].attachments = vec![attachment("f1", "scan.pdf", 100)];
