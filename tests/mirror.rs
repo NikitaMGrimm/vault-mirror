@@ -35,8 +35,10 @@ fn pending(item: &Item) -> Draft {
     let marker = fields.last_mut().unwrap();
     let Node::Map(marker) = marker else { panic!() };
     let value = marker["value"].as_str().unwrap();
-    let parts: Vec<&str> = value.split_whitespace().collect();
-    let value = format!("{} ? ?", parts[..4].join(" "));
+    let mut parts: Vec<String> = value.split_whitespace().map(str::to_string).collect();
+    parts[4] = "?".into();
+    parts[5] = "?".into();
+    let value = parts.join(" ");
     marker.insert("value".into(), Node::secret(value));
     Draft {
         content,
@@ -505,6 +507,102 @@ async fn switching_source_and_destination_takes_over_the_copies() -> Result<()> 
             .count();
         assert!(markers <= 1, "{} has {markers} markers", item.id);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_reversals_copy_content_archive_and_attachments_once() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (first, second) = sandbox.pair().await?;
+    seed_extra(&first, 1).await?;
+    let initial = first.load(&PERSONAL).await?;
+    first
+        .upload_attachment(&PERSONAL, &initial.items[0], "file.txt", b"initial")
+        .await?;
+    run(&first, &second, &options()).await?;
+    let first_id = initial.items[0].id.clone();
+    let second_id = second.load(&PERSONAL).await?.items[0].id.clone();
+    let reverse = MirrorOptions {
+        safety: Safety {
+            allow_reverse: true,
+            ..Safety::default()
+        },
+        ..options()
+    };
+    for version in 1..=3 {
+        let (source, dest, source_id, dest_id) = if version % 2 == 1 {
+            (&second, &first, &second_id, &first_id)
+        } else {
+            (&first, &second, &first_id, &second_id)
+        };
+        let vault = source.load(&PERSONAL).await?;
+        let item = &vault.items[0];
+        let mut draft = Draft {
+            content: item.content.clone(),
+            folder_id: item.folder_id.clone(),
+            collection_ids: vec![],
+        };
+        let notes = format!("version {version}");
+        draft.content.insert("notes".into(), Node::secret(&notes));
+        let item = source.update_item(&PERSONAL, item, &draft).await?;
+        source
+            .delete_attachment(&item.id, &item.attachments[0].id)
+            .await?;
+        source
+            .upload_attachment(&PERSONAL, &item, "file.txt", notes.as_bytes())
+            .await?;
+        let stored = source.load(&PERSONAL).await?;
+        let stored = stored
+            .items
+            .iter()
+            .find(|item| &item.id == source_id)
+            .unwrap();
+        let desired_archived = version % 2 == 1;
+        if stored.archived != desired_archived {
+            source
+                .set_archived(std::slice::from_ref(source_id), desired_archived)
+                .await?;
+        }
+        let old = dest.load(&PERSONAL).await?;
+        let changed = run(source, dest, &reverse).await?;
+        assert!(changed.changed);
+        assert_eq!(changed.summary.items_updated, 1);
+        assert_eq!(changed.summary.attachments_copied, 1);
+        let after = dest.load(&PERSONAL).await?;
+        assert_eq!(after.items.len(), 1);
+        let copy = &after.items[0];
+        assert_eq!(&copy.id, dest_id);
+        assert!(copy.content["notes"].as_str() == Some(notes.as_str()));
+        assert_eq!(copy.archived, version % 2 == 1);
+        assert_eq!(copy.attachments.len(), 1);
+        assert_ne!(copy.attachments[0].id, old.items[0].attachments[0].id);
+        assert!(
+            dest.download_attachment(&PERSONAL, copy, &copy.attachments[0])
+                .await?
+                == notes.as_bytes()
+        );
+        assert!(!run(source, dest, &options()).await?.changed);
+        let unchanged = dest.load(&PERSONAL).await?;
+        assert_eq!(unchanged.items[0].attachments[0].id, copy.attachments[0].id);
+    }
+
+    let vault = first.load(&PERSONAL).await?;
+    let item = &vault.items[0];
+    let mut edited = Draft {
+        content: item.content.clone(),
+        folder_id: item.folder_id.clone(),
+        collection_ids: vec![],
+    };
+    edited
+        .content
+        .insert("notes".into(), Node::secret("version 1"));
+    first.update_item(&PERSONAL, item, &edited).await?;
+    let error = run(&second, &first, &options()).await.unwrap_err();
+    assert!(format!("{error:#}").contains("--allow-overwrite"));
+    let refused = first.load(&PERSONAL).await?;
+    assert!(refused.items[0].content["notes"].as_str() == Some("version 1"));
     Ok(())
 }
 
