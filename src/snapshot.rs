@@ -47,7 +47,9 @@ pub fn build(vault: &Vault, scope: &Scope) -> Result<Value> {
     let mut items = Vec::new();
     let mut plain_strings = Map::new();
     let mut attachments = Vec::new();
-    for item in vault.items.iter().filter(|item| !item.in_trash) {
+    let mut live: Vec<_> = vault.items.iter().filter(|item| !item.in_trash).collect();
+    live.sort_by(|a, b| a.id.cmp(&b.id));
+    for item in live {
         let mut content = item.content.clone();
         if let Some(Node::List(fields)) = content.get_mut("fields") {
             fields.retain(|field| !is_mirror_marker(field));
@@ -66,7 +68,11 @@ pub fn build(vault: &Vault, scope: &Scope) -> Result<Value> {
         object.insert(
             "collectionIds".into(),
             match organization {
-                Some(_) => json!(item.collection_ids),
+                Some(_) => {
+                    let mut ids = item.collection_ids.clone();
+                    ids.sort();
+                    json!(ids)
+                }
                 None => Value::Null,
             },
         );
@@ -83,18 +89,24 @@ pub fn build(vault: &Vault, scope: &Scope) -> Result<Value> {
             });
         }
     }
+    attachments.sort_by(|a, b| (&a.item_id, &a.attachment_id).cmp(&(&b.item_id, &b.attachment_id)));
 
     let mut document = Map::new();
     document.insert("encrypted".into(), json!(false));
     match organization {
         Some(_) => {
-            let collections: Vec<Value> = (vault.collections.iter())
+            let mut collections: Vec<_> = vault.collections.iter().collect();
+            collections.sort_by(|a, b| a.id.cmp(&b.id));
+            let collections: Vec<Value> = collections.into_iter()
                 .map(|c| json!({"id": c.id, "organizationId": organization, "name": c.name, "externalId": c.external_id}))
                 .collect();
             document.insert("collections".into(), json!(collections));
         }
         None => {
-            let folders: Vec<Value> = (vault.folders.iter())
+            let mut folders: Vec<_> = vault.folders.iter().collect();
+            folders.sort_by(|a, b| a.id.cmp(&b.id));
+            let folders: Vec<Value> = folders
+                .into_iter()
                 .map(|f| json!({"id": f.id, "name": f.name}))
                 .collect();
             document.insert("folders".into(), json!(folders));
@@ -444,6 +456,88 @@ mod tests {
             attachment_id: "att-1".into(),
             file_name: "a.txt".into(),
         }
+    }
+
+    #[test]
+    fn server_list_order_does_not_change_a_snapshot() {
+        let mut vault = vault();
+        vault.folders.push(Folder {
+            id: "folder-2".into(),
+            name: "Other".into(),
+            stamp: None,
+        });
+        vault.collections = vec![
+            Collection {
+                id: "collection-1".into(),
+                name: "Work".into(),
+                external_id: None,
+            },
+            Collection {
+                id: "collection-2".into(),
+                name: "Other".into(),
+                external_id: None,
+            },
+        ];
+        vault.items[0].collection_ids = vec!["collection-2".into(), "collection-1".into()];
+        vault.items[0].attachments.push(Attachment {
+            id: "att-3".into(),
+            file_name: "b.txt".into(),
+            size: 5,
+            wrapped_key: None,
+        });
+        let mut second = item("item-2", "Other");
+        second.attachments[0].id = "att-4".into();
+        vault.items.push(second);
+        for scope in [Scope::Personal, Scope::Organization("org-1".into())] {
+            let expected = build(&vault, &scope).unwrap();
+            let mut reordered = vault.clone();
+            reordered.folders.reverse();
+            reordered.collections.reverse();
+            reordered.items.reverse();
+            for item in &mut reordered.items {
+                item.attachments.reverse();
+                item.collection_ids.reverse();
+            }
+            let reordered = build(&reordered, &scope).unwrap();
+            assert_eq!(reordered, expected);
+            let dir = tempfile::tempdir().unwrap();
+            let keys = crate::store::Keys::open(dir.path(), "synthetic passphrase").unwrap();
+            let store = crate::store::Store::new(dir.path(), "source", &keys);
+            let writer = store.begin(time::OffsetDateTime::now_utc()).unwrap();
+            for attachment in parse(&expected).unwrap().attachments() {
+                writer
+                    .write_attachment(&attachment.attachment_id, b"synthetic bytes")
+                    .unwrap();
+            }
+            writer.finish(&expected).unwrap();
+            assert!(store.unchanged(&reordered).unwrap());
+        }
+    }
+
+    #[test]
+    fn meaningful_item_list_order_is_preserved_in_snapshots() {
+        let mut vault = vault();
+        vault.items[0].content.insert(
+            "passwordHistory".into(),
+            Node::List(vec![
+                Node::Map(BTreeMap::from([("password".into(), Node::secret("first"))])),
+                Node::Map(BTreeMap::from([(
+                    "password".into(),
+                    Node::secret("second"),
+                )])),
+            ]),
+        );
+        let expected = build(&vault, &Scope::Personal).unwrap();
+        for name in ["fields", "passwordHistory"] {
+            let mut reordered = vault.clone();
+            let Some(Node::List(list)) = reordered.items[0].content.get_mut(name) else {
+                unreachable!()
+            };
+            list.reverse();
+            assert_ne!(build(&reordered, &Scope::Personal).unwrap(), expected);
+        }
+        vault.items[0].revision_date = Some("2026-02-01T00:00:00Z".into());
+        assert_ne!(build(&vault, &Scope::Personal).unwrap(), expected);
     }
 
     #[test]
