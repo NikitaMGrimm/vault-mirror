@@ -460,13 +460,17 @@ fn export(backups: &Path, role: &str) -> Result<(serde_json::Value, HashMap<Stri
         String::from_utf8_lossy(&exported.stderr)
     );
     let document = serde_json::from_slice(&std::fs::read(output.join("export.json"))?)?;
-    let files = walk(&output.join("attachments"))
-        .into_iter()
-        .map(|path| {
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            (name, std::fs::read(&path).unwrap())
+    let restorable = vault_mirror::snapshot::parse(&document)?;
+    let files = restorable
+        .attachments()
+        .map(|attachment| {
+            let path = output
+                .join("attachments")
+                .join(&attachment.attachment_id)
+                .join("attachment");
+            Ok((attachment.file_name.clone(), std::fs::read(path)?))
         })
-        .collect();
+        .collect::<Result<_>>()?;
     Ok((document, files))
 }
 

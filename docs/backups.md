@@ -63,8 +63,11 @@ docker compose run --rm vault-mirror export --output /data/recovered
 ```
 
 Import `export.json` into an empty vault with any Bitwarden client, then attach
-the files from `attachments/<attachment id>/` to their items. Delete the output
-when done. Bitwarden imports do not restore the time a password last changed.
+the files from `attachments/<attachment id>/attachment` to their items. Each
+entry in `vaultMirror.attachments` in `export.json` gives the attachment id,
+item id and original file name. Use that name when you attach the file again.
+Delete the output when done. Bitwarden imports do not restore the time a
+password last changed.
 
 The export leaves out the hidden `vault-mirror` fields, so imported items are
 not copies. To rebuild a lost destination, mirror into an empty one instead.
@@ -81,6 +84,11 @@ recover before importing it.
 These commands need only `BACKUPS_DIR` and `BACKUP_PASSPHRASE`. Without Docker,
 replace `docker compose run --rm vault-mirror` with
 `vault-mirror --env-file vault-mirror.env`.
+
+You can list and export backups from a read-only directory if it contains a
+readable `run.lock`. Keep that file when copying backups. If it is missing,
+the commands create it in a writable backup directory. Otherwise, copy the
+backups to a writable directory before recovering them.
 
 If you restored into the same source account, the imported items have new ids.
 The next run can stop because it would replace more than half of the old copies.
