@@ -17,8 +17,10 @@ sync with it, is the **destination**.
   vault-mirror only changes the copies it makes there. Everything else in the
   account stays as it is.
 
-A free Bitwarden cloud account can't hold attachments. As a destination, it
-gets everything else.
+A free Bitwarden cloud account can't hold attachments. A run that needs to
+copy attachments there stops before changing the vault. To copy items without
+their attachments, set [`SKIP_ATTACHMENTS=true`](configuration.md#what-to-mirror).
+Backups still include the attachments.
 
 ## Step 1: Get the API keys
 
@@ -36,7 +38,7 @@ Create a directory for vault-mirror's files, and run `init` in it:
 ```sh
 mkdir vault-mirror && cd vault-mirror
 docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
-  ghcr.io/nikitamgrimm/vault-mirror init
+  ghcr.io/nikitamgrimm/vault-mirror:0.8 init
 ```
 
 `init` asks for:

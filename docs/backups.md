@@ -64,7 +64,9 @@ docker compose run --rm vault-mirror export --output /data/recovered
 
 Import `export.json` into an empty vault with any Bitwarden client, then attach
 the files from `attachments/<attachment id>/` to their items. Delete the output
-when done.
+when done. Bitwarden imports do not restore archive state or the time a
+password last changed. Re-archive items after import if needed.
+
 The export leaves out the hidden `vault-mirror` fields, so imported items are
 not copies. To rebuild a lost destination, mirror into an empty one instead.
 
