@@ -1,6 +1,6 @@
 mod common;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use common::*;
 use vault_mirror::{
     mirror::{Filter, MirrorOptions},
@@ -709,8 +709,7 @@ async fn editing_an_archived_item_keeps_it_archived() -> Result<()> {
     Ok(())
 }
 
-/// Bank accounts, driver's licences and passports. Servers that do not know
-/// these types reject them; the test is skipped there.
+/// Bank accounts, driver's licences and passports are mirrored.
 #[tokio::test]
 async fn newer_item_types_are_mirrored() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
@@ -779,24 +778,16 @@ async fn newer_item_types_are_mirrored() -> Result<()> {
         collection_ids: vec![],
     };
     for (kind, name, key, block) in &items {
-        if let Err(error) = source
+        source
             .create_item(&PERSONAL, &draft(*kind, name, key, block))
             .await
-        {
-            eprintln!("skipping: the source server rejects item type {kind}: {error:#}");
-            return Ok(());
-        }
+            .with_context(|| format!("creating source item type {kind}"))?;
         // The destination has to know the type as well.
-        match dest
+        let probe = dest
             .create_item(&PERSONAL, &draft(*kind, name, key, block))
             .await
-        {
-            Ok(probe) => dest.delete_items(&[probe.id]).await?,
-            Err(error) => {
-                eprintln!("skipping: the destination server rejects item type {kind}: {error:#}");
-                return Ok(());
-            }
-        }
+            .with_context(|| format!("creating destination item type {kind}"))?;
+        dest.delete_items(&[probe.id]).await?;
     }
 
     if dest.server_traits().await?.hidden_item_types.is_empty() {

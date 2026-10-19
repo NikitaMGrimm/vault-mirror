@@ -125,18 +125,18 @@ jobs:
           echo "VAULT_MIRROR_BW=$RUNNER_TEMP/bw/node_modules/.bin/bw" >> "$GITHUB_ENV"
       - run: sandbox/up.sh --official
       - name: Bitwarden's server as the source
-        run: VAULT_MIRROR_SANDBOX_SOURCE="$OFFICIAL" cargo test --locked --test mirror --test organization --test backup
+        run: VAULT_MIRROR_SANDBOX_SOURCE="$OFFICIAL" cargo test --locked --test mirror --test organization --test backup --test folders
       - name: Bitwarden's server as the destination
         if: ${{ !cancelled() }}
         run: |
           VAULT_MIRROR_SANDBOX_DEST="$OFFICIAL" VAULT_MIRROR_SANDBOX_DEST_TLS="$OFFICIAL_TLS" \
-            cargo test --locked --test mirror --test organization --test backup
+            cargo test --locked --test mirror --test organization --test backup --test folders
       - name: Bitwarden's server on both sides
         if: ${{ !cancelled() }}
         run: |
           VAULT_MIRROR_SANDBOX_SOURCE="$OFFICIAL" VAULT_MIRROR_SANDBOX_DEST="$OFFICIAL" \
             VAULT_MIRROR_SANDBOX_DEST_TLS="$OFFICIAL_TLS" \
-            cargo test --locked --test mirror --test organization --test backup
+            cargo test --locked --test mirror --test organization --test backup --test folders
       - if: failure()
         run: docker compose -f sandbox/compose.yaml --profile official logs
 
