@@ -1099,8 +1099,49 @@ fn server_traits(config: &Value) -> ServerTraits {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) async fn account(url: &str, user: SymKey) -> Account {
+        let http = api::build_http_client(&api::ClientOptions::default()).unwrap();
+        let session = Session::login(
+            http,
+            ServerUrls::from_server(url).unwrap(),
+            ApiCredentials {
+                client_id: "user.synthetic".into(),
+                client_secret: "synthetic secret".into(),
+                device_id: "synthetic device".into(),
+            },
+        )
+        .await
+        .unwrap();
+        Account {
+            session,
+            keys: Keys {
+                user,
+                organizations: HashMap::new(),
+            },
+            memberships: Memberships::new(),
+            user_id: "synthetic".into(),
+            premium: true,
+        }
+    }
+
+    impl Account {
+        pub(crate) fn test_sync(&self, items: &[Item]) -> Value {
+            let ciphers: Vec<_> = items
+                .iter()
+                .map(|item| {
+                    let mut cipher = Node::Map(item.content.clone())
+                        .encrypt(&self.keys.user)
+                        .unwrap();
+                    cipher["id"] = json!(item.id);
+                    cipher
+                })
+                .collect();
+            json!({"ciphers": ciphers, "folders": [], "collections": []})
+        }
+    }
 
     #[test]
     fn a_sync_response_without_a_list_is_an_error_not_an_empty_vault() {

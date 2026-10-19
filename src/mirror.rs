@@ -1296,6 +1296,426 @@ mod tests {
         assert!(check_source_shows(&duplicate, &dest, &traits(vec![6, 7, 8])).is_ok());
     }
 
+    mod visibility {
+        use super::*;
+        use std::{
+            collections::VecDeque,
+            io::{Read, Write},
+            net::TcpListener,
+            sync::{Arc, LazyLock, Mutex, atomic::AtomicBool},
+            thread,
+            time::Duration,
+        };
+
+        use crate::{
+            api::tests::http_response,
+            backup::{BackupOptions, backup},
+            crypto::SymKey,
+            snapshot,
+            store::{Keys, Store},
+        };
+        use serde_json::{Value, json};
+        use time::OffsetDateTime;
+
+        #[derive(Default)]
+        struct State {
+            shown: VecDeque<bool>,
+            source: Value,
+            dest: Value,
+            requests: Vec<String>,
+        }
+
+        struct Server {
+            url: String,
+            state: Arc<Mutex<State>>,
+            stopped: Arc<AtomicBool>,
+            task: Option<thread::JoinHandle<()>>,
+        }
+
+        impl Server {
+            fn start(shown: &[bool]) -> Self {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let url = format!("http://{}", listener.local_addr().unwrap());
+                listener.set_nonblocking(true).unwrap();
+                let state = Arc::new(Mutex::new(State {
+                    shown: shown.iter().copied().collect(),
+                    ..State::default()
+                }));
+                let stopped = Arc::new(AtomicBool::new(false));
+                let (received, done) = (state.clone(), stopped.clone());
+                let task = thread::spawn(move || {
+                    while !done.load(Ordering::SeqCst) {
+                        let mut stream = match listener.accept() {
+                            Ok((stream, _)) => stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(5));
+                                continue;
+                            }
+                            Err(error) => panic!("{error}"),
+                        };
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut request = Vec::new();
+                        let mut buffer = [0; 4096];
+                        let (head, body) = loop {
+                            let size = stream.read(&mut buffer).unwrap();
+                            assert_ne!(size, 0);
+                            request.extend_from_slice(&buffer[..size]);
+                            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                                let head = String::from_utf8_lossy(&request[..end]).into_owned();
+                                let length = head
+                                    .lines()
+                                    .find_map(|line| {
+                                        let (name, value) = line.split_once(':')?;
+                                        name.eq_ignore_ascii_case("content-length")
+                                            .then(|| value.trim().parse::<usize>().unwrap())
+                                    })
+                                    .unwrap_or(0);
+                                if request.len() >= end + 4 + length {
+                                    break (head, request[end + 4..].to_vec());
+                                }
+                            }
+                        };
+                        let first = head.lines().next().unwrap();
+                        let mut words = first.split_whitespace();
+                        let method = words.next().unwrap();
+                        let path = words.next().unwrap();
+                        let mut state = received.lock().unwrap();
+                        state.requests.push(format!("{method} {path}"));
+                        let mut status = "200 OK";
+                        let response = match (method, path) {
+                            ("POST", path) if path.ends_with("/identity/connect/token") => {
+                                json!({"access_token": "synthetic", "expires_in": 3600})
+                            }
+                            ("GET", "/source/api/config") => {
+                                let shown = if state.shown.len() > 1 {
+                                    state.shown.pop_front().unwrap()
+                                } else {
+                                    *state.shown.front().unwrap()
+                                };
+                                json!({"server": null, "featureStates": {
+                                    "pm-32009-new-item-types": shown
+                                }})
+                            }
+                            ("GET", "/dest/api/config") => {
+                                json!({"server": {"name": "Vaultwarden"}})
+                            }
+                            ("GET", "/source/api/sync?excludeDomains=true") => state.source.clone(),
+                            ("GET", "/dest/api/sync?excludeDomains=true") => state.dest.clone(),
+                            ("PUT", "/dest/api/ciphers/delete") => {
+                                let body: Value = serde_json::from_slice(&body).unwrap();
+                                assert_eq!(body, json!({"ids": ["copy-passport"]}));
+                                state.dest["ciphers"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .retain(|item| item["id"] != "copy-passport");
+                                json!({})
+                            }
+                            _ => {
+                                status = "400 Bad Request";
+                                json!({"message": "unexpected request"})
+                            }
+                        };
+                        let response = http_response(
+                            status,
+                            "Content-Type: application/json\r\n",
+                            &response.to_string(),
+                        );
+                        stream.write_all(response.as_bytes()).unwrap();
+                    }
+                });
+                Self {
+                    url,
+                    state,
+                    stopped,
+                    task: Some(task),
+                }
+            }
+
+            fn requests(&self) -> Vec<String> {
+                self.state
+                    .lock()
+                    .unwrap()
+                    .requests
+                    .iter()
+                    .filter(|request| !request.contains("/identity/"))
+                    .cloned()
+                    .collect()
+            }
+
+            async fn accounts(&self) -> (Account, Account) {
+                let source_key = SymKey::generate();
+                let dest_key = SymKey::generate();
+                let source =
+                    crate::vault::tests::account(&format!("{}/source", self.url), source_key).await;
+                let dest =
+                    crate::vault::tests::account(&format!("{}/dest", self.url), dest_key).await;
+                let pair = plan::pair(&vault_key(&endpoint(&source)), &vault_key(&endpoint(&dest)));
+                let mut original = Vault::default();
+                for (id, kind) in [("passport", 8), ("kept-1", 2), ("kept-2", 2)] {
+                    let mut item = item(id, None, &[]);
+                    item.content = [
+                        ("type".into(), Node::Number(kind.into())),
+                        ("name".into(), Node::secret("synthetic vault content")),
+                    ]
+                    .into();
+                    original.items.push(item);
+                }
+                let plan = plan::plan(&original, &Vault::default(), Mode::Personal, &pair, false);
+                let mut copies = Vec::new();
+                for entry in &plan.entries {
+                    let draft = entry
+                        .draft(
+                            &original,
+                            &HashMap::new(),
+                            &HashMap::new(),
+                            false,
+                            FileWrite::Kept,
+                        )
+                        .unwrap();
+                    let mut copy = original.items[entry.source].clone();
+                    copy.id = format!("copy-{}", copy.id);
+                    copy.content = draft.content;
+                    copies.push(copy);
+                }
+                let mut state = self.state.lock().unwrap();
+                state.source = source.test_sync(&original.items[1..]);
+                state.dest = dest.test_sync(&copies);
+                (source, dest)
+            }
+        }
+
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.stopped.store(true, Ordering::SeqCst);
+                self.task.take().unwrap().join().unwrap();
+            }
+        }
+
+        struct Quiet;
+
+        impl Reporter for Quiet {
+            fn status(&self, _: &str, _: &str) {}
+            fn warn(&self, _: &str) {}
+        }
+
+        static BACKUPS: LazyLock<(tempfile::TempDir, Keys)> = LazyLock::new(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let keys = Keys::open(dir.path(), "synthetic passphrase").unwrap();
+            (dir, keys)
+        });
+
+        fn backup_options() -> BackupOptions {
+            BackupOptions {
+                retention_days: 1,
+                now: OffsetDateTime::UNIX_EPOCH + time::Duration::days(10),
+            }
+        }
+
+        fn endpoint(account: &Account) -> Endpoint<'_> {
+            Endpoint {
+                account,
+                scope: Scope::Personal,
+            }
+        }
+
+        async fn evaluate(
+            source: &Account,
+            dest: &Account,
+            source_read: &Protected<'_>,
+            store: &Store<'_>,
+            run: bool,
+        ) -> Result<Outcome> {
+            let options = MirrorOptions::default();
+            let folders = FolderReceipts::new(BACKUPS.0.path());
+            Ok(if run {
+                let (_, dest_read) =
+                    backup(dest, &Scope::Personal, store, &backup_options(), &Quiet).await?;
+                mirror(
+                    &endpoint(source),
+                    &endpoint(dest),
+                    source_read,
+                    &dest_read,
+                    &options,
+                    &folders,
+                    &Quiet,
+                )
+                .await?
+            } else {
+                let dest_vault = dest.load(&Scope::Personal).await?;
+                check(
+                    &endpoint(source),
+                    &endpoint(dest),
+                    &source_read.vault,
+                    &dest_vault,
+                    &options,
+                    &folders,
+                    &Quiet,
+                )
+                .await?
+            })
+        }
+
+        fn source_order() -> Vec<String> {
+            [
+                "GET /source/api/config",
+                "GET /source/api/sync?excludeDomains=true",
+                "GET /source/api/config",
+            ]
+            .map(str::to_string)
+            .into()
+        }
+
+        #[tokio::test]
+        async fn observed_visibility_transitions_refuse_before_snapshot_commit_or_prune() {
+            for shown in [[false, true], [true, false]] {
+                let server = Server::start(&shown);
+                let (source, dest) = server.accounts().await;
+                let (dir, keys) = &*BACKUPS;
+                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+                let document = snapshot::build(&Vault::default(), &Scope::Personal).unwrap();
+                let oldest = store
+                    .begin(OffsetDateTime::UNIX_EPOCH)
+                    .unwrap()
+                    .finish(&document)
+                    .unwrap();
+                let newest = store
+                    .begin(OffsetDateTime::UNIX_EPOCH + time::Duration::days(1))
+                    .unwrap()
+                    .finish(&document)
+                    .unwrap();
+                let result = async {
+                    let (_, read) =
+                        backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                            .await?;
+                    evaluate(&source, &dest, &read, &store, true).await
+                }
+                .await;
+                let error = match result {
+                    Ok(_) => panic!("a visibility transition was accepted"),
+                    Err(error) => error,
+                };
+                assert!(
+                    format!("{error:#}").contains("visibility changed"),
+                    "{error:#}"
+                );
+                assert_eq!(server.requests(), source_order());
+                assert_eq!(store.list().unwrap(), [oldest, newest]);
+            }
+        }
+
+        #[tokio::test]
+        async fn observed_visibility_transitions_also_refuse_checks() {
+            for shown in [[false, true], [true, false]] {
+                let server = Server::start(&shown);
+                let (source, dest) = server.accounts().await;
+                let result = async {
+                    let source_vault = source.load(&Scope::Personal).await?;
+                    let dest_vault = dest.load(&Scope::Personal).await?;
+                    check(
+                        &endpoint(&source),
+                        &endpoint(&dest),
+                        &source_vault,
+                        &dest_vault,
+                        &MirrorOptions::default(),
+                        &FolderReceipts::new(BACKUPS.0.path()),
+                        &Quiet,
+                    )
+                    .await?;
+                    anyhow::Ok(())
+                }
+                .await;
+                let error = result.unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("visibility changed"),
+                    "{error:#}"
+                );
+                assert_eq!(server.requests(), source_order());
+            }
+        }
+
+        #[tokio::test]
+        async fn hidden_read_stays_restrictive_after_later_enablement_for_run_and_check() {
+            for run in [false, true] {
+                let server = Server::start(&[false, false, true]);
+                let (source, dest) = server.accounts().await;
+                let (dir, keys) = &*BACKUPS;
+                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+                let (_, source_read) =
+                    backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                        .await
+                        .unwrap();
+                assert!(
+                    source
+                        .server_traits()
+                        .await
+                        .unwrap()
+                        .hidden_item_types
+                        .is_empty()
+                );
+                let result = evaluate(&source, &dest, &source_read, &store, run).await;
+                let error = result.unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("source server does not show"),
+                    "{error:#}"
+                );
+                assert!(!format!("{error:#}").contains("synthetic vault content"));
+                let mut expected = source_order();
+                expected.push("GET /source/api/config".into());
+                if run {
+                    expected.push("GET /dest/api/config".into());
+                }
+                expected.push("GET /dest/api/sync?excludeDomains=true".into());
+                if run {
+                    expected.push("GET /dest/api/config".into());
+                }
+                expected.push("GET /dest/api/config".into());
+                assert_eq!(server.requests(), expected);
+            }
+        }
+
+        #[tokio::test]
+        async fn enabled_read_allows_a_genuine_deletion_for_run_and_check() {
+            for run in [false, true] {
+                let server = Server::start(&[true, true]);
+                let (source, dest) = server.accounts().await;
+                let (dir, keys) = &*BACKUPS;
+                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+                let (_, source_read) =
+                    backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                        .await
+                        .unwrap();
+                let result = evaluate(&source, &dest, &source_read, &store, run).await;
+                let outcome = result.unwrap();
+                assert_eq!(outcome.summary.items_deleted, 1);
+                assert_eq!(outcome.summary.items_unchanged, 2);
+                assert_eq!(outcome.changed, run);
+                let mut expected = source_order();
+                if run {
+                    expected.push("GET /dest/api/config".into());
+                }
+                expected.push("GET /dest/api/sync?excludeDomains=true".into());
+                if run {
+                    expected.push("GET /dest/api/config".into());
+                }
+                expected.push("GET /dest/api/config".into());
+                if run {
+                    expected.extend(
+                        [
+                            "GET /dest/api/sync?excludeDomains=true",
+                            "PUT /dest/api/ciphers/delete",
+                            "GET /dest/api/sync?excludeDomains=true",
+                        ]
+                        .map(str::to_string),
+                    );
+                }
+                assert_eq!(server.requests(), expected);
+            }
+        }
+    }
+
     #[test]
     fn plans_are_described_by_what_changes() {
         let summary = Summary {
