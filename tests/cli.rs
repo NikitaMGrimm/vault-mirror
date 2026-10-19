@@ -105,6 +105,57 @@ fn a_command_is_required() {
 }
 
 #[test]
+fn rejected_server_urls_do_not_expose_secrets_in_run_diagnostics() {
+    let secret = "synthetic-url-secret";
+    for (server, reason) in [
+        (
+            format!("ftp://127.0.0.1/?token={secret}"),
+            "expected an http or https URL",
+        ),
+        (
+            format!("127.0.0.1/?token={secret}"),
+            "relative URL without a base",
+        ),
+        (
+            format!("http://{secret}:{secret}@127.0.0.1:invalid/"),
+            "invalid port number",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let output = vault_mirror()
+            .env("BACKUPS_DIR", dir.path())
+            .env("BACKUP_PASSPHRASE", "synthetic passphrase")
+            .env("SOURCE_SERVER", &server)
+            .env("SOURCE_CLIENT_ID", "user.synthetic")
+            .env("SOURCE_CLIENT_SECRET", "synthetic secret")
+            .env("SOURCE_PASSWORD", "synthetic password")
+            .arg("run")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let persisted = fs::read_to_string(vault_mirror::app::status_path(dir.path())).unwrap();
+        let status = vault_mirror::app::read_status(dir.path()).unwrap();
+        let notification = vault_mirror::app::describe(&status);
+        for diagnostic in [stdout.as_ref(), stderr.as_ref(), &persisted, &notification] {
+            assert!(!diagnostic.contains(secret), "a URL secret was exposed");
+            assert!(
+                !diagnostic.contains(&server),
+                "the rejected URL was exposed"
+            );
+        }
+        assert!(!status.succeeded());
+        assert_eq!(status.failure_stage.as_deref(), Some("source login"));
+        let error = format!("invalid server URL: {reason}");
+        // Do not print diagnostics on failure: they may contain the secret.
+        assert!(status.error.as_deref() == Some(error.as_str()));
+        assert!(stdout.contains(&format!("during source login: {error}")));
+        assert!(notification == format!("vault-mirror FAILED; during source login: {error}"));
+    }
+}
+
+#[test]
 fn an_excessive_healthcheck_age_is_reported_without_panicking() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(

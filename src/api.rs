@@ -46,8 +46,8 @@ pub enum ApiError {
     },
     #[error("{context}: unexpected response: {detail}")]
     Unexpected { context: String, detail: String },
-    #[error("invalid server URL {url:?}: {detail}")]
-    InvalidUrl { url: String, detail: String },
+    #[error("invalid server URL: {detail}")]
+    InvalidUrl { detail: String },
 }
 
 impl ApiError {
@@ -148,7 +148,6 @@ impl ServerUrls {
     /// the address of the Bitwarden cloud web vault.
     pub fn from_server(server: &str) -> Result<Self> {
         let invalid = |detail: &str| ApiError::InvalidUrl {
-            url: server.to_string(),
             detail: detail.to_string(),
         };
         let trimmed = server.trim().trim_end_matches('/');
@@ -870,6 +869,37 @@ pub(crate) mod tests {
         assert!(ServerUrls::from_server("vault.example.com").is_err());
         assert!(ServerUrls::from_server("ftp://vault.example.com").is_err());
         assert!(ServerUrls::from_server("").is_err());
+    }
+
+    #[test]
+    fn rejected_server_urls_do_not_expose_secrets_in_diagnostics() {
+        let secret = "synthetic-url-secret";
+        for (server, reason) in [
+            (
+                format!("ftp://127.0.0.1/?token={secret}"),
+                "expected an http or https URL",
+            ),
+            (
+                format!("127.0.0.1/?token={secret}"),
+                "relative URL without a base",
+            ),
+            (
+                format!("http://{secret}:{secret}@127.0.0.1:invalid/"),
+                "invalid port number",
+            ),
+        ] {
+            let error = ServerUrls::from_server(&server).unwrap_err();
+            for diagnostic in [error.to_string(), format!("{error:?}")] {
+                assert!(!diagnostic.contains(secret), "a URL secret was exposed");
+                assert!(
+                    !diagnostic.contains(&server),
+                    "the rejected URL was exposed"
+                );
+                assert!(diagnostic.contains(reason), "the parse reason was lost");
+            }
+            // Do not print the error on failure: it may contain the secret.
+            assert!(error.to_string() == format!("invalid server URL: {reason}"));
+        }
     }
 
     #[test]
