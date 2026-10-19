@@ -101,20 +101,47 @@ pub fn device_id(backups_dir: &Path, role: &str) -> Result<String> {
     Ok(id)
 }
 
-/// Claims the backup directory for one command; it is released when
-/// the file is closed. Two runs at once could both prune and write the same
-/// snapshots and attachment files, and would both write `last-run.json`.
-pub fn lock_backups_dir(backups_dir: &Path) -> Result<fs::File> {
-    store::create_private_dir(backups_dir)?;
+#[derive(Clone, Copy)]
+pub enum BackupAccess {
+    Read,
+    Write,
+}
+
+/// Keeps readers apart from a run that writes or prunes snapshots until the
+/// returned file is closed. Recovery readers can share the directory.
+pub fn lock_backups_dir(backups_dir: &Path, access: BackupAccess) -> Result<fs::File> {
+    if matches!(access, BackupAccess::Write) {
+        store::create_private_dir(backups_dir)?;
+    }
     let path = backups_dir.join(LOCK_FILE);
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(false);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let file = options
-        .open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    match file.try_lock() {
+    let file = match access {
+        BackupAccess::Write => options
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?,
+        BackupAccess::Read => fs::File::open(&path)
+            .or_else(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    options.read(true).open(&path)
+                } else {
+                    Err(error)
+                }
+            })
+            .with_context(|| {
+                format!(
+                    "opening {} for recovery; copy BACKUPS_DIR to a writable directory or retain run.lock when copying backups",
+                    path.display()
+                )
+            })?,
+    };
+    let locked = match access {
+        BackupAccess::Read => file.try_lock_shared(),
+        BackupAccess::Write => file.try_lock(),
+    };
+    match locked {
         Ok(()) => Ok(file),
         Err(fs::TryLockError::WouldBlock) => Err(anyhow!(
             "another vault-mirror run is using BACKUPS_DIR {}; try again when it has finished",
@@ -188,7 +215,7 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
             ..Status::default()
         },
     };
-    let (lock, result) = match lock_backups_dir(&config.backups_dir) {
+    let (lock, result) = match lock_backups_dir(&config.backups_dir, BackupAccess::Write) {
         Ok(lock) => (
             Some(lock),
             execute(config, flags, reporter, &mut progress, started).await,
@@ -481,7 +508,7 @@ mod tests {
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect();
         let config = Config::from_env(&env).unwrap();
-        let running = lock_backups_dir(dir.path()).unwrap();
+        let running = lock_backups_dir(dir.path(), BackupAccess::Write).unwrap();
 
         let refused = run_once(&config, RunFlags::default(), &Quiet).await;
         assert!(!refused.succeeded());
@@ -497,7 +524,7 @@ mod tests {
         assert!(!dir.path().join("key.age").exists());
 
         drop(running);
-        lock_backups_dir(dir.path()).unwrap();
+        lock_backups_dir(dir.path(), BackupAccess::Write).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

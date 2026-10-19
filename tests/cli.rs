@@ -3,6 +3,8 @@
 
 use std::{fs, process::Command};
 
+use vault_mirror::app::{self, BackupAccess};
+
 fn vault_mirror() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_vault-mirror"));
     command.env_clear();
@@ -65,7 +67,7 @@ fn an_export_needs_only_the_backup_passphrase() {
             .arg(output_dir);
         command
     };
-    let lock = vault_mirror::app::lock_backups_dir(dir.path()).unwrap();
+    let lock = app::lock_backups_dir(dir.path(), BackupAccess::Write).unwrap();
     let locked = command(&output_dir).output().unwrap();
     assert!(!locked.status.success());
     assert!(String::from_utf8_lossy(&locked.stderr).contains("another vault-mirror run"));
@@ -199,8 +201,7 @@ fn recovery_readers_share_the_lock_and_exclude_runs() {
     let dir = tempfile::tempdir().unwrap();
     recovery_backup(dir.path(), &["original.txt".into()]);
     fs::write(dir.path().join("run.lock"), b"retained lock").unwrap();
-    let reader = fs::File::open(dir.path().join("run.lock")).unwrap();
-    reader.try_lock_shared().unwrap();
+    let reader = app::lock_backups_dir(dir.path(), BackupAccess::Read).unwrap();
 
     let listed = vault_mirror()
         .env("BACKUPS_DIR", dir.path())
@@ -227,13 +228,15 @@ fn recovery_readers_share_the_lock_and_exclude_runs() {
         .output()
         .unwrap();
     assert!(!run.status.success());
-    assert!(
-        String::from_utf8_lossy(&run.stderr).contains("another vault-mirror run"),
-        "{}",
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
+    assert!(printed.contains("another vault-mirror run"), "{printed}");
     assert!(!dir.path().join("last-run.json").exists());
     drop(reader);
+    let _writer = app::lock_backups_dir(dir.path(), BackupAccess::Write).unwrap();
     assert_eq!(
         fs::read(dir.path().join("run.lock")).unwrap(),
         b"retained lock"
@@ -243,7 +246,7 @@ fn recovery_readers_share_the_lock_and_exclude_runs() {
 #[test]
 fn snapshots_refuse_an_active_writer() {
     let dir = tempfile::tempdir().unwrap();
-    let writer = vault_mirror::app::lock_backups_dir(dir.path()).unwrap();
+    let writer = app::lock_backups_dir(dir.path(), BackupAccess::Write).unwrap();
     let output = vault_mirror()
         .env("BACKUPS_DIR", dir.path())
         .arg("snapshots")

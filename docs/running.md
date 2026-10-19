@@ -28,9 +28,11 @@ The container's `daemon` command runs once when it starts, then at the times
 `SCHEDULE` names. The image's health check gives the first run 26 hours. To
 use your own scheduler instead, have it start `vault-mirror run`.
 
-Only one `run`, `daemon` run, `export` or `snapshots` can use a
-backup directory at a time. Another one stops straight away without changing
-anything.
+Only one `run` or `daemon` run can use a backup directory at a time. While a
+run holds the directory's `run.lock`, `export` and `snapshots` stop straight
+away. These recovery commands can share the lock with each other and block
+runs until they finish. Keep `run.lock` when copying backups for
+[read-only recovery](backups.md#restore-with-vault-mirror).
 
 The generated `compose.yaml` gives a run five minutes to finish when the
 container stops. Raise `stop_grace_period` for large vaults.

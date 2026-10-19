@@ -414,7 +414,7 @@ fn read_keys(backups: &Path, env: &HashMap<String, String>) -> Result<Keys> {
 
 fn snapshots(vault: Role) -> Result<ExitCode> {
     let backups = config::backups_dir(&settings());
-    let _lock = app::lock_backups_dir(&backups)?;
+    let _lock = app::lock_backups_dir(&backups, app::BackupAccess::Read)?;
     let ids = store::list(&backups, vault.name())?;
     if ids.is_empty() {
         println!(
@@ -443,7 +443,7 @@ fn locate_snapshot<'a>(store: &Store<'a>, role: Role, name: &str) -> Result<Snap
 fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
     let env = settings();
     let backups = config::backups_dir(&env);
-    let _lock = app::lock_backups_dir(&backups)?;
+    let _lock = app::lock_backups_dir(&backups, app::BackupAccess::Read)?;
     let keys = read_keys(&backups, &env)?;
     let store = Store::new(&backups, args.from.name(), &keys);
     let backup = locate_snapshot(&store, args.from, &args.snapshot)?;
@@ -472,16 +472,10 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
     )?;
     let mut written = 0;
     for attachment in restorable.attachments() {
-        // The attachment id keeps files with the same name apart; the name
-        // itself is reduced to its final path component.
-        let name = Path::new(&attachment.file_name)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "attachment".to_string());
         let directory = output.join("attachments").join(&attachment.attachment_id);
         fs::create_dir_all(&directory)?;
         fs::write(
-            directory.join(name),
+            directory.join("attachment"),
             backup.attachment(&attachment.attachment_id)?,
         )?;
         written += 1;
