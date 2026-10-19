@@ -331,7 +331,7 @@ impl Account {
         Ok(Folder {
             id: required_str(&created, "id", "created folder")?,
             name: name.to_string(),
-            stamp: optional_str(&created, "name")
+            stamp: optional_str(&created, "name")?
                 .as_deref()
                 .map(encrypted_name_hash),
         })
@@ -552,7 +552,7 @@ impl Account {
             // archive endpoint rejects items that are still archived, so the
             // stored state is read back first.
             let stored = self.session.get(&path).await?;
-            if optional_str(&stored, "archivedDate").is_none() {
+            if optional_str(&stored, "archivedDate")?.is_none() {
                 self.set_archived(std::slice::from_ref(&existing.id), true)
                     .await?;
             }
@@ -871,12 +871,13 @@ fn encrypted_name_hash(encrypted: &str) -> String {
     hex::encode(Sha256::digest(encrypted.as_bytes()))
 }
 
-fn optional_str(value: &Value, name: &str) -> Option<String> {
-    value
-        .get(name)
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
-        .map(str::to_string)
+fn optional_str(value: &Value, name: &str) -> Result<Option<String>> {
+    match value.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.is_empty() => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => bail!("the server's {name} is not a string"),
+    }
 }
 
 fn read_vault(sync: &Value, scope: &Scope, scope_key: &SymKey) -> Result<Vault> {
@@ -903,11 +904,7 @@ fn read_vault(sync: &Value, scope: &Scope, scope_key: &SymKey) -> Result<Vault> 
                     name: scope_key
                         .decrypt_str(&required_str(&collection, "name", "collection")?)
                         .context("decrypting a collection name")?,
-                    external_id: collection
-                        .get("externalId")
-                        .and_then(Value::as_str)
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_string),
+                    external_id: optional_str(&collection, "externalId")?,
                 });
             }
         }
@@ -918,7 +915,7 @@ fn read_vault(sync: &Value, scope: &Scope, scope_key: &SymKey) -> Result<Vault> 
             if *scope == Scope::Personal {
                 vault
                     .folders_used_elsewhere
-                    .extend(optional_str(&cipher, "folderId"));
+                    .extend(optional_str(&cipher, "folderId")?);
             }
             continue;
         }
@@ -999,7 +996,7 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
             bail!("the item's {list} holds an entry that is not an object");
         }
     }
-    let wrapped_key = optional_str(cipher, "key");
+    let wrapped_key = optional_str(cipher, "key")?;
     let own_key = wrapped_key
         .as_deref()
         .map(|wrapped| scope_key.unwrap_key(wrapped))
@@ -1034,7 +1031,7 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
                 .decrypt_str(&required_str(attachment, "fileName", "attachment")?)
                 .context("decrypting an attachment name")?,
             size: size.ok_or_else(|| anyhow!("attachment has no valid size"))?,
-            wrapped_key: optional_str(attachment, "key"),
+            wrapped_key: optional_str(attachment, "key")?,
         });
     }
 
@@ -1047,15 +1044,16 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
         })
         .collect::<Result<_>>()?;
 
+    let archived_date = optional_str(cipher, "archivedDate")?;
     Ok(Item {
         id: required_str(cipher, "id", "item")?,
-        folder_id: optional_str(cipher, "folderId"),
+        folder_id: optional_str(cipher, "folderId")?,
         collection_ids,
-        revision_date: optional_str(cipher, "revisionDate"),
-        creation_date: optional_str(cipher, "creationDate"),
-        in_trash: optional_str(cipher, "deletedDate").is_some(),
-        archived: optional_str(cipher, "archivedDate").is_some(),
-        archived_date: optional_str(cipher, "archivedDate"),
+        revision_date: optional_str(cipher, "revisionDate")?,
+        creation_date: optional_str(cipher, "creationDate")?,
+        in_trash: optional_str(cipher, "deletedDate")?.is_some(),
+        archived: archived_date.is_some(),
+        archived_date,
         content,
         attachments,
         wrapped_key,
@@ -1378,6 +1376,113 @@ mod tests {
             ],
             "passwordHistory": [{"password": enc("old"), "lastUsedDate": "2025-01-02T03:04:05.000Z"}],
         })
+    }
+
+    #[test]
+    fn malformed_optional_metadata_stops_the_vault_read() {
+        let key = SymKey::generate();
+        for name in [
+            "folderId",
+            "archivedDate",
+            "deletedDate",
+            "revisionDate",
+            "creationDate",
+            "key",
+        ] {
+            for value in [
+                json!(7),
+                json!(false),
+                json!({"secret": "synthetic-metadata"}),
+                json!(["synthetic-metadata"]),
+            ] {
+                let mut cipher = full_cipher(&key);
+                cipher[name] = value;
+                let sync = json!({"folders": [], "ciphers": [cipher]});
+                let Err(error) = read_vault(&sync, &Scope::Personal, &key) else {
+                    panic!("malformed {name} was treated as absent");
+                };
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains(name),
+                    "the invalid field was not identified"
+                );
+                assert!(
+                    !message.contains("synthetic-metadata"),
+                    "metadata was exposed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn optional_metadata_preserves_supported_absent_forms() {
+        let key = SymKey::generate();
+        for value in [None, Some(Value::Null), Some(json!(""))] {
+            let mut cipher = full_cipher(&key);
+            for name in [
+                "folderId",
+                "archivedDate",
+                "deletedDate",
+                "revisionDate",
+                "creationDate",
+                "key",
+            ] {
+                match &value {
+                    Some(value) => {
+                        cipher[name] = value.clone();
+                    }
+                    None => {
+                        cipher.as_object_mut().unwrap().remove(name);
+                    }
+                }
+            }
+            let item = decrypt_item(&cipher, &key).unwrap();
+            assert!(item.folder_id.is_none());
+            assert!(item.revision_date.is_none());
+            assert!(item.creation_date.is_none());
+            assert!(item.wrapped_key.is_none());
+            assert!(!item.in_trash && !item.archived);
+        }
+    }
+
+    #[test]
+    fn malformed_attachment_and_collection_metadata_is_not_discarded() {
+        let key = SymKey::generate();
+        let mut cipher = full_cipher(&key);
+        cipher["attachments"] = json!([{
+            "id": "attachment-1",
+            "fileName": key.encrypt_str("synthetic.txt").unwrap(),
+            "size": 1,
+            "key": {"secret": "synthetic-metadata"},
+        }]);
+        let personal = json!({"folders": [], "ciphers": [cipher]});
+        let organization = json!({"collections": [{
+            "id": "collection-1",
+            "organizationId": "org-1",
+            "name": key.encrypt_str("synthetic collection").unwrap(),
+            "externalId": ["synthetic-metadata"],
+        }], "ciphers": []});
+        for (sync, scope, name) in [
+            (personal, Scope::Personal, "key"),
+            (
+                organization,
+                Scope::Organization("org-1".into()),
+                "externalId",
+            ),
+        ] {
+            let Err(error) = read_vault(&sync, &scope, &key) else {
+                panic!("malformed {name} was discarded");
+            };
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(name),
+                "the invalid field was not identified"
+            );
+            assert!(
+                !message.contains("synthetic-metadata"),
+                "metadata was exposed"
+            );
+        }
     }
 
     #[test]
