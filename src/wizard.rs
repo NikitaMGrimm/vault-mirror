@@ -419,20 +419,23 @@ mod tests {
     fn the_compose_file_lets_a_run_finish_on_stop() {
         let dir = tempfile::tempdir().unwrap();
         let compose = compose_file(dir.path()).unwrap();
-        assert!(compose.contains("\n    command: daemon\n"), "{compose}");
+        assert!(
+            compose.contains("\n    command: daemon\n"),
+            "missing daemon command"
+        );
         assert!(
             compose.contains(
                 "    entrypoint: [\"/vault-mirror\", \"--env-file\", \"/run/vault-mirror.env\"]\n"
             ),
-            "{compose}"
+            "missing validation entrypoint"
         );
         assert!(
             compose.contains("      - ./vault-mirror.env:/run/vault-mirror.env:ro\n"),
-            "{compose}"
+            "missing read-only settings mount"
         );
         assert!(
             compose.contains("\n    stop_grace_period: 5m\n"),
-            "{compose}"
+            "missing stop grace period"
         );
     }
 
