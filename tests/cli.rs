@@ -236,7 +236,8 @@ fn recovery_readers_share_the_lock_and_exclude_runs() {
     assert!(printed.contains("another vault-mirror run"), "{printed}");
     assert!(!dir.path().join("last-run.json").exists());
     drop(reader);
-    let _writer = app::lock_backups_dir(dir.path(), BackupAccess::Write).unwrap();
+    let writer = app::lock_backups_dir(dir.path(), BackupAccess::Write).unwrap();
+    drop(writer);
     assert_eq!(
         fs::read(dir.path().join("run.lock")).unwrap(),
         b"retained lock"
