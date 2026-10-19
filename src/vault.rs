@@ -198,6 +198,22 @@ pub struct Vault {
     pub folders_used_elsewhere: BTreeSet<String>,
 }
 
+/// A vault read with matching item visibility observations before and after it.
+pub struct VaultRead {
+    vault: Vault,
+    traits: ServerTraits,
+}
+
+impl VaultRead {
+    pub fn vault(&self) -> &Vault {
+        &self.vault
+    }
+
+    pub fn traits(&self) -> &ServerTraits {
+        &self.traits
+    }
+}
+
 struct Keys {
     user: SymKey,
     organizations: HashMap<String, SymKey>,
@@ -320,6 +336,26 @@ impl Account {
                 .await?;
         }
         read_vault(&sync, scope, scope_key)
+    }
+
+    /// Reads a vault for backup or planning, retaining its visibility evidence.
+    pub async fn load_with_traits(&self, scope: &Scope) -> Result<VaultRead> {
+        let traits = self
+            .server_traits()
+            .await
+            .context("reading the server's settings before the vault")?;
+        let vault = self.load(scope).await?;
+        let after = self
+            .server_traits()
+            .await
+            .context("reading the server's settings after the vault")?;
+        if traits.hidden_item_types != after.hidden_item_types {
+            bail!(
+                "the server's item visibility changed while reading the vault. Run again \
+                 when its settings are stable"
+            );
+        }
+        Ok(VaultRead { vault, traits })
     }
 
     pub async fn create_folder(&self, name: &str) -> Result<Folder> {
@@ -518,8 +554,8 @@ impl Account {
         decrypt_item(&cipher, scope_key).context("reading the item")
     }
 
-    /// Replaces the content of `existing`. Fails if the item changed on the
-    /// server since it was loaded.
+    /// Replaces the content of `existing`, sending its last known revision.
+    /// The server's revision check does not catch every intervening edit.
     pub async fn update_item(&self, scope: &Scope, existing: &Item, draft: &Draft) -> Result<Item> {
         let scope_key = self.scope_key(scope)?;
         let item_key = self.item_key(scope, existing)?;
@@ -1097,8 +1133,49 @@ fn server_traits(config: &Value) -> ServerTraits {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) async fn account(url: &str, user: SymKey) -> Account {
+        let http = api::build_http_client(&api::ClientOptions::default()).unwrap();
+        let session = Session::login(
+            http,
+            ServerUrls::from_server(url).unwrap(),
+            ApiCredentials {
+                client_id: "user.synthetic".into(),
+                client_secret: "synthetic secret".into(),
+                device_id: "synthetic device".into(),
+            },
+        )
+        .await
+        .unwrap();
+        Account {
+            session,
+            keys: Keys {
+                user,
+                organizations: HashMap::new(),
+            },
+            memberships: Memberships::new(),
+            user_id: "synthetic".into(),
+            premium: true,
+        }
+    }
+
+    impl Account {
+        pub(crate) fn test_sync(&self, items: &[Item]) -> Value {
+            let ciphers: Vec<_> = items
+                .iter()
+                .map(|item| {
+                    let mut cipher = Node::Map(item.content.clone())
+                        .encrypt(&self.keys.user)
+                        .unwrap();
+                    cipher["id"] = json!(item.id);
+                    cipher
+                })
+                .collect();
+            json!({"ciphers": ciphers, "folders": [], "collections": []})
+        }
+    }
 
     #[test]
     fn a_sync_response_without_a_list_is_an_error_not_an_empty_vault() {

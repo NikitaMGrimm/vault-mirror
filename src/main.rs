@@ -359,11 +359,11 @@ async fn check_config(config: &Config, flags: RunFlags, report_logins: bool) -> 
         account: &source,
         scope: app::scope_of(&config.source),
     };
-    let source_vault = source.account.load(&source.scope).await?;
+    let source_read = source.account.load_with_traits(&source.scope).await?;
     if report_logins {
         Console::status(
             "Logged in",
-            &format!("to the source: {}", describe_vault(&source_vault)),
+            &format!("to the source: {}", describe_vault(source_read.vault())),
         );
     }
     let Some(dest_config) = &config.dest else {
@@ -388,7 +388,7 @@ async fn check_config(config: &Config, flags: RunFlags, report_logins: bool) -> 
     let outcome = mirror::check(
         &source,
         &dest,
-        &source_vault,
+        &source_read,
         &dest_vault,
         &options,
         &FolderReceipts::new(&config.backups_dir),

@@ -53,7 +53,10 @@ still include the attachments.
 **Bank accounts, driver's licences and passports.** Bitwarden only shows these
 item types where it has turned them on. Until it does on the destination's
 server, a run stops while the source has any. Vaultwarden always shows them. If
-the source stops showing them, the run stops rather than delete their copies.
+the source reports them hidden when its vault is read, the run stops rather
+than delete their copies. If the server reports different visibility before
+and after the read, the run stops before saving or pruning that vault's
+snapshots.
 
 **Organization items need a collection on Bitwarden.** When the destination is
 a Bitwarden server, a run stops while source items are in no collection.
@@ -70,6 +73,10 @@ for ongoing organization mirroring.
 the destination refuses to archive a copy.
 
 ## Changes during a run
+
+Source visibility checks are separate requests from the vault read. A setting
+can turn off and back on between the checks without being detected. The checks
+cannot guarantee that the source showed every item during that interval.
 
 A run plans from the reads its backups saved. A change made in the destination
 after that, to a copy the run then writes, can be lost without a backup. Before

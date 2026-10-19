@@ -1172,7 +1172,7 @@ async fn attachments_are_copied_from_the_source_backup() -> Result<()> {
         .await?;
     let source_read = protect(&source, &PERSONAL).await?;
     let dest_read = protect(&dest, &PERSONAL).await?;
-    let item = by_name(&source_read.vault, "Extra note 0");
+    let item = by_name(source_read.read.vault(), "Extra note 0");
     source
         .delete_attachment(&item.id, &item.attachments[0].id)
         .await?;
@@ -1215,7 +1215,7 @@ async fn a_copy_edited_after_the_backup_is_not_deleted() -> Result<()> {
 
     let source_read = protect(&source, &PERSONAL).await?;
     let dest_read = protect(&dest, &PERSONAL).await?;
-    let copy = by_name(&dest_read.vault, "Identity");
+    let copy = by_name(dest_read.read.vault(), "Identity");
     let mut edited = Draft {
         content: copy.content.clone(),
         folder_id: copy.folder_id.clone(),
