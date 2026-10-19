@@ -419,6 +419,16 @@ mod tests {
         let compose = compose_file(dir.path()).unwrap();
         assert!(compose.contains("\n    command: daemon\n"), "{compose}");
         assert!(
+            compose.contains(
+                "    entrypoint: [\"/vault-mirror\", \"--env-file\", \"/run/vault-mirror.env\"]\n"
+            ),
+            "{compose}"
+        );
+        assert!(
+            compose.contains("      - ./vault-mirror.env:/run/vault-mirror.env:ro\n"),
+            "{compose}"
+        );
+        assert!(
             compose.contains("\n    stop_grace_period: 5m\n"),
             "{compose}"
         );
