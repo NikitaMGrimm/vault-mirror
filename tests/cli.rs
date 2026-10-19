@@ -31,6 +31,7 @@ fn snapshots_need_only_the_backup_directory() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("No snapshots"));
+    assert!(dir.path().join("run.lock").is_file());
     assert!(!dir.path().join("key.age").exists());
 }
 
@@ -80,7 +81,7 @@ fn an_export_needs_only_the_backup_passphrase() {
         serde_json::from_slice(&fs::read(output_dir.join("export.json")).unwrap()).unwrap();
     assert_eq!(exported["items"][0]["notes"], "synthetic note");
     assert_eq!(
-        fs::read(output_dir.join("attachments/attachment-id/recovered.txt")).unwrap(),
+        fs::read(output_dir.join("attachments/attachment-id/attachment")).unwrap(),
         b"synthetic attachment bytes"
     );
 
@@ -94,6 +95,302 @@ fn an_export_needs_only_the_backup_passphrase() {
     let output = command(&damaged_output).output().unwrap();
     assert!(!output.status.success());
     assert!(!damaged_output.exists());
+}
+
+fn recovery_backup(backups: &std::path::Path, names: &[String]) -> serde_json::Value {
+    use serde_json::json;
+    use vault_mirror::store::{Keys, Store};
+
+    let keys = Keys::open(backups, "synthetic passphrase").unwrap();
+    let store = Store::new(backups, "source", &keys);
+    let writer = store.begin(time::OffsetDateTime::now_utc()).unwrap();
+    let attachments: Vec<_> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let id = format!("attachment-{index}");
+            writer
+                .write_attachment(&id, format!("synthetic bytes {index}").as_bytes())
+                .unwrap();
+            json!({"itemId":"item-id","attachmentId":id,"fileName":name})
+        })
+        .collect();
+    let document = json!({
+        "encrypted": false,
+        "folders": [],
+        "items": [{"id":"item-id","type":2,"name":"synthetic item","notes":"synthetic note"}],
+        "vaultMirror": {"scope":"personal","plainStrings":{},"attachments":attachments},
+    });
+    writer.finish(&document).unwrap();
+    document
+}
+
+fn export_backup(backups: &std::path::Path, output: &std::path::Path) -> std::process::Output {
+    vault_mirror()
+        .env("BACKUPS_DIR", backups)
+        .env("BACKUP_PASSPHRASE", "synthetic passphrase")
+        .args(["export", "--output"])
+        .arg(output)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn attachment_exports_use_fixed_paths_and_preserve_original_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let names: Vec<String> = [
+        "report<>:\"|?*.txt",
+        "CON",
+        "COM1.txt",
+        "LPT¹.txt",
+        "control\0\u{1f}.txt",
+        "trailing.",
+        "trailing ",
+        "../outside.txt",
+        "..\\outside.txt",
+        ".",
+        "..",
+        "duplicate.txt",
+        "duplicate.txt",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .chain(["long".repeat(100)])
+    .collect();
+    let original = recovery_backup(dir.path(), &names);
+    let output_dir = dir.path().join("recovered");
+    let output = export_backup(dir.path(), &output_dir);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exported: serde_json::Value =
+        serde_json::from_slice(&fs::read(output_dir.join("export.json")).unwrap()).unwrap();
+    assert_eq!(exported, original);
+    assert_eq!(
+        fs::read_dir(output_dir.join("attachments"))
+            .unwrap()
+            .count(),
+        names.len()
+    );
+    for index in 0..names.len() {
+        let directory = output_dir.join(format!("attachments/attachment-{index}"));
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(directory.join("attachment")).unwrap(),
+            format!("synthetic bytes {index}").as_bytes()
+        );
+    }
+    assert!(!dir.path().join("outside.txt").exists());
+    assert!(!output_dir.join("outside.txt").exists());
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!printed.contains("synthetic item"), "{printed}");
+    assert!(!printed.contains("synthetic note"), "{printed}");
+    assert!(!printed.contains("synthetic bytes"), "{printed}");
+}
+
+#[test]
+fn recovery_readers_share_the_lock_and_exclude_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    recovery_backup(dir.path(), &["original.txt".into()]);
+    fs::write(dir.path().join("run.lock"), b"retained lock").unwrap();
+    let reader = fs::File::open(dir.path().join("run.lock")).unwrap();
+    reader.try_lock_shared().unwrap();
+
+    let listed = vault_mirror()
+        .env("BACKUPS_DIR", dir.path())
+        .arg("snapshots")
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let exported = export_backup(dir.path(), &dir.path().join("recovered"));
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+
+    let settings = unreachable_settings(dir.path(), "");
+    let run = vault_mirror()
+        .arg("--env-file")
+        .arg(settings)
+        .arg("run")
+        .output()
+        .unwrap();
+    assert!(!run.status.success());
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("another vault-mirror run"),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(!dir.path().join("last-run.json").exists());
+    drop(reader);
+    assert_eq!(
+        fs::read(dir.path().join("run.lock")).unwrap(),
+        b"retained lock"
+    );
+}
+
+#[test]
+fn snapshots_refuse_an_active_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = vault_mirror::app::lock_backups_dir(dir.path()).unwrap();
+    let output = vault_mirror()
+        .env("BACKUPS_DIR", dir.path())
+        .arg("snapshots")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("another vault-mirror run"));
+    drop(writer);
+}
+
+#[cfg(unix)]
+fn permission_tests_available() -> bool {
+    let uid = Command::new("id").arg("-u").output().unwrap();
+    assert!(uid.status.success());
+    if String::from_utf8_lossy(&uid.stdout).trim() == "0" {
+        eprintln!("skipping Unix permission test: root bypasses file permissions");
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+struct RestorePermissions(Vec<(std::path::PathBuf, fs::Permissions)>);
+
+#[cfg(unix)]
+impl RestorePermissions {
+    fn read_only(path: &std::path::Path, lock: bool) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut restore = Self(vec![(
+            path.to_path_buf(),
+            fs::metadata(path).unwrap().permissions(),
+        )]);
+        if lock {
+            let file = path.join("run.lock");
+            restore
+                .0
+                .push((file.clone(), fs::metadata(&file).unwrap().permissions()));
+            fs::set_permissions(file, fs::Permissions::from_mode(0o400)).unwrap();
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o500)).unwrap();
+        restore
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RestorePermissions {
+    fn drop(&mut self) {
+        for (path, permissions) in &self.0 {
+            fs::set_permissions(path, permissions.clone()).unwrap();
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_reads_an_existing_lock_without_changing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !permission_tests_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let backups = dir.path().join("backups");
+    let original = recovery_backup(&backups, &["original.txt".into()]);
+    fs::write(backups.join("run.lock"), b"retained lock").unwrap();
+    let _restore = RestorePermissions::read_only(&backups, true);
+    let listed = vault_mirror()
+        .env("BACKUPS_DIR", &backups)
+        .arg("snapshots")
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let recovered = dir.path().join("recovered");
+    let exported = export_backup(&backups, &recovered);
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(recovered.join("export.json")).unwrap()
+        )
+        .unwrap(),
+        original
+    );
+    assert_eq!(
+        fs::read(recovered.join("attachments/attachment-0/attachment")).unwrap(),
+        b"synthetic bytes 0"
+    );
+    assert_eq!(
+        fs::metadata(&backups).unwrap().permissions().mode() & 0o777,
+        0o500
+    );
+    assert_eq!(
+        fs::metadata(backups.join("run.lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o400
+    );
+    assert_eq!(
+        fs::read(backups.join("run.lock")).unwrap(),
+        b"retained lock"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_refuses_a_missing_lock_in_a_read_only_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !permission_tests_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let backups = dir.path().join("backups");
+    recovery_backup(&backups, &["original.txt".into()]);
+    let _restore = RestorePermissions::read_only(&backups, false);
+    let listed = vault_mirror()
+        .env("BACKUPS_DIR", &backups)
+        .arg("snapshots")
+        .output()
+        .unwrap();
+    let recovered = dir.path().join("recovered");
+    let exported = export_backup(&backups, &recovered);
+    for output in [listed, exported] {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        assert!(stderr.contains("run.lock"), "{stderr}");
+        assert!(
+            stderr.contains("copy") && stderr.contains("writable") && stderr.contains("retain"),
+            "{stderr}"
+        );
+    }
+    assert!(!backups.join("run.lock").exists());
+    assert!(!recovered.exists());
+    assert_eq!(
+        fs::metadata(&backups).unwrap().permissions().mode() & 0o777,
+        0o500
+    );
 }
 
 #[test]
