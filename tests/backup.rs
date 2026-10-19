@@ -143,7 +143,7 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
     );
     // The run's read is in the newest snapshot all the same.
     let (newest, _) = latest(&store)?;
-    assert_eq!(newest.items().len(), read.vault.items.len());
+    assert_eq!(newest.items().len(), read.read.vault().items.len());
 
     let vault = source.load(&PERSONAL).await?;
     source

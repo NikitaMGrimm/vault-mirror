@@ -299,7 +299,7 @@ async fn a_folder_filled_after_the_backup_stays() -> Result<()> {
 
     let source_read = protect(&source, &PERSONAL).await?;
     let dest_read = protect(&dest, &PERSONAL).await?;
-    own_item(&dest, &folder_id(&dest_read.vault, "Empty")).await?;
+    own_item(&dest, &folder_id(dest_read.read.vault(), "Empty")).await?;
     let outcome = run_protected(
         &source,
         PERSONAL,
@@ -335,7 +335,7 @@ async fn failed_and_refused_runs_keep_the_record_and_the_folders() -> Result<()>
     // it created the folder.
     let source_read = protect(&source, &PERSONAL).await?;
     let dest_read = protect(&dest, &PERSONAL).await?;
-    let copy = by_name(&dest_read.vault, "Identity");
+    let copy = by_name(dest_read.read.vault(), "Identity");
     let mut edited = Draft {
         content: copy.content.clone(),
         folder_id: copy.folder_id.clone(),

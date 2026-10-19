@@ -198,6 +198,22 @@ pub struct Vault {
     pub folders_used_elsewhere: BTreeSet<String>,
 }
 
+/// A vault read with matching item visibility observations before and after it.
+pub struct VaultRead {
+    vault: Vault,
+    traits: ServerTraits,
+}
+
+impl VaultRead {
+    pub fn vault(&self) -> &Vault {
+        &self.vault
+    }
+
+    pub fn traits(&self) -> &ServerTraits {
+        &self.traits
+    }
+}
+
 struct Keys {
     user: SymKey,
     organizations: HashMap<String, SymKey>,
@@ -320,6 +336,26 @@ impl Account {
                 .await?;
         }
         read_vault(&sync, scope, scope_key)
+    }
+
+    /// Reads a vault for backup or planning, retaining its visibility evidence.
+    pub async fn load_with_traits(&self, scope: &Scope) -> Result<VaultRead> {
+        let traits = self
+            .server_traits()
+            .await
+            .context("reading the server's settings before the vault")?;
+        let vault = self.load(scope).await?;
+        let after = self
+            .server_traits()
+            .await
+            .context("reading the server's settings after the vault")?;
+        if traits.hidden_item_types != after.hidden_item_types {
+            bail!(
+                "the server's item visibility changed while reading the vault. Run again \
+                 when its settings are stable"
+            );
+        }
+        Ok(VaultRead { vault, traits })
     }
 
     pub async fn create_folder(&self, name: &str) -> Result<Folder> {
@@ -518,8 +554,8 @@ impl Account {
         decrypt_item(&cipher, scope_key).context("reading the item")
     }
 
-    /// Replaces the content of `existing`. Fails if the item changed on the
-    /// server since it was loaded.
+    /// Replaces the content of `existing`, sending its last known revision.
+    /// The server's revision check does not catch every intervening edit.
     pub async fn update_item(&self, scope: &Scope, existing: &Item, draft: &Draft) -> Result<Item> {
         let scope_key = self.scope_key(scope)?;
         let item_key = self.item_key(scope, existing)?;

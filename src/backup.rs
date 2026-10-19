@@ -38,9 +38,13 @@ pub async fn backup<'k>(
     options: &BackupOptions,
     reporter: &dyn Reporter,
 ) -> Result<(BackupReport, Protected<'k>)> {
-    let vault = account.load(scope).await.context("reading the vault")?;
+    let read = account
+        .load_with_traits(scope)
+        .await
+        .context("reading the vault")?;
+    let vault = read.vault();
     let live: Vec<_> = vault.items.iter().filter(|item| !item.in_trash).collect();
-    let document = snapshot::build(&vault, scope)?;
+    let document = snapshot::build(vault, scope)?;
     let mut report = BackupReport {
         items: live.len(),
         ..BackupReport::default()
@@ -96,5 +100,5 @@ pub async fn backup<'k>(
         reporter.status("Pruned", &count(report.snapshots_pruned, "snapshot"));
     }
     let snapshot = store.snapshot(&id);
-    Ok((report, Protected { vault, snapshot }))
+    Ok((report, Protected { read, snapshot }))
 }

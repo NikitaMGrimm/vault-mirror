@@ -17,7 +17,7 @@ use crate::{
     },
     store::{FolderReceipts, Receipts, Snapshot},
     text::{count, listed},
-    vault::{Account, Item, Scope, ServerTraits, Vault, WRITES_AT_ONCE},
+    vault::{Account, Item, Scope, ServerTraits, Vault, VaultRead, WRITES_AT_ONCE},
 };
 
 /// Receives progress lines. Messages never contain vault content, only
@@ -151,7 +151,7 @@ pub struct Endpoint<'a> {
 /// that read. A run plans from it and copies attachment files out of it, so
 /// it changes and copies only what a backup holds.
 pub struct Protected<'a> {
-    pub vault: Vault,
+    pub read: VaultRead,
     pub snapshot: Snapshot<'a>,
 }
 
@@ -187,8 +187,8 @@ pub async fn mirror(
     let mut run = Run::new(source, dest, options, folders, reporter);
     let result = run
         .execute(
-            &source_read.vault,
-            &dest_read.vault,
+            &source_read.read,
+            dest_read.read.vault(),
             Some(&source_read.snapshot),
         )
         .await;
@@ -200,14 +200,14 @@ pub async fn mirror(
 pub async fn check(
     source: &Endpoint<'_>,
     dest: &Endpoint<'_>,
-    source_vault: &Vault,
+    source_read: &VaultRead,
     dest_vault: &Vault,
     options: &MirrorOptions,
     folders: &FolderReceipts,
     reporter: &dyn Reporter,
 ) -> Result<Outcome, MirrorError> {
     let mut run = Run::new(source, dest, options, folders, reporter);
-    let result = run.execute(source_vault, dest_vault, None).await;
+    let result = run.execute(source_read, dest_vault, None).await;
     run.finish(result)
 }
 
@@ -549,24 +549,21 @@ impl<'a> Run<'a> {
     /// whether the destination changed.
     async fn execute(
         &mut self,
-        source_vault: &Vault,
+        source_read: &VaultRead,
         dest_vault: &Vault,
         source_files: Option<&Snapshot<'_>>,
     ) -> Result<bool> {
         let mode = mode(&self.source.scope, &self.dest.scope)?;
+        let source_vault = source_read.vault();
         ensure_distinct(self.source, self.dest, source_vault, dest_vault)?;
         let mut source_vault = source_vault.clone();
         self.filter(&mut source_vault, mode)?;
-        let (traits, source_traits) = tokio::try_join!(
-            async {
-                (self.dest.account.server_traits().await)
-                    .context("reading the destination server's settings")
-            },
-            async {
-                (self.source.account.server_traits().await)
-                    .context("reading the source server's settings")
-            },
-        )?;
+        let traits = self
+            .dest
+            .account
+            .server_traits()
+            .await
+            .context("reading the destination server's settings")?;
         if self.options.skip_attachments {
             self.warn(
                 "SKIP_ATTACHMENTS is on. Retained copies keep their attachments and new copies \
@@ -583,7 +580,7 @@ impl<'a> Run<'a> {
             &pair,
             self.options.skip_attachments,
         );
-        check_source_shows(&plan, dest_vault, &source_traits)?;
+        check_source_shows(&plan, dest_vault, source_read.traits())?;
         check_dest_holds(
             &source_vault,
             &plan,
@@ -1548,7 +1545,7 @@ mod tests {
                 check(
                     &endpoint(source),
                     &endpoint(dest),
-                    &source_read.vault,
+                    &source_read.read,
                     &dest_vault,
                     &options,
                     &folders,
@@ -1612,12 +1609,12 @@ mod tests {
                 let server = Server::start(&shown);
                 let (source, dest) = server.accounts().await;
                 let result = async {
-                    let source_vault = source.load(&Scope::Personal).await?;
+                    let source_read = source.load_with_traits(&Scope::Personal).await?;
                     let dest_vault = dest.load(&Scope::Personal).await?;
                     check(
                         &endpoint(&source),
                         &endpoint(&dest),
-                        &source_vault,
+                        &source_read,
                         &dest_vault,
                         &MirrorOptions::default(),
                         &FolderReceipts::new(BACKUPS.0.path()),
