@@ -873,6 +873,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn rejected_server_urls_do_not_expose_secrets_in_diagnostics() {
+        let secret = "synthetic-url-secret";
+        for (server, reason) in [
+            (
+                format!("ftp://127.0.0.1/?token={secret}"),
+                "expected an http or https URL",
+            ),
+            (
+                format!("127.0.0.1/?token={secret}"),
+                "relative URL without a base",
+            ),
+            (
+                format!("http://{secret}:{secret}@127.0.0.1:invalid/"),
+                "invalid port number",
+            ),
+        ] {
+            let error = ServerUrls::from_server(&server).unwrap_err();
+            for diagnostic in [error.to_string(), format!("{error:?}")] {
+                assert!(!diagnostic.contains(secret), "a URL secret was exposed");
+                assert!(
+                    !diagnostic.contains(&server),
+                    "the rejected URL was exposed"
+                );
+                assert!(diagnostic.contains(reason), "the parse reason was lost");
+            }
+            // Do not print the error on failure: it may contain the secret.
+            assert!(error.to_string() == format!("invalid server URL: {reason}"));
+        }
+    }
+
+    #[test]
     fn error_messages_are_reduced_to_the_server_message() {
         assert_eq!(
             error_message(r#"{"message":"Invalid  item","x":"secret"}"#, &[]),
