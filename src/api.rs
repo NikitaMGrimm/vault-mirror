@@ -46,8 +46,8 @@ pub enum ApiError {
     },
     #[error("{context}: unexpected response: {detail}")]
     Unexpected { context: String, detail: String },
-    #[error("invalid server URL {url:?}: {detail}")]
-    InvalidUrl { url: String, detail: String },
+    #[error("invalid server URL: {detail}")]
+    InvalidUrl { detail: String },
 }
 
 impl ApiError {
@@ -148,7 +148,6 @@ impl ServerUrls {
     /// the address of the Bitwarden cloud web vault.
     pub fn from_server(server: &str) -> Result<Self> {
         let invalid = |detail: &str| ApiError::InvalidUrl {
-            url: server.to_string(),
             detail: detail.to_string(),
         };
         let trimmed = server.trim().trim_end_matches('/');
