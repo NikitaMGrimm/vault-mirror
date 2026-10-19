@@ -447,6 +447,76 @@ mod tests {
     }
 
     #[test]
+    fn server_list_order_does_not_change_a_snapshot() {
+        let mut vault = vault();
+        vault.folders.push(Folder {
+            id: "folder-2".into(),
+            name: "Other".into(),
+            stamp: None,
+        });
+        vault.collections = vec![
+            Collection {
+                id: "collection-1".into(),
+                name: "Work".into(),
+                external_id: None,
+            },
+            Collection {
+                id: "collection-2".into(),
+                name: "Other".into(),
+                external_id: None,
+            },
+        ];
+        vault.items[0].collection_ids = vec!["collection-2".into(), "collection-1".into()];
+        vault.items[0].attachments.push(Attachment {
+            id: "att-3".into(),
+            file_name: "b.txt".into(),
+            size: 5,
+            wrapped_key: None,
+        });
+        let mut second = item("item-2", "Other");
+        second.attachments[0].id = "att-4".into();
+        vault.items.push(second);
+        for scope in [Scope::Personal, Scope::Organization("org-1".into())] {
+            let expected = build(&vault, &scope).unwrap();
+            let mut reordered = vault.clone();
+            reordered.folders.reverse();
+            reordered.collections.reverse();
+            reordered.items.reverse();
+            for item in &mut reordered.items {
+                item.attachments.reverse();
+                item.collection_ids.reverse();
+            }
+            assert_eq!(build(&reordered, &scope).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn meaningful_item_list_order_is_preserved_in_snapshots() {
+        let mut vault = vault();
+        vault.items[0].content.insert(
+            "passwordHistory".into(),
+            Node::List(vec![
+                Node::Map(BTreeMap::from([("password".into(), Node::secret("first"))])),
+                Node::Map(BTreeMap::from([(
+                    "password".into(),
+                    Node::secret("second"),
+                )])),
+            ]),
+        );
+        let expected = build(&vault, &Scope::Personal).unwrap();
+        for name in ["fields", "passwordHistory"] {
+            let mut reordered = vault.clone();
+            let Some(Node::List(list)) = reordered.items[0].content.get_mut(name) else {
+                unreachable!()
+            };
+            list.reverse();
+            assert_ne!(build(&reordered, &Scope::Personal).unwrap(), expected);
+        }
+        vault.items[0].revision_date = Some("2026-02-01T00:00:00Z".into());
+        assert_ne!(build(&vault, &Scope::Personal).unwrap(), expected);
+    }
+
+    #[test]
     fn the_document_is_a_bitwarden_export() {
         let document = build(&vault(), &Scope::Personal).unwrap();
         assert_eq!(document["encrypted"], json!(false));
