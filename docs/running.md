@@ -17,9 +17,10 @@
 Every command takes `--env-file PATH` to read a [settings
 file](configuration.md#the-settings-file), and `--help` to describe its options.
 
-Outside a terminal, such as in container logs or under systemd, progress and
-error messages start with a UTC timestamp and a level. Snapshot ids and
-health-check output stay plain. Set `NO_COLOR` to turn colours off.
+Outside a terminal, such as in container logs or under systemd, run progress
+and run-failure messages start with a UTC timestamp and a level. Snapshot ids,
+health-check output, and top-level command errors stay plain. Set `NO_COLOR`
+to turn colours off.
 
 ## Scheduling
 
