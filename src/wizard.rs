@@ -306,13 +306,15 @@ fn compose_file(dir: &Path) -> Result<String> {
         "services:\n  \
            vault-mirror:\n    \
              image: ghcr.io/nikitamgrimm/vault-mirror:{tag}\n    \
+             entrypoint: [\"/vault-mirror\", \"--env-file\", \"/run/vault-mirror.env\"]\n    \
              command: daemon\n\
          {user}    \
              env_file:\n      \
                - path: {ENV_FILE}\n        \
                  format: raw\n    \
              volumes:\n      \
-               - ./backups:/data\n    \
+               - ./backups:/data\n      \
+               - ./vault-mirror.env:/run/vault-mirror.env:ro\n    \
              restart: unless-stopped\n    \
              # Gives a run in progress up to 5 minutes to finish when the container stops.\n    \
              stop_grace_period: 5m\n"
@@ -417,10 +419,23 @@ mod tests {
     fn the_compose_file_lets_a_run_finish_on_stop() {
         let dir = tempfile::tempdir().unwrap();
         let compose = compose_file(dir.path()).unwrap();
-        assert!(compose.contains("\n    command: daemon\n"), "{compose}");
+        assert!(
+            compose.contains("\n    command: daemon\n"),
+            "missing daemon command"
+        );
+        assert!(
+            compose.contains(
+                "    entrypoint: [\"/vault-mirror\", \"--env-file\", \"/run/vault-mirror.env\"]\n"
+            ),
+            "missing validation entrypoint"
+        );
+        assert!(
+            compose.contains("      - ./vault-mirror.env:/run/vault-mirror.env:ro\n"),
+            "missing read-only settings mount"
+        );
         assert!(
             compose.contains("\n    stop_grace_period: 5m\n"),
-            "{compose}"
+            "missing stop grace period"
         );
     }
 

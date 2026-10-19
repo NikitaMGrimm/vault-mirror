@@ -8,9 +8,11 @@ see [Setting up by hand](#setting-up-by-hand).
 
 ## The settings file
 
-Each line is `NAME=value`. Lines starting with `#` are comments. A name that
-isn't one of the [variables](#variables) below stops every command, so a
-misspelt setting can't go unnoticed.
+Each line is `NAME=value`. Lines starting with `#` are comments. When the
+binary reads the file with `--env-file`, a name outside the
+[variables](#variables) below stops the command. The generated Compose file
+uses this check too. Unknown names passed only through the environment, such
+as with `docker run --env-file`, are ignored.
 
 Values are taken literally, without quote or `$VARIABLES` expansion. Quotes,
 spaces, and dollar signs stay part of the value:
@@ -23,7 +25,7 @@ How each tool reads it:
 
 | Program | How to use the settings file |
 | --- | --- |
-| Docker Compose | `env_file` with `format: raw` (as `init` writes it) |
+| Docker Compose | Raw `env_file`, a read-only file mount, and `--env-file` in the entrypoint (as `init` writes them) |
 | `docker run` | `--env-file vault-mirror.env` |
 | vault-mirror binary | `vault-mirror --env-file vault-mirror.env <command>` |
 
@@ -97,7 +99,8 @@ Instead of `init`:
    cat > compose.yaml <<EOF
    services:
      vault-mirror:
-       image: ghcr.io/nikitamgrimm/vault-mirror
+       image: ghcr.io/nikitamgrimm/vault-mirror:0.8
+       entrypoint: ["/vault-mirror", "--env-file", "/run/vault-mirror.env"]
        command: daemon
        user: "$(id -u):$(id -g)"
        env_file:
@@ -105,6 +108,7 @@ Instead of `init`:
            format: raw
        volumes:
          - ./backups:/data
+         - ./vault-mirror.env:/run/vault-mirror.env:ro
        restart: unless-stopped
        # Gives a run in progress up to 5 minutes to finish when the container stops.
        stop_grace_period: 5m
