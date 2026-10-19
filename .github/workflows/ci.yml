@@ -227,6 +227,36 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - run: docker run --rm vault-mirror:ci --version
+      - name: Check Compose settings and command overrides
+        run: |
+          compose_dir="$RUNNER_TEMP/compose-settings"
+          mkdir -p "$compose_dir/backups"
+          export COMPOSE_TEST_DIR="$compose_dir"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import textwrap
+          guide = Path("docs/configuration.md").read_text()
+          sample = guide.split("cat > compose.yaml <<EOF\n", 1)[1].split("\n   EOF", 1)[0]
+          sample = textwrap.dedent(sample)
+          sample = re.sub(r"(?m)^(\s*image:) .*", r"\1 vault-mirror:ci", sample)
+          sample = sample.replace('$(id -u):$(id -g)', f'{os.getuid()}:{os.getgid()}')
+          directory = Path(os.environ["COMPOSE_TEST_DIR"])
+          (directory / "compose.yaml").write_text(sample)
+          (directory / "vault-mirror.env").write_text("INCLUDE_FOLDER=Work\n")
+          PY
+          for command in daemon check snapshots export healthcheck; do
+            args=("$command")
+            if [[ "$command" == export ]]; then args+=(--output /data/recovered); fi
+            if docker compose -f "$compose_dir/compose.yaml" run --rm vault-mirror "${args[@]}" > "$compose_dir/output" 2>&1; then
+              echo "::error::$command accepted an unknown setting"
+              exit 1
+            fi
+            grep -q 'sets a name that is not a setting' "$compose_dir/output"
+          done
+          printf '%s\n' 'SOURCE_PASSWORD_FILE=/unavailable-secret' > "$compose_dir/vault-mirror.env"
+          docker compose -f "$compose_dir/compose.yaml" run --rm -e SOURCE_TOKEN=unrelated vault-mirror snapshots
 
   # The one check the main branch requires, so jobs can change without
   # changing the ruleset. A skipped job, such as every job for a
