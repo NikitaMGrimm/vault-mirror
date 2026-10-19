@@ -31,9 +31,10 @@ Folders and collections are matched by name, so two with the same name in the
 source share one in the destination.
 
 A run stops before it changes anything if it can't decrypt an item, if item
-metadata has an invalid type, or if an attachment in either vault has no readable file, such as after a failed upload.
-The error gives the ids of the item and the attachment; see [An attachment
-without a file](backups.md#an-attachment-without-a-file). Items stored as one
+metadata has an invalid type, or if an attachment has no readable file, such
+as after a failed upload. For an unreadable attachment, the error gives the
+item and attachment ids; see [An attachment without a file](backups.md#an-attachment-without-a-file).
+Items stored as one
 encrypted data blob aren't supported yet and stop the run too.
 
 ## Server restrictions
