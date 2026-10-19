@@ -17,8 +17,10 @@
 Every command takes `--env-file PATH` to read a [settings
 file](configuration.md#the-settings-file), and `--help` to describe its options.
 
-Outside a terminal, such as in container logs or under systemd, each line
-starts with a UTC timestamp and a level. Set `NO_COLOR` to turn colours off.
+Outside a terminal, such as in container logs or under systemd, run progress
+and run-failure messages start with a UTC timestamp and a level. Snapshot ids,
+health-check output, and top-level command errors stay plain. Set `NO_COLOR`
+to turn colours off.
 
 ## Scheduling
 
@@ -51,7 +53,7 @@ Requires=docker.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/docker run --rm --env-file /etc/vault-mirror.env \
-  -v /var/lib/vault-mirror:/data ghcr.io/nikitamgrimm/vault-mirror run
+  -v /var/lib/vault-mirror:/data ghcr.io/nikitamgrimm/vault-mirror:0.8 run
 EOF
 
 sudo tee /etc/systemd/system/vault-mirror.timer > /dev/null <<'EOF'
@@ -75,3 +77,17 @@ user. To run once now and see the result:
 sudo systemctl start vault-mirror.service
 journalctl -u vault-mirror.service -n 20
 ```
+
+## Update the container
+
+The generated `compose.yaml` pins the image to the minor version used by
+`init`, such as `0.8`. To get patch updates within that version:
+
+```sh
+docker compose pull
+docker compose up -d
+```
+
+To upgrade to a new minor version, read the
+[release notes](https://github.com/NikitaMGrimm/vault-mirror/releases), change
+the image tag in `compose.yaml`, then run the same commands.
