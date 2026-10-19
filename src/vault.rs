@@ -1381,6 +1381,73 @@ mod tests {
     }
 
     #[test]
+    fn malformed_optional_metadata_stops_the_vault_read() {
+        let key = SymKey::generate();
+        for name in [
+            "folderId",
+            "archivedDate",
+            "deletedDate",
+            "revisionDate",
+            "creationDate",
+            "key",
+        ] {
+            for value in [
+                json!(7),
+                json!(false),
+                json!({"secret": "synthetic-metadata"}),
+                json!(["synthetic-metadata"]),
+            ] {
+                let mut cipher = full_cipher(&key);
+                cipher[name] = value;
+                let sync = json!({"folders": [], "ciphers": [cipher]});
+                let Err(error) = read_vault(&sync, &Scope::Personal, &key) else {
+                    panic!("malformed {name} was treated as absent");
+                };
+                let message = format!("{error:#}");
+                assert!(
+                    message.contains(name),
+                    "the invalid field was not identified"
+                );
+                assert!(
+                    !message.contains("synthetic-metadata"),
+                    "metadata was exposed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn optional_metadata_preserves_supported_absent_forms() {
+        let key = SymKey::generate();
+        for value in [None, Some(Value::Null), Some(json!(""))] {
+            let mut cipher = full_cipher(&key);
+            for name in [
+                "folderId",
+                "archivedDate",
+                "deletedDate",
+                "revisionDate",
+                "creationDate",
+                "key",
+            ] {
+                match &value {
+                    Some(value) => {
+                        cipher[name] = value.clone();
+                    }
+                    None => {
+                        cipher.as_object_mut().unwrap().remove(name);
+                    }
+                }
+            }
+            let item = decrypt_item(&cipher, &key).unwrap();
+            assert!(item.folder_id.is_none());
+            assert!(item.revision_date.is_none());
+            assert!(item.creation_date.is_none());
+            assert!(item.wrapped_key.is_none());
+            assert!(!item.in_trash && !item.archived);
+        }
+    }
+
+    #[test]
     fn known_encrypted_slots_accept_ciphertext_and_absent_values() {
         let key = SymKey::generate();
         let cipher = full_cipher(&key);
