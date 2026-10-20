@@ -220,13 +220,12 @@ async fn a_full_run_backs_up_both_sides_mirrors_and_records_the_result() -> Resu
     let first = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
     assert!(first.succeeded(), "{first:?}");
     assert_eq!(app::read_status(dir.path())?, first);
-    let mirror = first.mirror.as_ref().unwrap();
-    assert!(mirror.changed);
+    let app::MirrorRecord::Complete { changed, summary } = first.mirror.as_ref().unwrap() else {
+        panic!("incomplete mirror")
+    };
+    assert_eq!(*changed, Some(true));
     assert_eq!(
-        (
-            mirror.summary.items_created,
-            mirror.summary.attachments_copied
-        ),
+        (summary.items_created, summary.attachments_copied),
         (count, 4)
     );
     assert_eq!(
@@ -237,7 +236,13 @@ async fn a_full_run_backs_up_both_sides_mirrors_and_records_the_result() -> Resu
 
     let second = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
     assert!(second.succeeded(), "{second:?}");
-    assert!(!second.mirror.as_ref().unwrap().changed);
+    assert!(matches!(
+        second.mirror,
+        Some(app::MirrorRecord::Complete {
+            changed: Some(false),
+            ..
+        })
+    ));
     assert_eq!(second.source_backup.as_ref().unwrap().snapshot, None);
     // The destination changed in the first run, so it gets a new snapshot.
     assert_eq!(second.dest_backup.as_ref().unwrap().items, count);
@@ -405,7 +410,16 @@ async fn backups_keep_every_attachment_while_runs_skip_them() -> Result<()> {
 
     let first = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
     assert!(first.succeeded(), "{first:?}");
-    assert_eq!(first.mirror.as_ref().unwrap().summary.attachments_copied, 0);
+    assert!(matches!(
+        first.mirror,
+        Some(app::MirrorRecord::Complete {
+            summary: vault_mirror::plan::Summary {
+                attachments_copied: 0,
+                ..
+            },
+            ..
+        })
+    ));
     assert!(
         (first.warnings.iter()).any(|warning| warning.contains("SKIP_ATTACHMENTS")),
         "{:?}",
@@ -425,7 +439,13 @@ async fn backups_keep_every_attachment_while_runs_skip_them() -> Result<()> {
 
     let second = app::run_once(&config, RunFlags::default(), &Capture::default()).await;
     assert!(second.succeeded(), "{second:?}");
-    assert!(!second.mirror.as_ref().unwrap().changed);
+    assert!(matches!(
+        second.mirror,
+        Some(app::MirrorRecord::Complete {
+            changed: Some(false),
+            ..
+        })
+    ));
     assert_eq!(
         second.dest_backup.as_ref().unwrap().attachments_downloaded,
         1

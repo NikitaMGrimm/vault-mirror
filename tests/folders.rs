@@ -365,7 +365,7 @@ async fn failed_and_refused_runs_keep_the_record_and_the_folders() -> Result<()>
     let error = run(&source, &dest, &options()).await.unwrap_err();
     let error = error.downcast::<MirrorError>()?;
     assert!(format!("{:#}", error.source).contains("--allow-overwrite"));
-    assert_eq!(error.summary.unwrap().folders_deleted, 0);
+    assert_eq!(error.planned.unwrap().folders_deleted, 1);
     assert!(names(&dest.load(&PERSONAL).await?).contains(&"Later"));
 
     let outcome = run(&source, &dest, &overwrite()).await?;

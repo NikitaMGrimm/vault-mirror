@@ -15,7 +15,7 @@ use crate::{
     api::{ApiCredentials, ClientOptions, ServerUrls, build_http_client},
     backup::{BackupOptions, BackupReport, backup},
     config::{Config, VaultConfig},
-    mirror::{Endpoint, MirrorOptions, Reporter, mirror},
+    mirror::{DestinationWrites, Endpoint, MirrorError, MirrorOptions, Outcome, Reporter, mirror},
     plan::{Safety, Summary},
     store::{self, FolderReceipts, Keys, Store},
     text::count,
@@ -43,7 +43,7 @@ pub struct Status {
     pub duration_seconds: f64,
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mirror: Option<SummaryRecord>,
+    pub mirror: Option<MirrorRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_backup: Option<BackupReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,11 +70,37 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct SummaryRecord {
-    pub changed: bool,
-    #[serde(flatten)]
-    pub summary: Summary,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MirrorRecord {
+    Complete {
+        /// None when a best-effort folder deletion could not be confirmed.
+        changed: Option<bool>,
+        #[serde(flatten)]
+        summary: Summary,
+    },
+    Incomplete {
+        planned: Option<Summary>,
+        writes: DestinationWrites,
+    },
+}
+
+impl From<Outcome> for MirrorRecord {
+    fn from(outcome: Outcome) -> Self {
+        Self::Complete {
+            changed: (!outcome.cleanup_uncertain).then_some(outcome.changed),
+            summary: outcome.summary,
+        }
+    }
+}
+
+impl From<&MirrorError> for MirrorRecord {
+    fn from(error: &MirrorError) -> Self {
+        Self::Incomplete {
+            planned: error.planned,
+            writes: error.writes,
+        }
+    }
 }
 
 /// Ids this installation presents to each server. Kept across runs so the
@@ -314,20 +340,14 @@ async fn execute(
     )
     .await;
     match mirrored {
-        Ok(outcome) => {
-            progress.status.mirror = Some(SummaryRecord {
-                changed: outcome.changed,
-                summary: outcome.summary,
-            });
-            progress.status.warnings.extend(outcome.warnings);
+        Ok(mut outcome) => {
+            progress.status.warnings.append(&mut outcome.warnings);
+            progress.status.mirror = Some(outcome.into());
             Ok(())
         }
         Err(error) => {
             progress.stage = error.stage;
-            progress.status.mirror = error.summary.map(|summary| SummaryRecord {
-                changed: false,
-                summary,
-            });
+            progress.status.mirror = Some((&error).into());
             Err(error.source)
         }
     }
@@ -361,18 +381,31 @@ pub fn describe(status: &Status) -> String {
             "FAILED"
         }
     )];
-    if let Some(SummaryRecord {
-        summary: mirror, ..
-    }) = &status.mirror
-    {
-        parts.push(format!(
-            "{} created, {} updated, {} deleted, {} unchanged, {} deleted",
-            count(mirror.items_created, "item"),
-            mirror.items_updated,
-            mirror.items_deleted,
-            mirror.items_unchanged,
-            count(mirror.folders_deleted, "folder")
-        ));
+    match &status.mirror {
+        Some(MirrorRecord::Complete {
+            summary: mirror,
+            changed,
+        }) => {
+            parts.push(format!(
+                "{} created, {} updated, {} deleted, {} unchanged, {} deleted",
+                count(mirror.items_created, "item"),
+                mirror.items_updated,
+                mirror.items_deleted,
+                mirror.items_unchanged,
+                count(mirror.folders_deleted, "folder")
+            ));
+            if changed.is_none() {
+                parts.push("folder cleanup may have changed the destination".into());
+            }
+        }
+        Some(MirrorRecord::Incomplete { writes, .. }) => parts.push(
+            match writes {
+                DestinationWrites::NotStarted => "no destination writes started",
+                DestinationWrites::Unverified => "destination may contain partial changes",
+            }
+            .into(),
+        ),
+        None => {}
     }
     if let Some(snapshot) = status
         .source_backup
@@ -459,8 +492,8 @@ mod tests {
         Status {
             status: RunResult::Success,
             finished_at: "2026-10-14T02:00:00Z".into(),
-            mirror: Some(SummaryRecord {
-                changed: false,
+            mirror: Some(MirrorRecord::Complete {
+                changed: Some(false),
                 summary: Summary {
                     items_created: 2,
                     items_unchanged: 40,
@@ -565,6 +598,68 @@ mod tests {
             message.contains("source login") && message.contains("bad key"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn failed_mirrors_do_not_describe_planned_work_as_completed() {
+        let failed = Status {
+            status: RunResult::Failed,
+            failure_stage: Some("verifying the destination".into()),
+            error: Some("read failed".into()),
+            mirror: Some(MirrorRecord::Incomplete {
+                planned: Some(Summary {
+                    items_created: 2,
+                    ..Summary::default()
+                }),
+                writes: DestinationWrites::Unverified,
+            }),
+            ..success()
+        };
+        let message = describe(&failed);
+        assert!(
+            message.contains("destination may contain partial changes"),
+            "{message}"
+        );
+        assert!(!message.contains("created") && !message.contains("deleted"));
+        let value = serde_json::to_value(&failed).unwrap();
+        assert!(value["mirror"].get("changed").is_none());
+    }
+
+    #[test]
+    fn incomplete_status_preserves_only_planned_work_and_write_evidence() {
+        for writes in [DestinationWrites::NotStarted, DestinationWrites::Unverified] {
+            for planned in [
+                None,
+                Some(Summary {
+                    items_deleted: 9,
+                    ..Summary::default()
+                }),
+            ] {
+                let error = MirrorError {
+                    stage: "writing items",
+                    planned,
+                    writes,
+                    source: anyhow!("synthetic failure"),
+                };
+                let status = Status {
+                    mirror: Some(MirrorRecord::from(&error)),
+                    ..Status::default()
+                };
+                let json = serde_json::to_value(&status).unwrap();
+                assert_eq!(json["mirror"]["state"], "incomplete");
+                assert!(json["mirror"].get("planned").is_some());
+                assert!(json["mirror"].get("changed").is_none());
+                assert!(json["mirror"].get("items_deleted").is_none());
+                assert_eq!(serde_json::from_value::<Status>(json).unwrap(), status);
+                let text = describe(&status);
+                assert!(!text.contains("created") && !text.contains("deleted"));
+                let expected = match writes {
+                    DestinationWrites::NotStarted => "no destination writes started",
+                    DestinationWrites::Unverified => "destination may contain partial changes",
+                };
+                assert!(text.contains(expected));
+            }
+        }
     }
 
     #[test]

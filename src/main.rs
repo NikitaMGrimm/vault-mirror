@@ -215,10 +215,7 @@ async fn run_and_report(config: &Config, flags: RunFlags) -> bool {
     if status.succeeded() {
         Console::finished(&finished(&status), !status.warnings.is_empty());
     } else {
-        Console::error(&match (&status.failure_stage, &status.error) {
-            (Some(stage), Some(error)) => format!("the run failed during {stage}: {error}"),
-            _ => app::describe(&status),
-        });
+        Console::error(&app::describe(&status));
     }
     status.succeeded()
 }
@@ -229,7 +226,7 @@ async fn run_and_report(config: &Config, flags: RunFlags) -> bool {
 fn finished(status: &app::Status) -> String {
     let seconds = status.duration_seconds;
     match &status.mirror {
-        Some(app::SummaryRecord {
+        Some(app::MirrorRecord::Complete {
             summary: mirror, ..
         }) => format!(
             "{} created, {} updated, {} deleted, {} unchanged, {} deleted in {seconds:.1}s",
@@ -240,6 +237,7 @@ fn finished(status: &app::Status) -> String {
             count(mirror.folders_deleted, "folder")
         ),
         None => format!("backup in {seconds:.1}s"),
+        Some(app::MirrorRecord::Incomplete { .. }) => app::describe(status),
     }
 }
 
