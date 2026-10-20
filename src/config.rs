@@ -311,6 +311,14 @@ mod tests {
     }
 
     #[test]
+    fn organization_metadata_loss_requires_a_boolean_setting() {
+        for value in ["yes", "1", "TRUE", "maybe"] {
+            let message = error(with(&[("ALLOW_ORGANIZATION_METADATA_LOSS", value)]));
+            assert!(message.contains("ALLOW_ORGANIZATION_METADATA_LOSS has an invalid value"));
+        }
+    }
+
+    #[test]
     fn a_setup_without_a_destination_only_backs_up() {
         let config = Config::from_env(&without(&[
             "DEST_SERVER",

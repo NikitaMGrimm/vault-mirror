@@ -171,6 +171,7 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
             "a refused run changed the destination"
         );
         assert!(format!("{refused:#}").contains("cannot safely update organization copies"));
+        assert!(format!("{refused:#}").contains("--allow-organization-metadata-loss"));
         return Ok(());
     }
 

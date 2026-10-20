@@ -785,6 +785,24 @@ fn unreachable_settings(dir: &std::path::Path, extra: &str) -> std::path::PathBu
 }
 
 #[test]
+fn organization_metadata_loss_can_be_allowed_for_run_and_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = unreachable_settings(dir.path(), "");
+    for command in ["run", "check"] {
+        let output = vault_mirror()
+            .arg("--env-file")
+            .arg(&settings)
+            .arg(command)
+            .arg("--allow-organization-metadata-loss")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("expected an http or https URL"), "{stderr}");
+    }
+}
+
+#[test]
 fn attachments_can_be_skipped_from_the_settings_file_or_the_environment() {
     let dir = tempfile::tempdir().unwrap();
     let check = |extra: &str, env: Option<&str>| {
