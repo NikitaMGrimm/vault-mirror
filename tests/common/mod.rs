@@ -300,15 +300,15 @@ pub async fn check(source: &Account, dest: &Account, options: &MirrorOptions) ->
         account: dest,
         scope: Scope::Personal,
     };
-    let (source_read, dest_vault) = (
+    let (source_read, dest_read) = (
         source.account.load_with_traits(&source.scope).await?,
-        dest.account.load(&dest.scope).await?,
+        dest.account.load_with_traits(&dest.scope).await?,
     );
     Ok(mirror::check(
         &source,
         &dest,
         &source_read,
-        &dest_vault,
+        &dest_read,
         options,
         &folders(),
         &Capture::default(),

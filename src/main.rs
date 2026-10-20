@@ -374,11 +374,11 @@ async fn check_config(config: &Config, flags: RunFlags, report_logins: bool) -> 
         account: &dest,
         scope: app::scope_of(dest_config),
     };
-    let dest_vault = dest.account.load(&dest.scope).await?;
+    let dest_read = dest.account.load_with_traits(&dest.scope).await?;
     if report_logins {
         Console::status(
             "Logged in",
-            &format!("to the destination: {}", describe_vault(&dest_vault)),
+            &format!("to the destination: {}", describe_vault(dest_read.vault())),
         );
     }
 
@@ -387,7 +387,7 @@ async fn check_config(config: &Config, flags: RunFlags, report_logins: bool) -> 
         &source,
         &dest,
         &source_read,
-        &dest_vault,
+        &dest_read,
         &options,
         &FolderReceipts::new(&config.backups_dir),
         &Console,

@@ -12,11 +12,11 @@ use sha2::{Digest, Sha256};
 use crate::{
     node::Node,
     plan::{
-        self, DeleteReason, FileWrite, FolderCleanup, Mode, Plan, Receipt, Safety, Summary,
-        comparable, differing_paths,
+        self, FileWrite, FolderCleanup, Mode, Plan, Receipt, Safety, Summary, comparable,
+        differing_paths,
     },
     store::{FolderReceipts, Receipts, Snapshot},
-    text::{count, listed},
+    text::count,
     vault::{Account, Attachment, Item, Scope, ServerTraits, Vault, VaultRead, WRITES_AT_ONCE},
 };
 
@@ -201,7 +201,7 @@ pub async fn mirror(
     let result = run
         .execute(
             &source_read.read,
-            dest_read.read.vault(),
+            &dest_read.read,
             Some(&source_read.snapshot),
         )
         .await;
@@ -214,13 +214,13 @@ pub async fn check(
     source: &Endpoint<'_>,
     dest: &Endpoint<'_>,
     source_read: &VaultRead,
-    dest_vault: &Vault,
+    dest_read: &VaultRead,
     options: &MirrorOptions,
     folders: &FolderReceipts,
     reporter: &dyn Reporter,
 ) -> Result<Outcome, MirrorError> {
     let mut run = Run::new(source, dest, options, folders, reporter);
-    let result = run.execute(source_read, dest_vault, None).await;
+    let result = run.execute(source_read, dest_read, None).await;
     run.finish(result)
 }
 
@@ -426,28 +426,6 @@ fn same_state(left: &Item, right: &Item) -> bool {
     canonical(left) == canonical(right)
 }
 
-/// Fails if the plan deletes a copy of an item type the source server does
-/// not show. Its source item is missing from the source vault, but may still
-/// exist.
-fn check_source_shows(plan: &Plan, dest: &Vault, traits: &ServerTraits) -> Result<()> {
-    let hidden: Vec<&str> = (plan.deletes.iter())
-        .filter(|delete| delete.reason == DeleteReason::Stale)
-        .map(|delete| &dest.items[delete.dest])
-        .filter(|item| traits.hides(item))
-        .map(|item| item.id.as_str())
-        .collect();
-    if hidden.is_empty() {
-        return Ok(());
-    }
-    bail!(
-        "the source server does not show bank accounts, driver's licences or passports yet, so \
-         the source items of {} of them may still exist ({}). If they were deleted, delete \
-         those copies in the destination yourself",
-        count(hidden.len(), "copy"),
-        listed(&hidden)
-    );
-}
-
 /// Fails if the destination cannot hold everything the run would copy. A
 /// run that left something out would look complete, and the next run would
 /// treat what is missing as deleted.
@@ -459,15 +437,6 @@ fn check_dest_holds(
     mode: Mode,
 ) -> Result<()> {
     let live = || source.items.iter().filter(|item| !item.in_trash);
-    let hidden = live().filter(|item| traits.hides(item)).count();
-    if hidden > 0 {
-        bail!(
-            "the destination server does not show bank accounts, driver's licences or passports \
-             yet, so it cannot hold {} of the source. Leave them out with a filter, or use a \
-             destination that shows them",
-            count(hidden, "item")
-        );
-    }
     if mode == Mode::Organization && traits.items_need_collections {
         let homeless = live().filter(|item| item.collection_ids.is_empty()).count();
         if homeless > 0 {
@@ -605,11 +574,12 @@ impl<'a> Run<'a> {
     async fn execute(
         &mut self,
         source_read: &VaultRead,
-        dest_vault: &Vault,
+        dest_read: &VaultRead,
         source_files: Option<&Snapshot<'_>>,
     ) -> Result<bool> {
         let mode = mode(&self.source.scope, &self.dest.scope)?;
         let source_vault = source_read.vault();
+        let dest_vault = dest_read.vault();
         ensure_distinct(self.source, self.dest, source_vault, dest_vault)?;
         let mut source_vault = source_vault.clone();
         self.filter(&mut source_vault, mode)?;
@@ -619,6 +589,12 @@ impl<'a> Run<'a> {
             .server_traits()
             .await
             .context("reading the destination server's settings")?;
+        if traits.hidden_item_types != dest_read.traits().hidden_item_types {
+            bail!(
+                "the destination server's item visibility changed after reading the vault. \
+                 Run again when its settings are stable"
+            );
+        }
         if self.options.skip_attachments {
             self.warn(
                 "SKIP_ATTACHMENTS is on. Retained copies keep their attachments and new copies \
@@ -636,7 +612,6 @@ impl<'a> Run<'a> {
             self.options.skip_attachments,
         );
         self.planned = Some(plan.summary(&source_vault));
-        check_source_shows(&plan, dest_vault, source_read.traits())?;
         check_dest_holds(
             &source_vault,
             &plan,
@@ -1184,10 +1159,11 @@ impl<'a> Run<'a> {
     /// Attachments were checked as they were copied.
     async fn verify(&mut self, source_vault: &Vault, pair: &str, mode: Mode) -> Result<()> {
         let dest = self.dest;
-        let dest_vault = dest.account.load(&dest.scope).await?;
+        let dest_read = dest.account.load_with_traits(&dest.scope).await?;
+        let dest_vault = dest_read.vault();
         let again = plan::plan(
             source_vault,
-            &dest_vault,
+            dest_vault,
             mode,
             pair,
             self.options.skip_attachments,
@@ -1205,8 +1181,8 @@ impl<'a> Run<'a> {
                 mode,
             );
             let dest_item = &dest_vault.items[update.dest];
-            let folder = folder_name(&dest_vault, dest_item, mode);
-            let collections = collection_names(&dest_vault, dest_item, mode);
+            let folder = folder_name(dest_vault, dest_item, mode);
+            let collections = collection_names(dest_vault, dest_item, mode);
             let found = comparable(dest_item, folder.as_deref(), &collections, mode);
             // Paths only, never values: this ends up in logs and the status file.
             let mut reasons = Vec::new();
@@ -1357,35 +1333,6 @@ mod tests {
             change(&mut changed);
             assert!(!same_state(&read, &changed), "change {index}");
         }
-    }
-
-    #[test]
-    fn copies_of_a_type_the_source_hides_are_not_taken_for_copies_of_deleted_items() {
-        let mut copy = item("copy", None, &[]);
-        copy.content
-            .insert("type".into(), crate::node::Node::Number(8.into()));
-        let dest = Vault {
-            items: vec![copy],
-            ..Vault::default()
-        };
-        let plan = |reason| Plan {
-            deletes: vec![plan::Delete {
-                dest: 0,
-                reason,
-                changed_in_dest: plan::Changes::default(),
-            }],
-            ..Plan::default()
-        };
-        let traits = |hidden_item_types| ServerTraits {
-            hidden_item_types,
-            items_need_collections: false,
-            organization_updates_safe: true,
-        };
-        let refused = check_source_shows(&plan(DeleteReason::Stale), &dest, &traits(vec![6, 7, 8]));
-        assert!(format!("{:#}", refused.unwrap_err()).contains("(copy)"));
-        assert!(check_source_shows(&plan(DeleteReason::Stale), &dest, &traits(vec![])).is_ok());
-        let duplicate = plan(DeleteReason::Duplicate);
-        assert!(check_source_shows(&duplicate, &dest, &traits(vec![6, 7, 8])).is_ok());
     }
 
     mod visibility {
@@ -1750,12 +1697,12 @@ mod tests {
                 )
                 .await?
             } else {
-                let dest_vault = dest.load(&Scope::Personal).await?;
+                let dest_read = dest.load_with_traits(&Scope::Personal).await?;
                 check(
                     &endpoint(source),
                     &endpoint(dest),
                     &source_read.read,
-                    &dest_vault,
+                    &dest_read,
                     &options,
                     &folders,
                     &Quiet,
@@ -1961,7 +1908,7 @@ mod tests {
                     )
                     .await
                 } else {
-                    let destination = dest.load(&Scope::Personal).await.unwrap();
+                    let destination = dest.load_with_traits(&Scope::Personal).await.unwrap();
                     check(
                         &endpoint(&source),
                         &endpoint(&dest),
@@ -2019,7 +1966,7 @@ mod tests {
                 state.source["ciphers"][0]["folderId"] = json!("excluded-folder");
             }
             let source_read = source.load_with_traits(&Scope::Personal).await.unwrap();
-            let destination = dest.load(&Scope::Personal).await.unwrap();
+            let destination = dest.load_with_traits(&Scope::Personal).await.unwrap();
             let options = MirrorOptions {
                 filter: Filter {
                     include: vec![],
@@ -2169,7 +2116,7 @@ mod tests {
                             &endpoint(&source),
                             &endpoint(&dest),
                             &source_read,
-                            dest_read.vault(),
+                            &dest_read,
                             &MirrorOptions::default(),
                             &folders,
                             &Quiet,
@@ -2189,6 +2136,36 @@ mod tests {
                 ));
             }
             assert_eq!(outcomes, [(false, true, 3), (true, true, 3)]);
+        }
+
+        #[tokio::test]
+        async fn destination_visibility_restriction_after_read_refuses_before_writes() {
+            for run in [false, true] {
+                let server = Server::start(&[true]);
+                server.state.lock().unwrap().dest_shown = Some([true, true, false].into());
+                let (source, dest) = server.accounts().await;
+                let (dir, keys) = &*BACKUPS;
+                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+                let (_, source_read) =
+                    backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                        .await
+                        .unwrap();
+                let error = evaluate(&source, &dest, &source_read, &store, run)
+                    .await
+                    .unwrap_err()
+                    .downcast::<MirrorError>()
+                    .unwrap();
+                assert_eq!(error.stage, "planning");
+                assert_eq!(error.writes, DestinationWrites::NotStarted);
+                assert!(format!("{:#}", error.source).contains("visibility changed"));
+                assert_eq!(
+                    server.state.lock().unwrap().dest["ciphers"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    3
+                );
+            }
         }
 
         #[tokio::test]
@@ -2256,12 +2233,12 @@ mod tests {
                 let (source, dest) = server.accounts().await;
                 let result = async {
                     let source_read = source.load_with_traits(&Scope::Personal).await?;
-                    let dest_vault = dest.load(&Scope::Personal).await?;
+                    let dest_read = dest.load_with_traits(&Scope::Personal).await?;
                     check(
                         &endpoint(&source),
                         &endpoint(&dest),
                         &source_read,
-                        &dest_vault,
+                        &dest_read,
                         &MirrorOptions::default(),
                         &FolderReceipts::new(BACKUPS.0.path()),
                         &Quiet,
@@ -2280,43 +2257,16 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn hidden_read_stays_restrictive_after_later_enablement_for_run_and_check() {
-            for run in [false, true] {
-                let server = Server::start(&[false, false, true]);
-                let (source, dest) = server.accounts().await;
-                let (dir, keys) = &*BACKUPS;
-                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
-                let (_, source_read) =
-                    backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
-                        .await
-                        .unwrap();
-                assert!(
-                    source
-                        .server_traits()
-                        .await
-                        .unwrap()
-                        .hidden_item_types
-                        .is_empty()
-                );
-                let result = evaluate(&source, &dest, &source_read, &store, run).await;
-                let error = result.unwrap_err();
-                assert!(
-                    format!("{error:#}").contains("source server does not show"),
-                    "{error:#}"
-                );
-                assert!(!format!("{error:#}").contains("synthetic vault content"));
-                let mut expected = source_order();
-                expected.push("GET /source/api/config".into());
-                if run {
-                    expected.push("GET /dest/api/config".into());
-                }
-                expected.push("GET /dest/api/sync?excludeDomains=true".into());
-                if run {
-                    expected.push("GET /dest/api/config".into());
-                }
-                expected.push("GET /dest/api/config".into());
-                assert_eq!(server.requests(), expected);
-            }
+        async fn stable_hidden_source_read_is_rejected_even_without_new_item_types() {
+            let server = Server::start(&[false]);
+            let (source, _) = server.accounts().await;
+            let result = source.load_with_traits(&Scope::Personal).await;
+            let error = result
+                .err()
+                .expect("an incomplete source read was accepted");
+            assert!(format!("{error:#}").contains("cannot be read completely"));
+            assert!(!format!("{error:#}").contains("synthetic vault content"));
+            assert_eq!(server.requests(), source_order());
         }
 
         #[tokio::test]
@@ -2336,20 +2286,18 @@ mod tests {
                 assert_eq!(outcome.summary.items_unchanged, 2);
                 assert_eq!(outcome.changed, run);
                 let mut expected = source_order();
-                if run {
-                    expected.push("GET /dest/api/config".into());
-                }
+                expected.push("GET /dest/api/config".into());
                 expected.push("GET /dest/api/sync?excludeDomains=true".into());
-                if run {
-                    expected.push("GET /dest/api/config".into());
-                }
+                expected.push("GET /dest/api/config".into());
                 expected.push("GET /dest/api/config".into());
                 if run {
                     expected.extend(
                         [
                             "GET /dest/api/sync?excludeDomains=true",
                             "PUT /dest/api/ciphers/delete",
+                            "GET /dest/api/config",
                             "GET /dest/api/sync?excludeDomains=true",
+                            "GET /dest/api/config",
                         ]
                         .map(str::to_string),
                     );

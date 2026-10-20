@@ -809,7 +809,7 @@ async fn newer_item_types_are_mirrored() -> Result<()> {
         // run fails rather than look complete.
         let error = run(&source, &dest, &options()).await.unwrap_err();
         assert!(
-            format!("{error:#}").contains("cannot hold 3 items"),
+            format!("{error:#}").contains("cannot be read completely"),
             "{error:#}"
         );
         assert!(dest.load(&PERSONAL).await?.items.is_empty());
