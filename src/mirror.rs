@@ -158,9 +158,21 @@ pub struct Protected<'a> {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Outcome {
     pub summary: Summary,
-    /// False for a check and for a run that found nothing to do.
+    /// Whether a destination change was confirmed. False for a check.
     pub changed: bool,
+    /// A best-effort folder deletion may have arrived without a response.
+    pub cleanup_uncertain: bool,
     pub warnings: Vec<String>,
+}
+
+/// Whether a failed run may have written to the destination. A write is
+/// unverified until the required mirroring and final verification succeed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DestinationWrites {
+    #[default]
+    NotStarted,
+    Unverified,
 }
 
 /// A run that failed, with the phase it failed in for the status file.
@@ -169,7 +181,8 @@ pub struct Outcome {
 pub struct MirrorError {
     pub stage: &'static str,
     /// What the plan intended, when the run got far enough to have one.
-    pub summary: Option<Summary>,
+    pub planned: Option<Summary>,
+    pub writes: DestinationWrites,
     #[source]
     pub source: anyhow::Error,
 }
@@ -496,6 +509,9 @@ struct Run<'a> {
     reporter: &'a dyn Reporter,
     stage: &'static str,
     summary: Option<Summary>,
+    planned: Option<Summary>,
+    writes: DestinationWrites,
+    cleanup_uncertain: bool,
     warnings: Vec<String>,
 }
 
@@ -515,6 +531,9 @@ impl<'a> Run<'a> {
             reporter,
             stage: "planning",
             summary: None,
+            planned: None,
+            writes: DestinationWrites::NotStarted,
+            cleanup_uncertain: false,
             warnings: Vec::new(),
         }
     }
@@ -524,11 +543,13 @@ impl<'a> Run<'a> {
             Ok(changed) => Ok(Outcome {
                 summary: self.summary.unwrap_or_default(),
                 changed,
+                cleanup_uncertain: self.cleanup_uncertain,
                 warnings: self.warnings,
             }),
             Err(error) => Err(MirrorError {
                 stage: self.stage,
-                summary: self.summary,
+                planned: self.planned,
+                writes: self.writes,
                 source: error,
             }),
         }
@@ -614,6 +635,7 @@ impl<'a> Run<'a> {
             &pair,
             self.options.skip_attachments,
         );
+        self.planned = Some(plan.summary(&source_vault));
         check_source_shows(&plan, dest_vault, source_read.traits())?;
         check_dest_holds(
             &source_vault,
@@ -634,6 +656,7 @@ impl<'a> Run<'a> {
         };
         let mut summary = plan.summary(&source_vault);
         summary.folders_deleted = cleanup.obsolete.len();
+        self.planned = Some(summary);
         let (verb, plan_text) = describe_plan(&summary, source_files.is_none());
         self.reporter.status(verb, &plan_text);
         // A run reports the folders it deleted, not the ones it planned to.
@@ -788,11 +811,13 @@ impl<'a> Run<'a> {
                     // Something was put in it, or its name selected, meanwhile.
                     continue;
                 }
+                self.writes = DestinationWrites::Unverified;
                 match account.delete_folder(&receipt.folder_id).await {
                     Ok(gone) => {
                         deleted += usize::from(gone);
                     }
                     Err(error) => {
+                        self.cleanup_uncertain = true;
                         // The request may have arrived, so the receipt stays
                         // until a run sees the folder gone.
                         self.warn(format!(
@@ -833,6 +858,9 @@ impl<'a> Run<'a> {
         self.stage = "creating folders and collections";
         let mut folder_ids = plan.folder_ids.clone();
         let mut unrecorded = Vec::new();
+        if !plan.folders_to_create.is_empty() || !plan.collections_to_create.is_empty() {
+            self.writes = DestinationWrites::Unverified;
+        }
         for name in &plan.folders_to_create {
             let folder = dest.account.create_folder(name).await?;
             // Recorded before anything else is written, so that a run that
@@ -924,6 +952,9 @@ impl<'a> Run<'a> {
             .filter(|update| update.write_content || update.sync_attachments)
             .count();
         let writes = Tally::new(self.reporter, "Writing", drafts.len() + rewritten, "items");
+        if !drafts.is_empty() || rewritten > 0 {
+            self.writes = DestinationWrites::Unverified;
+        }
         let new_items = dest
             .account
             .create_items(&dest.scope, &drafts, &folder_names, &|n| writes.add(n))
@@ -1066,6 +1097,7 @@ impl<'a> Run<'a> {
             }
             // Archiving is a paid feature on some servers and missing on
             // older ones. A copy left in the wrong state is no complete copy.
+            self.writes = DestinationWrites::Unverified;
             dest.account
                 .set_archived(&ids, archived)
                 .await
@@ -1135,6 +1167,7 @@ impl<'a> Run<'a> {
                 ids.push(planned.id.clone());
             }
             if !ids.is_empty() {
+                self.writes = DestinationWrites::Unverified;
                 dest.account.trash_items(&ids).await?;
                 self.reporter.status("Deleted", &count(ids.len(), "item"));
             }
@@ -1375,8 +1408,21 @@ mod tests {
         use serde_json::{Value, json};
         use time::OffsetDateTime;
 
+        #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+        enum Failure {
+            #[default]
+            None,
+            Refusal,
+            AfterFolder,
+            AmbiguousDelete,
+            Verification,
+            Cleanup,
+        }
+
         #[derive(Default)]
         struct State {
+            failure: Failure,
+            delete_attempts: usize,
             shown: VecDeque<bool>,
             source: Value,
             dest: Value,
@@ -1461,15 +1507,51 @@ mod tests {
                                 json!({"server": {"name": "Vaultwarden"}})
                             }
                             ("GET", "/source/api/sync?excludeDomains=true") => state.source.clone(),
-                            ("GET", "/dest/api/sync?excludeDomains=true") => state.dest.clone(),
-                            ("PUT", "/dest/api/ciphers/delete") => {
-                                let body: Value = serde_json::from_slice(&body).unwrap();
-                                assert_eq!(body, json!({"ids": ["copy-passport"]}));
-                                state.dest["ciphers"]
+                            ("GET", "/dest/api/sync?excludeDomains=true") => {
+                                if state.failure == Failure::Verification
+                                    && state.delete_attempts > 0
+                                {
+                                    status = "400 Bad Request";
+                                    json!({"message":"synthetic verification failure"})
+                                } else {
+                                    state.dest.clone()
+                                }
+                            }
+                            ("GET", "/dest/api/accounts/profile") => json!({"organizations":[]}),
+                            ("POST", "/dest/api/folders") => {
+                                let mut folder: Value = serde_json::from_slice(&body).unwrap();
+                                folder["id"] = json!("created-folder");
+                                state.dest["folders"]
                                     .as_array_mut()
                                     .unwrap()
-                                    .retain(|item| item["id"] != "copy-passport");
-                                json!({})
+                                    .push(folder.clone());
+                                folder
+                            }
+                            ("DELETE", "/dest/api/folders/obsolete-folder") => {
+                                assert_eq!(state.failure, Failure::Cleanup);
+                                state.dest["folders"] = json!([]);
+                                continue;
+                            }
+                            ("PUT", "/dest/api/ciphers/delete") => {
+                                state.delete_attempts += 1;
+                                if state.failure == Failure::AfterFolder
+                                    || (state.failure == Failure::AmbiguousDelete
+                                        && state.delete_attempts > 1)
+                                {
+                                    status = "400 Bad Request";
+                                    json!({"message":"synthetic write failure"})
+                                } else {
+                                    let body: Value = serde_json::from_slice(&body).unwrap();
+                                    assert_eq!(body, json!({"ids": ["copy-passport"]}));
+                                    state.dest["ciphers"]
+                                        .as_array_mut()
+                                        .unwrap()
+                                        .retain(|item| item["id"] != "copy-passport");
+                                    if state.failure == Failure::AmbiguousDelete {
+                                        continue;
+                                    }
+                                    json!({})
+                                }
                             }
                             _ => {
                                 status = "400 Bad Request";
@@ -1506,6 +1588,9 @@ mod tests {
             async fn accounts(&self) -> (Account, Account) {
                 let source_key = SymKey::generate();
                 let dest_key = SymKey::generate();
+                let source_folder = source_key.encrypt_str("new folder").unwrap();
+                let dest_folder = dest_key.encrypt_str("obsolete folder").unwrap();
+                let edited = dest_key.encrypt_str("synthetic changed content").unwrap();
                 let source =
                     crate::vault::tests::account(&format!("{}/source", self.url), source_key).await;
                 let dest =
@@ -1541,6 +1626,21 @@ mod tests {
                 let mut state = self.state.lock().unwrap();
                 state.source = source.test_sync(&original.items[1..]);
                 state.dest = dest.test_sync(&copies);
+                match state.failure {
+                    Failure::Refusal => {
+                        state.dest["ciphers"][0]["notes"] = json!(edited);
+                    }
+                    Failure::AfterFolder => {
+                        state.source["folders"] =
+                            json!([{"id":"source-folder", "name":source_folder}]);
+                    }
+                    Failure::Cleanup => {
+                        state.source = source.test_sync(&original.items);
+                        state.dest["folders"] =
+                            json!([{"id":"obsolete-folder", "name":dest_folder}]);
+                    }
+                    _ => {}
+                }
                 (source, dest)
             }
         }
@@ -1614,6 +1714,128 @@ mod tests {
                 )
                 .await?
             })
+        }
+
+        #[tokio::test]
+        async fn failed_executor_reports_plans_and_write_uncertainty() {
+            use crate::app::{self, MirrorRecord, Status};
+            for (failure, writes, stage) in [
+                (Failure::Refusal, DestinationWrites::NotStarted, "planning"),
+                (
+                    Failure::AfterFolder,
+                    DestinationWrites::Unverified,
+                    "deleting obsolete items",
+                ),
+                (
+                    Failure::AmbiguousDelete,
+                    DestinationWrites::Unverified,
+                    "deleting obsolete items",
+                ),
+                (
+                    Failure::Verification,
+                    DestinationWrites::Unverified,
+                    "verifying the destination",
+                ),
+            ] {
+                let server = Server::start(&[true]);
+                server.state.lock().unwrap().failure = failure;
+                let (source, dest) = server.accounts().await;
+                let (dir, keys) = &*BACKUPS;
+                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+                let (_, source_read) =
+                    backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                        .await
+                        .unwrap();
+                let error = evaluate(&source, &dest, &source_read, &store, true)
+                    .await
+                    .unwrap_err()
+                    .downcast::<MirrorError>()
+                    .unwrap();
+                assert_eq!(error.writes, writes, "{failure:?}");
+                assert_eq!(error.stage, stage);
+                assert_eq!(error.planned.unwrap().items_deleted, 1);
+                if failure == Failure::AfterFolder {
+                    assert_eq!(
+                        server.state.lock().unwrap().dest["folders"]
+                            .as_array()
+                            .unwrap()
+                            .len(),
+                        1
+                    );
+                }
+                if matches!(failure, Failure::AmbiguousDelete | Failure::Verification) {
+                    let state = server.state.lock().unwrap();
+                    assert!(state.delete_attempts > 0);
+                    assert!(
+                        !state.dest["ciphers"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|item| item["id"] == "copy-passport")
+                    );
+                }
+                let status = Status {
+                    mirror: Some(MirrorRecord::from(&error)),
+                    ..Status::default()
+                };
+                let message = app::describe(&status);
+                let expected = match writes {
+                    DestinationWrites::NotStarted => "no destination writes started",
+                    DestinationWrites::Unverified => "destination may contain partial changes",
+                };
+                assert!(message.contains(expected));
+                assert!(!message.contains("created") && !message.contains("deleted"));
+                let json = serde_json::to_value(&status).unwrap();
+                assert_eq!(json["mirror"]["state"], "incomplete");
+                assert!(json["mirror"].get("changed").is_none());
+                assert_eq!(serde_json::from_value::<Status>(json).unwrap(), status);
+            }
+        }
+
+        #[tokio::test]
+        async fn ambiguous_folder_cleanup_stays_successful_without_claiming_unchanged() {
+            use crate::app::{self, MirrorRecord, RunResult, Status};
+            let server = Server::start(&[true]);
+            server.state.lock().unwrap().failure = Failure::Cleanup;
+            let (source, dest) = server.accounts().await;
+            let (dir, keys) = &*BACKUPS;
+            let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+            let (_, source_read) =
+                backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                    .await
+                    .unwrap();
+            let destination = dest.load(&Scope::Personal).await.unwrap();
+            let pair = plan::pair(&vault_key(&endpoint(&source)), &vault_key(&endpoint(&dest)));
+            FolderReceipts::new(dir.path())
+                .of(&plan::owner(&pair, &vault_key(&endpoint(&dest))))
+                .record(&Receipt {
+                    folder_id: "obsolete-folder".into(),
+                    stamp: destination.folders[0].stamp.clone().unwrap(),
+                })
+                .unwrap();
+            let outcome = evaluate(&source, &dest, &source_read, &store, true)
+                .await
+                .unwrap();
+            assert!(outcome.cleanup_uncertain);
+            assert_eq!(outcome.summary.folders_deleted, 0);
+            assert!(
+                server.state.lock().unwrap().dest["folders"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            let status = Status {
+                status: RunResult::Success,
+                mirror: Some(MirrorRecord::from(outcome)),
+                ..Status::default()
+            };
+            let json = serde_json::to_value(&status).unwrap();
+            assert_eq!(json["mirror"]["state"], "complete");
+            assert!(json["mirror"]["changed"].is_null());
+            assert!(
+                app::describe(&status).contains("folder cleanup may have changed the destination")
+            );
+            assert_eq!(serde_json::from_value::<Status>(json).unwrap(), status);
         }
 
         fn source_order() -> Vec<String> {
