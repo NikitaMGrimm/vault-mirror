@@ -568,6 +568,24 @@ mod tests {
     }
 
     #[test]
+    fn failed_mirrors_do_not_describe_planned_work_as_completed() {
+        let failed = Status {
+            status: RunResult::Failed,
+            failure_stage: Some("verifying the destination".into()),
+            error: Some("read failed".into()),
+            ..success()
+        };
+        let message = describe(&failed);
+        assert!(
+            message.contains("destination may contain partial changes"),
+            "{message}"
+        );
+        assert!(!message.contains("created") && !message.contains("deleted"));
+        let value = serde_json::to_value(&failed).unwrap();
+        assert!(value["mirror"].get("changed").is_none());
+    }
+
+    #[test]
     fn descriptions_are_one_line_summaries() {
         assert_eq!(
             describe(&success()),
