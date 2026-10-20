@@ -17,7 +17,7 @@ use crate::{
     },
     store::{FolderReceipts, Receipts, Snapshot},
     text::{count, listed},
-    vault::{Account, Item, Scope, ServerTraits, Vault, VaultRead, WRITES_AT_ONCE},
+    vault::{Account, Attachment, Item, Scope, ServerTraits, Vault, VaultRead, WRITES_AT_ONCE},
 };
 
 /// Receives progress lines. Messages never contain vault content, only
@@ -224,17 +224,52 @@ fn vault_key(endpoint: &Endpoint<'_>) -> String {
     serde_json::json!([url.trim_end_matches('/'), endpoint.account.user_id, scope]).to_string()
 }
 
+// Only a verified transfer constructs this evidence. Later item responses
+// describe current state, not the files this run proved it copied.
+struct CheckedFiles(Vec<Attachment>);
+
+impl CheckedFiles {
+    fn write(&self) -> FileWrite<'_> {
+        FileWrite::Copied(&self.0)
+    }
+}
+
+struct Written {
+    entry: usize,
+    item: Item,
+    files: Option<CheckedFiles>,
+}
+
+fn file_manifest(files: &[Attachment]) -> Vec<(&str, &str)> {
+    let mut manifest: Vec<_> = files
+        .iter()
+        .map(|file| (file.id.as_str(), file.file_name.as_str()))
+        .collect();
+    manifest.sort_unstable();
+    manifest
+}
+
+fn check_files(item: &Item, expected: &[Attachment]) -> Result<()> {
+    if file_manifest(&item.attachments) != file_manifest(expected) {
+        bail!(
+            "item {} changed during the run. Run again to copy it",
+            item.id
+        );
+    }
+    Ok(())
+}
+
 /// Copies `from_item`'s attachments, with their content out of `files`, to
 /// `to`'s item, then deletes its attachments `old`, as this run last wrote
 /// it. The copies are uploaded and read back before `old` is deleted, so a
 /// failed upload leaves the files it was replacing. Returns the item as the
-/// server then holds it, and how many files it copied.
+/// server then holds it, with the verified attachment evidence.
 async fn copy_attachments(
     (files, from_item): (&Snapshot<'_>, &Item),
     (to, to_item): (&Endpoint<'_>, &Item),
     old: &[String],
     mode: Mode,
-) -> Result<(Item, usize)> {
+) -> Result<(Item, CheckedFiles)> {
     let mut copied = Vec::new();
     for attachment in &from_item.attachments {
         let data = files.attachment(&attachment.id).with_context(|| {
@@ -263,16 +298,19 @@ async fn copy_attachments(
             .await?;
     }
     let stored = reread(to, to_item, mode).await?;
-    // Any other file was added since this run read the item, and is left for
-    // the next run, which backs it up first.
-    let wanted: BTreeSet<&str> = copied.iter().map(|(id, ..)| id.as_str()).collect();
-    if attachment_ids(&stored) != wanted {
+    let mut expected: Vec<_> = copied
+        .iter()
+        .map(|(id, name, _)| (id.as_str(), *name))
+        .collect();
+    expected.sort_unstable();
+    if file_manifest(&stored.attachments) != expected {
         bail!(
             "item {} changed during the run. Run again to copy it",
             to_item.id
         );
     }
-    Ok((stored, copied.len()))
+    let checked = CheckedFiles(stored.attachments.clone());
+    Ok((stored, checked))
 }
 
 /// Reads `item` back and fails unless it holds each `uploaded` file, by id,
@@ -361,10 +399,6 @@ fn mode(source: &Scope, dest: &Scope) -> Result<Mode> {
             "the source and destination must both be individual vaults or both be organizations"
         ),
     }
-}
-
-fn attachment_ids(item: &Item) -> BTreeSet<&str> {
-    item.attachments.iter().map(|a| a.id.as_str()).collect()
 }
 
 /// Whether two reads of an item found it in the same state, in everything
@@ -894,7 +928,17 @@ impl<'a> Run<'a> {
             .account
             .create_items(&dest.scope, &drafts, &folder_names, &|n| writes.add(n))
             .await?;
-        let mut written: Vec<(usize, Item)> = plan.creates.iter().copied().zip(new_items).collect();
+        let mut written: Vec<Written> = plan
+            .creates
+            .iter()
+            .copied()
+            .zip(new_items)
+            .map(|(entry, item)| Written {
+                entry,
+                item,
+                files: None,
+            })
+            .collect();
         let created = written.len();
 
         let updated: Vec<(usize, Item)> = stream::iter(plan.updates.iter().map(|update| {
@@ -920,7 +964,11 @@ impl<'a> Run<'a> {
         .buffer_unordered(WRITES_AT_ONCE)
         .try_collect()
         .await?;
-        written.extend(updated);
+        written.extend(updated.into_iter().map(|(entry, item)| Written {
+            entry,
+            item,
+            files: None,
+        }));
         if created > 0 {
             self.reporter.status("Created", &count(created, "item"));
         }
@@ -937,14 +985,12 @@ impl<'a> Run<'a> {
             })
             .collect();
         let transfers: Vec<(usize, &Item, &[String])> = (written[..created].iter())
-            .filter(|(entry_index, _)| copies_files(*entry_index))
-            .map(|(entry_index, item)| (*entry_index, item, &[][..]))
-            .chain(
-                (written[created..].iter()).filter_map(|(entry_index, item)| {
-                    let old = old_files.get(entry_index)?;
-                    Some((*entry_index, item, old.as_slice()))
-                }),
-            )
+            .filter(|written| copies_files(written.entry))
+            .map(|written| (written.entry, &written.item, &[][..]))
+            .chain((written[created..].iter()).filter_map(|written| {
+                let old = old_files.get(&written.entry)?;
+                Some((written.entry, &written.item, old.as_slice()))
+            }))
             .collect();
         let uploads = Tally::new(
             self.reporter,
@@ -958,7 +1004,7 @@ impl<'a> Run<'a> {
                 .sum(),
             "attachments",
         );
-        let copied: Vec<(usize, usize, Item)> =
+        let copied: Vec<Written> =
             stream::iter(transfers.into_iter().map(|(entry_index, dest_item, old)| {
                 let (replacement, uploads) = (&replacement, &uploads);
                 async move {
@@ -966,30 +1012,35 @@ impl<'a> Run<'a> {
                     let (stored, copied) =
                         copy_attachments((source_files, source_item), (dest, dest_item), old, mode)
                             .await?;
-                    uploads.add(copied);
-                    let draft =
-                        replacement(entry_index, &stored, FileWrite::Copied(&stored.attachments))?;
+                    uploads.add(copied.0.len());
+                    let draft = replacement(entry_index, &stored, copied.write())?;
                     let finished = dest
                         .account
                         .update_item(&dest.scope, &stored, &draft)
                         .await
                         .with_context(|| format!("updating destination item {}", dest_item.id))?;
-                    anyhow::Ok((entry_index, copied, finished))
+                    anyhow::Ok(Written {
+                        entry: entry_index,
+                        item: finished,
+                        files: Some(copied),
+                    })
                 }
             }))
             // Attachments are held in memory while they are re-encrypted.
             .buffer_unordered(2)
             .try_collect()
             .await?;
-        let mut total = 0;
-        let mut finished: HashMap<usize, Item> = HashMap::new();
-        for (entry_index, copied, item) in copied {
-            total += copied;
-            finished.insert(entry_index, item);
-        }
-        for (entry_index, item) in &mut written {
-            if let Some(done) = finished.remove(entry_index) {
-                *item = done;
+        let total: usize = copied
+            .iter()
+            .map(|written| written.files.as_ref().unwrap().0.len())
+            .sum();
+        let mut finished: HashMap<usize, Written> = copied
+            .into_iter()
+            .map(|written| (written.entry, written))
+            .collect();
+        for written in &mut written {
+            if let Some(done) = finished.remove(&written.entry) {
+                *written = done;
             }
         }
         if total > 0 {
@@ -1002,13 +1053,13 @@ impl<'a> Run<'a> {
         // to an item's archive state.
         let wanted =
             |entry_index: usize| source_vault.items[plan.entries[entry_index].source].archived;
-        let changing: Vec<&(usize, Item)> = (written.iter())
-            .filter(|(entry_index, item)| item.archived != wanted(*entry_index))
+        let changing: Vec<&Written> = (written.iter())
+            .filter(|written| written.item.archived != wanted(written.entry))
             .collect();
         for archived in [true, false] {
             let ids: Vec<String> = (changing.iter())
-                .filter(|(entry_index, _)| wanted(*entry_index) == archived)
-                .map(|(_, item)| item.id.clone())
+                .filter(|written| wanted(written.entry) == archived)
+                .map(|written| written.item.id.clone())
                 .collect();
             if ids.is_empty() {
                 continue;
@@ -1029,15 +1080,25 @@ impl<'a> Run<'a> {
         // Each copy's marker records the archive state it was written in,
         // so a run that stops before the state is set takes no copy for
         // changed by hand. Now the state is set, the marker follows.
-        stream::iter(changing.into_iter().map(|(entry_index, item)| {
-            let (replacement, copies_files) = (&replacement, &copies_files);
+        stream::iter(changing.into_iter().map(|written| {
+            let replacement = &replacement;
+            let skip_attachments = self.options.skip_attachments;
             async move {
+                let item = &written.item;
                 let stored = reread(dest, item, mode).await?;
-                let files = match copies_files(*entry_index) {
-                    true => FileWrite::Copied(&stored.attachments),
-                    false => FileWrite::Kept,
+                let files = match &written.files {
+                    Some(checked) => {
+                        check_files(&stored, &checked.0)?;
+                        checked.write()
+                    }
+                    None => {
+                        if !skip_attachments {
+                            check_files(&stored, &item.attachments)?;
+                        }
+                        FileWrite::Kept
+                    }
                 };
-                let draft = replacement(*entry_index, &stored, files)?;
+                let draft = replacement(written.entry, &stored, files)?;
                 (dest.account.update_item(&dest.scope, &stored, &draft).await)
                     .with_context(|| format!("updating destination item {}", item.id))?;
                 anyhow::Ok(())
@@ -1747,6 +1808,8 @@ mod tests {
             change: Change,
             change_on_marker: bool,
             updates: usize,
+            transfer_reads: usize,
+            change_on_transfer_read: bool,
             renamed: String,
         }
 
@@ -1795,6 +1858,8 @@ mod tests {
                     change,
                     change_on_marker,
                     updates: 0,
+                    transfer_reads: 0,
+                    change_on_transfer_read: false,
                     renamed: String::new(),
                 }));
                 let stop = Arc::new(AtomicBool::new(false));
@@ -1870,6 +1935,10 @@ mod tests {
                                 json!({"url":format!("{origin}/blob")})
                             }
                             ("GET", "/dest/api/ciphers/copy-main") => {
+                                state.transfer_reads += 1;
+                                if state.change_on_transfer_read && state.transfer_reads == 2 {
+                                    state.change_files();
+                                }
                                 state.dest["ciphers"][0].clone()
                             }
                             ("PUT", "/dest/api/ciphers/copy-main") => {
@@ -2064,6 +2133,28 @@ mod tests {
                             .any(|i| i["id"] == "copy-obsolete")
                     );
                 }
+            }
+        }
+
+        #[tokio::test]
+        async fn transfer_final_reread_checks_names_and_manifest_multiplicity() {
+            for change in [
+                Change::Add,
+                Change::Remove,
+                Change::Rename,
+                Change::Duplicate,
+            ] {
+                let server = Server::start(change, false);
+                server.state.lock().unwrap().change_on_transfer_read = true;
+                let error = execute(&server).await.unwrap_err();
+                assert_eq!(error.stage, "copying attachments");
+                let state = server.state.lock().unwrap();
+                assert!(
+                    !state
+                        .requests
+                        .iter()
+                        .any(|r| r == "PUT /dest/api/ciphers/delete")
+                );
             }
         }
 

@@ -22,7 +22,8 @@ keep secrets out of them, use [secret files](docs/configuration.md#secrets-in-fi
 
 vault-mirror never writes to the source. A run changes and deletes only the
 copies it made in the destination, and stops rather than overwrite a copy
-someone changed there.
+someone changed there before the run.
+[Changes during a run](docs/limitations.md#changes-during-a-run) can still be lost.
 
 ## What it stores
 

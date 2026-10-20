@@ -32,7 +32,8 @@ vault-mirror copies your main vault, the **source**, into a second vault, the
 3. reads the destination back to check the result.
 
 Changes go one way. Items you add to the destination stay, and runs stop
-rather than overwrite your changes to the copies.
+rather than overwrite changes to copies found at the start of a run.
+[Changes during a run](docs/limitations.md#changes-during-a-run) can still be lost.
 
 For ongoing organization mirroring, use a Vaultwarden destination. Updates to
 existing Bitwarden organization copies are [refused to protect members' private
