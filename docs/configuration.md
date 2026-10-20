@@ -81,6 +81,7 @@ their attachments. The destination backup keeps them.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SCHEDULE` | | When `daemon` runs, as a cron expression such as `0 3 * * *`. |
+| `ALLOW_ORGANIZATION_METADATA_LOSS` | `false` | Allow Bitwarden organization updates that can erase members' private metadata. See [Organizations](#organizations). |
 | `TZ` | UTC | The time zone `SCHEDULE` is read in, such as `Europe/Berlin`. |
 | `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After a successful or a failed run, `POST` a one-line summary to the matching URL, such as an [ntfy](https://ntfy.sh) topic or a [healthchecks.io](https://healthchecks.io) check. It holds counts and errors, never vault content. |
 | `CA_CERT_FILE` | | A PEM file of extra certificate authorities to trust. In Docker, mount it into the container and give its path there. |
@@ -140,8 +141,14 @@ On Bitwarden's servers, that means, for both organizations:
 3. Make sure every item is in a collection.
 
 Members, groups, permissions, favorites and folders aren't copied between
-organizations. A destination member's favorites and folders stay as they set
-them.
+organizations. A Vaultwarden destination keeps members' own favorites and
+folders. Bitwarden organization updates stop by default because they can erase
+members' private folder, favorite and archive data. Backups cannot restore it.
+
+To accept this loss for one `run` or `check`, pass
+`--allow-organization-metadata-loss`. For persistent permission, including
+`daemon` runs, set `ALLOW_ORGANIZATION_METADATA_LOSS=true`. Other safety checks
+still apply.
 
 ## Mirroring part of a vault
 

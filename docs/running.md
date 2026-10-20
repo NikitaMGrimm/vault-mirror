@@ -17,6 +17,10 @@
 Every command takes `--env-file PATH` to read a [settings
 file](configuration.md#the-settings-file), and `--help` to describe its options.
 
+`run` and `check` also accept `--allow-organization-metadata-loss` for
+[Bitwarden organization updates](configuration.md#organizations). `daemon`
+uses the persistent `ALLOW_ORGANIZATION_METADATA_LOSS=true` setting instead.
+
 Outside a terminal, such as in container logs or under systemd, run progress
 and run-failure messages start with a UTC timestamp and a level. Snapshot ids,
 health-check output, and top-level command errors stay plain. Set `NO_COLOR`

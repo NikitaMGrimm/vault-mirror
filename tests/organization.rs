@@ -4,7 +4,7 @@ use anyhow::Result;
 use common::*;
 use vault_mirror::{
     crypto::KdfParams,
-    mirror::MirrorOptions,
+    mirror::{self, Endpoint, MirrorOptions},
     node::Node,
     vault::{Account, Draft, Scope, Vault},
 };
@@ -81,7 +81,7 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
         )
         .await?;
 
-    let options = MirrorOptions::default();
+    let mut options = MirrorOptions::default();
     let first = run_scoped(
         &source,
         source_scope.clone(),
@@ -161,17 +161,65 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
         .unwrap();
     source.delete_collection(&source_org, &empty.id).await?;
 
-    if !dest.server_traits().await?.organization_updates_safe {
+    let needs_permission = !dest.server_traits().await?.organization_updates_safe;
+    if needs_permission {
         let before = dest.load(&dest_scope).await?;
-        let refused = run_scoped(&source, source_scope, &dest, dest_scope.clone(), &options)
-            .await
-            .unwrap_err();
+        let refused = run_scoped(
+            &source,
+            source_scope.clone(),
+            &dest,
+            dest_scope.clone(),
+            &options,
+        )
+        .await
+        .unwrap_err();
         assert!(
             dest.load(&dest_scope).await? == before,
             "a refused run changed the destination"
         );
         assert!(format!("{refused:#}").contains("cannot safely update organization copies"));
-        return Ok(());
+        assert!(format!("{refused:#}").contains("--allow-organization-metadata-loss"));
+    }
+
+    let source_read = source.load_with_traits(&source_scope).await?;
+    let dest_read = dest.load_with_traits(&dest_scope).await?;
+    let warning = "Organization updates can erase members' private folder, favorite and archive \
+                   data. Backups cannot restore it.";
+    let expected_warnings: Vec<String> = if needs_permission {
+        vec![warning.into()]
+    } else {
+        vec![]
+    };
+    for allowed in [false, true] {
+        options.allow_organization_metadata_loss = allowed;
+        let preview = mirror::check(
+            &Endpoint {
+                account: &source,
+                scope: source_scope.clone(),
+            },
+            &Endpoint {
+                account: &dest,
+                scope: dest_scope.clone(),
+            },
+            &source_read,
+            &dest_read,
+            &options,
+            &folders(),
+            &Capture::default(),
+        )
+        .await;
+        if needs_permission && !allowed {
+            let error = preview.unwrap_err();
+            assert!(format!("{:#}", error.source).contains("--allow-organization-metadata-loss"));
+        } else {
+            let preview = preview?;
+            assert_eq!(preview.summary.items_updated, 2);
+            assert_eq!(preview.warnings, expected_warnings);
+        }
+        assert!(
+            dest.load(&dest_scope).await? == *dest_read.vault(),
+            "a preview changed the destination"
+        );
     }
 
     let second = run_scoped(
@@ -183,6 +231,7 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
     )
     .await?;
     assert_eq!(second.summary.items_updated, 2);
+    assert_eq!(second.warnings, expected_warnings);
     let vault = dest.load(&dest_scope).await?;
     assert_eq!(collections_of(&vault, "GitHub"), ["Team B"]);
     assert_eq!(
@@ -196,11 +245,9 @@ async fn an_organization_is_mirrored_by_collection_name() -> Result<()> {
     );
     // Collections are left for you to delete.
     assert!(vault.collections.iter().any(|c| c.name == "Empty team"));
-    assert!(
-        !run_scoped(&source, source_scope, &dest, dest_scope, &options)
-            .await?
-            .changed
-    );
+    let unchanged = run_scoped(&source, source_scope, &dest, dest_scope, &options).await?;
+    assert!(!unchanged.changed);
+    assert!(unchanged.warnings.is_empty());
     Ok(())
 }
 

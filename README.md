@@ -35,9 +35,9 @@ Changes go one way. Items you add to the destination stay, and runs stop
 rather than overwrite changes to copies found at the start of a run.
 [Changes during a run](docs/limitations.md#changes-during-a-run) can still be lost.
 
-For ongoing organization mirroring, use a Vaultwarden destination. Updates to
-existing Bitwarden organization copies are [refused to protect members' private
-data](https://github.com/NikitaMGrimm/vault-mirror/blob/main/docs/limitations.md#server-restrictions).
+For ongoing organization mirroring, prefer a Vaultwarden destination. Updates
+to existing Bitwarden organization copies stop by default. You can explicitly
+[allow updates that can erase members' private metadata](https://github.com/NikitaMGrimm/vault-mirror/blob/main/docs/configuration.md#organizations).
 
 Use it to keep a working copy on Bitwarden's cloud for when your own server is
 down, to move between servers, or to share one folder or collection with

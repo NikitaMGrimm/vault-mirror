@@ -785,6 +785,44 @@ fn unreachable_settings(dir: &std::path::Path, extra: &str) -> std::path::PathBu
 }
 
 #[test]
+fn organization_metadata_loss_can_be_allowed_for_run_and_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = unreachable_settings(dir.path(), "ALLOW_ORGANIZATION_METADATA_LOSS=false\n");
+    for command in ["run", "check"] {
+        let output = vault_mirror()
+            .arg("--env-file")
+            .arg(&settings)
+            .arg(command)
+            .arg("--allow-organization-metadata-loss")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let message = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            message.contains("expected an http or https URL"),
+            "{message}"
+        );
+    }
+    let output = vault_mirror()
+        .env("ALLOW_ORGANIZATION_METADATA_LOSS", "yes")
+        .arg("--env-file")
+        .arg(&settings)
+        .arg("check")
+        .arg("--allow-organization-metadata-loss")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("configuration: ALLOW_ORGANIZATION_METADATA_LOSS has an invalid value: yes")
+    );
+}
+
+#[test]
 fn attachments_can_be_skipped_from_the_settings_file_or_the_environment() {
     let dir = tempfile::tempdir().unwrap();
     let check = |extra: &str, env: Option<&str>| {
