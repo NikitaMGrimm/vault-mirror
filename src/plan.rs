@@ -272,6 +272,63 @@ pub fn marker_of(item: &Item, pair: &str) -> Option<Marker> {
         .find(|marker| marker.pair == pair)
 }
 
+/// Refuses a new copy linked to an existing item by a foreign pair. Such a
+/// marker grants no ownership, so creating another copy cannot relocate it.
+/// `source` is the filtered vault used to build `plan`; `dest` includes trash.
+pub fn check_foreign_links(
+    plan: &Plan,
+    source: &Vault,
+    dest: &Vault,
+    pair: &str,
+) -> Result<(), ForeignLinks> {
+    if plan.creates.is_empty() {
+        return Ok(());
+    }
+    let creates: BTreeMap<&str, &Item> = plan
+        .creates
+        .iter()
+        .map(|&entry| {
+            let item = &source.items[plan.entries[entry].source];
+            (item.id.as_str(), item)
+        })
+        .collect();
+    let dest_ids: BTreeSet<&str> = dest.items.iter().map(|item| item.id.as_str()).collect();
+    let mut linked = BTreeSet::new();
+    for item in &dest.items {
+        for marker in item
+            .fields()
+            .iter()
+            .filter_map(field_marker)
+            .filter(|marker| marker.pair != pair)
+        {
+            if creates.contains_key(marker.source_id.as_str()) {
+                linked.insert(marker.source_id);
+            }
+        }
+    }
+    for (&id, item) in &creates {
+        if item
+            .fields()
+            .iter()
+            .filter_map(field_marker)
+            .any(|marker| marker.pair != pair && dest_ids.contains(marker.source_id.as_str()))
+        {
+            linked.insert(id.to_string());
+        }
+    }
+    if linked.is_empty() {
+        return Ok(());
+    }
+    Err(ForeignLinks(linked.into_iter().collect()))
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error(
+    "the run would create {} linked to existing destination items by markers of another pair of vaults ({}). Check the server addresses, accounts and scopes. For a server move, keep the original addresses reachable or use a fresh empty destination. See docs/limitations.md#server-address-changes",
+    count(.0.len(), "copy"), listed(.0)
+)]
+pub struct ForeignLinks(Vec<String>);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileReceipt {
     source: String,

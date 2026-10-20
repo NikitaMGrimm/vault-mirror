@@ -72,6 +72,18 @@ for ongoing organization mirroring.
 **Archived items** need a destination that supports archiving. A run stops if
 the destination refuses to archive a copy.
 
+## Server address changes
+
+Markers identify the exact server addresses, accounts and scopes used to make
+copies. If these change, a run stops before creating a copy linked to an item
+from the previous pair. Safety flags do not bypass this check.
+
+When moving a server, keep the original configured URL reachable through DNS
+or a reverse proxy with valid TLS. If you cannot keep that URL, stop the daemon
+and use a fresh empty destination account or organization. Retain the previous
+vault and its backups, including any independent edits. Run `check` before
+copying to the new destination.
+
 ## Changes during a run
 
 Make lasting edits in the source. Avoid editing destination copies while a run
