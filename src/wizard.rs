@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     fs,
     io::{IsTerminal, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
@@ -20,6 +20,7 @@ use crate::{Console, check_config, describe_vault};
 
 pub const ENV_FILE: &str = "vault-mirror.env";
 const COMPOSE_FILE: &str = "compose.yaml";
+const CA_CERT_TARGET: &str = "/run/vault-mirror-ca.pem";
 
 /// Bitwarden's cloud regions, then any other server.
 const SERVERS: &[(&str, Option<&str>)] = &[
@@ -77,7 +78,13 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
     ]);
     let mut written: Vec<(&str, String)> = Vec::new();
     // A server with a private CA needs it for the logins below too.
-    if let Ok(path) = std::env::var("CA_CERT_FILE") {
+    let ca_cert = std::env::var("CA_CERT_FILE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| ca_cert_file(value.trim()))
+        .transpose()?;
+    if let Some(path) = &ca_cert {
+        let path = path.display().to_string();
         env.insert("CA_CERT_FILE".into(), path.clone());
         written.push(("CA_CERT_FILE", path));
     }
@@ -140,7 +147,11 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
              computer may be able to read it; make it readable only by you"
         ));
     }
-    write_new(&compose_path, &compose_file(dir)?, false)?;
+    write_new(
+        &compose_path,
+        &compose_file(dir, ca_cert.as_deref())?,
+        false,
+    )?;
     Console::status("Created", COMPOSE_FILE);
     Console::note(
         "keep BACKUP_PASSPHRASE outside the backups and vault. After the first run, \
@@ -270,8 +281,7 @@ async fn log_in(env: &HashMap<String, String>, prefix: &str, role: &str) -> Resu
 }
 
 /// The settings as `NAME=value` lines, taken literally: no quotes, no
-/// variables. Docker Compose reads them with `format: raw`, and
-/// `--env-file` the same way.
+/// variables, as `--env-file` reads them.
 fn env_file(settings: &[(&str, String)]) -> String {
     let mut text = String::from(
         "# Written by `vault-mirror init`. Values are taken literally, without quotes.\n\
@@ -292,7 +302,14 @@ fn env_file(settings: &[(&str, String)]) -> String {
     text
 }
 
-fn compose_file(dir: &Path) -> Result<String> {
+/// `CA_CERT_FILE` made absolute against the working directory, where the
+/// logins read it, so the settings file and Compose's bind mount find it
+/// from the generated directory too.
+fn ca_cert_file(value: &str) -> Result<PathBuf> {
+    std::path::absolute(value).map_err(|error| anyhow!("CA_CERT_FILE {value}: {error}"))
+}
+
+fn compose_file(dir: &Path, ca_cert: Option<&Path>) -> Result<String> {
     let version = env!("CARGO_PKG_VERSION");
     let tag = version
         .rsplit_once('.')
@@ -302,16 +319,38 @@ fn compose_file(dir: &Path) -> Result<String> {
     let user = owner(&dir.join("backups"))?
         .map(|(uid, gid)| format!("    user: \"{uid}:{gid}\"\n"))
         .unwrap_or_default();
+    // The container reads the CA where it is mounted; its environment
+    // overrides the host path in the settings file. A missing file must fail
+    // the start rather than become an empty directory.
+    let (environment, ca_volume) = match ca_cert {
+        Some(path) => (
+            format!("    environment:\n      CA_CERT_FILE: {CA_CERT_TARGET}\n"),
+            format!(
+                "      - type: bind\n        \
+                   source: {}\n        \
+                   target: {CA_CERT_TARGET}\n        \
+                   read_only: true\n        \
+                   bind:\n          \
+                     create_host_path: false\n",
+                // A JSON string is a YAML double-quoted scalar; `$$` keeps
+                // Compose from reading `$` as a variable.
+                serde_json::to_string(&path.display().to_string().replace('$', "$$"))?
+            ),
+        ),
+        None => Default::default(),
+    };
     Ok(format!(
         "services:\n  \
            vault-mirror:\n    \
              image: ghcr.io/nikitamgrimm/vault-mirror:{tag}\n    \
              entrypoint: [\"/vault-mirror\", \"--env-file\", \"/run/vault-mirror.env\"]\n    \
              command: daemon\n\
-         {user}    \
+         {user}\
+         {environment}    \
              volumes:\n      \
                - ./backups:/data\n      \
-               - ./vault-mirror.env:/run/vault-mirror.env:ro\n    \
+               - ./vault-mirror.env:/run/vault-mirror.env:ro\n\
+         {ca_volume}    \
              healthcheck:\n      \
                test: [\"CMD\", \"/vault-mirror\", \"--env-file\", \"/run/vault-mirror.env\", \"healthcheck\"]\n    \
              restart: unless-stopped\n    \
@@ -417,7 +456,7 @@ mod tests {
     #[test]
     fn the_compose_file_lets_a_run_finish_on_stop() {
         let dir = tempfile::tempdir().unwrap();
-        let compose = compose_file(dir.path()).unwrap();
+        let compose = compose_file(dir.path(), None).unwrap();
         assert!(
             compose.contains("\n    command: daemon\n"),
             "missing daemon command"
@@ -441,12 +480,48 @@ mod tests {
     #[test]
     fn compose_reads_settings_only_from_the_mounted_file() {
         let dir = tempfile::tempdir().unwrap();
-        let compose = compose_file(dir.path()).unwrap();
+        let compose = compose_file(dir.path(), None).unwrap();
         assert!(
             !compose.contains("env_file:"),
             "settings injected into the container environment"
         );
         assert!(compose.contains("    healthcheck:\n      test: [\"CMD\", \"/vault-mirror\", \"--env-file\", \"/run/vault-mirror.env\", \"healthcheck\"]\n"), "healthcheck does not read the mounted settings");
+    }
+
+    #[test]
+    fn compose_mounts_the_ca_file_where_the_settings_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let without = compose_file(dir.path(), None).unwrap();
+        assert!(!without.contains("environment:"), "{without}");
+        assert!(!without.contains(CA_CERT_TARGET), "{without}");
+
+        let ca = Path::new("/home/me/my certs/$HOME \"a\":b.pem");
+        let compose = compose_file(dir.path(), Some(ca)).unwrap();
+        let environment = "    environment:\n      CA_CERT_FILE: /run/vault-mirror-ca.pem\n";
+        let bind = "      - type: bind\n        \
+                      source: \"/home/me/my certs/$$HOME \\\"a\\\":b.pem\"\n        \
+                      target: /run/vault-mirror-ca.pem\n        \
+                      read_only: true\n        \
+                      bind:\n          \
+                        create_host_path: false\n";
+        assert!(compose.contains(environment), "{compose}");
+        assert!(
+            compose.contains(&format!(
+                "      - ./vault-mirror.env:/run/vault-mirror.env:ro\n{bind}    healthcheck:\n"
+            )),
+            "{compose}"
+        );
+        assert_eq!(compose.replace(environment, "").replace(bind, ""), without);
+    }
+
+    #[test]
+    fn a_relative_ca_file_is_saved_from_the_working_directory() {
+        let path = ca_cert_file("certs/ca.pem").unwrap();
+        assert!(path.is_absolute());
+        assert_eq!(path, std::env::current_dir().unwrap().join("certs/ca.pem"));
+        let dir = tempfile::tempdir().unwrap();
+        let absolute = dir.path().join("ca.pem");
+        assert_eq!(ca_cert_file(absolute.to_str().unwrap()).unwrap(), absolute);
     }
 
     #[test]

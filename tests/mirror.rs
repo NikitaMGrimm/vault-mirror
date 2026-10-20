@@ -316,6 +316,16 @@ async fn changes_to_copies_in_the_destination_are_replaced_only_when_allowed() -
     let preview = check(&source, &dest, &overwrite()).await?;
     assert!(!preview.changed);
     assert_eq!(dest.load(&PERSONAL).await?, changed);
+    assert!(
+        (preview.warnings.iter()).any(|w| w.starts_with("A run would replace 3 copies changed")),
+        "{:?}",
+        preview.warnings
+    );
+    assert!(
+        !(preview.warnings.iter()).any(|w| w.contains("from the start of this run")),
+        "{:?}",
+        preview.warnings
+    );
     let outcome = run(&source, &dest, &overwrite()).await?;
     assert!(outcome.changed);
     assert_eq!(preview.summary, outcome.summary);

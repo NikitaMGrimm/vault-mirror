@@ -634,14 +634,14 @@ pub enum Mode {
 
 /// Names of a vault's folders and collections by id, and the item content
 /// hashes they give.
-struct Places<'a> {
+pub(crate) struct Places<'a> {
     folders: HashMap<&'a str, &'a str>,
     collections: HashMap<&'a str, &'a str>,
     mode: Mode,
 }
 
 impl<'a> Places<'a> {
-    fn new(vault: &'a Vault, mode: Mode) -> Self {
+    pub(crate) fn new(vault: &'a Vault, mode: Mode) -> Self {
         Self {
             folders: names_by_id(vault.folders.iter().map(|f| (&f.id, &f.name))),
             collections: names_by_id(vault.collections.iter().map(|c| (&c.id, &c.name))),
@@ -649,7 +649,7 @@ impl<'a> Places<'a> {
         }
     }
 
-    fn folder(&self, item: &Item) -> Option<&'a str> {
+    pub(crate) fn folder(&self, item: &Item) -> Option<&'a str> {
         match self.mode {
             Mode::Personal => item
                 .folder_id
@@ -659,7 +659,7 @@ impl<'a> Places<'a> {
         }
     }
 
-    fn collections(&self, item: &Item) -> Vec<String> {
+    pub(crate) fn collections(&self, item: &Item) -> Vec<String> {
         match self.mode {
             Mode::Personal => Vec::new(),
             Mode::Organization => sorted_names(

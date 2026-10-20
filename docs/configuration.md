@@ -84,7 +84,7 @@ their attachments. The destination backup keeps them.
 | `ALLOW_ORGANIZATION_METADATA_LOSS` | `false` | Allow Bitwarden organization updates that can erase members' private metadata. See [Organizations](#organizations). |
 | `TZ` | UTC | The time zone `SCHEDULE` is read in, such as `Europe/Berlin`. |
 | `NOTIFY_SUCCESS_URL`, `NOTIFY_FAILURE_URL` | | After a successful or a failed run, `POST` a one-line summary to the matching URL, such as an [ntfy](https://ntfy.sh) topic or a [healthchecks.io](https://healthchecks.io) check. It holds counts and errors, never vault content. |
-| `CA_CERT_FILE` | | A PEM file of extra certificate authorities to trust. In Docker, mount it into the container and give its path there. |
+| `CA_CERT_FILE` | | A PEM file of extra certificate authorities to trust. See [Custom certificate authorities](#custom-certificate-authorities). |
 
 ## Setting up by hand
 
@@ -126,6 +126,26 @@ Instead of `init`:
    ```sh
    docker compose up -d
    ```
+
+## Custom certificate authorities
+
+Set `CA_CERT_FILE` before `init` if your server uses a private certificate
+authority. `init` saves the certificate's absolute host path in the settings
+file and adds a read-only mount to `compose.yaml`. Native commands use the host
+path. The Compose service uses the mounted certificate.
+
+When you run `init` in Docker, mount the certificate at the same absolute path
+on the host and in the container:
+
+```sh
+docker run --rm -it --user "$(id -u):$(id -g)" \
+  -e CA_CERT_FILE=/absolute/path/ca.pem \
+  --mount type=bind,source=/absolute/path/ca.pem,target=/absolute/path/ca.pem,readonly \
+  -v "$PWD:/work" -w /work ghcr.io/nikitamgrimm/vault-mirror:0.8 init
+```
+
+If you write `compose.yaml` yourself, mount the certificate read-only and set
+`CA_CERT_FILE` to its path inside the container.
 
 ## Organizations
 

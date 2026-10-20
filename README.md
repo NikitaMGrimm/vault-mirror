@@ -59,6 +59,11 @@ You need Docker, your main account, and a second account for the destination.
 vault-mirror stores both accounts' API keys and master passwords; see
 [Security](https://github.com/NikitaMGrimm/vault-mirror/blob/main/SECURITY.md) for what that means.
 
+Both servers must show every supported item type, even if your vault holds only
+logins. Bitwarden servers, including the cloud, can hide newer types and block
+runs. Check the [server restrictions](https://github.com/NikitaMGrimm/vault-mirror/blob/main/docs/limitations.md#server-restrictions)
+before setup.
+
 1. In the web vault of each account, open **Settings → Security → Keys** and
    select **View API key**. Keep both pages open.
 

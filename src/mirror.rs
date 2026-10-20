@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     node::Node,
     plan::{
-        self, FileWrite, FolderCleanup, Mode, Plan, Receipt, Safety, Summary, comparable,
+        self, FileWrite, FolderCleanup, Mode, Places, Plan, Receipt, Safety, Summary, comparable,
         differing_paths,
     },
     store::{FolderReceipts, Receipts, Snapshot},
@@ -677,11 +677,17 @@ impl<'a> Run<'a> {
         plan::check_safety(&plan, dest_vault, &self.options.safety)?;
         let overwritten = plan.overwritten().count();
         if overwritten > 0 {
-            self.warn(format!(
-                "Replacing {} changed in the destination with the source version. The \
-                 destination backup from the start of this run keeps the changes.",
-                count(overwritten, "copy")
-            ));
+            let copies = count(overwritten, "copy");
+            self.warn(match source_files {
+                Some(_) => format!(
+                    "Replacing {copies} changed in the destination with the source version. The \
+                     destination backup from the start of this run keeps the changes."
+                ),
+                None => format!(
+                    "A run would replace {copies} changed in the destination with the source \
+                     version. Its destination backup would keep the changes."
+                ),
+            });
         }
         let Some(source_files) = source_files else {
             return Ok(false);
@@ -1023,7 +1029,7 @@ impl<'a> Run<'a> {
                 .sum(),
             "attachments",
         );
-        let copied: Vec<Written> =
+        let copied: Vec<(usize, Item, CheckedFiles)> =
             stream::iter(transfers.into_iter().map(|(entry_index, dest_item, old)| {
                 let (replacement, uploads) = (&replacement, &uploads);
                 async move {
@@ -1038,28 +1044,22 @@ impl<'a> Run<'a> {
                         .update_item(&dest.scope, &stored, &draft)
                         .await
                         .with_context(|| format!("updating destination item {}", dest_item.id))?;
-                    anyhow::Ok(Written {
-                        entry: entry_index,
-                        item: finished,
-                        files: Some(copied),
-                    })
+                    anyhow::Ok((entry_index, finished, copied))
                 }
             }))
             // Attachments are held in memory while they are re-encrypted.
             .buffer_unordered(2)
             .try_collect()
             .await?;
-        let total: usize = copied
-            .iter()
-            .map(|written| written.files.as_ref().unwrap().0.len())
-            .sum();
-        let mut finished: HashMap<usize, Written> = copied
+        let total: usize = copied.iter().map(|(.., files)| files.0.len()).sum();
+        let mut finished: HashMap<usize, (Item, CheckedFiles)> = copied
             .into_iter()
-            .map(|written| (written.entry, written))
+            .map(|(entry_index, item, files)| (entry_index, (item, files)))
             .collect();
         for written in &mut written {
-            if let Some(done) = finished.remove(&written.entry) {
-                *written = done;
+            if let Some((item, files)) = finished.remove(&written.entry) {
+                written.item = item;
+                written.files = Some(files);
             }
         }
         if total > 0 {
@@ -1183,6 +1183,7 @@ impl<'a> Run<'a> {
         if !again.has_changes() {
             return Ok(());
         }
+        let places = Places::new(dest_vault, mode);
         let mut details = Vec::new();
         for update in again.updates.iter().take(5) {
             let entry = &again.entries[update.entry];
@@ -1193,9 +1194,12 @@ impl<'a> Run<'a> {
                 mode,
             );
             let dest_item = &dest_vault.items[update.dest];
-            let folder = folder_name(dest_vault, dest_item, mode);
-            let collections = collection_names(dest_vault, dest_item, mode);
-            let found = comparable(dest_item, folder.as_deref(), &collections, mode);
+            let found = comparable(
+                dest_item,
+                places.folder(dest_item),
+                &places.collections(dest_item),
+                mode,
+            );
             // Paths only, never values: this ends up in logs and the status file.
             let mut reasons = Vec::new();
             let paths = differing_paths(&wanted, &found);
@@ -1222,33 +1226,6 @@ impl<'a> Run<'a> {
             details.join("; ")
         );
     }
-}
-
-fn folder_name(vault: &Vault, item: &Item, mode: Mode) -> Option<String> {
-    if mode != Mode::Personal {
-        return None;
-    }
-    let id = item.folder_id.as_deref()?;
-    vault
-        .folders
-        .iter()
-        .find(|folder| folder.id == id)
-        .map(|folder| folder.name.clone())
-}
-
-fn collection_names(vault: &Vault, item: &Item, mode: Mode) -> Vec<String> {
-    if mode != Mode::Organization {
-        return Vec::new();
-    }
-    let mut names: Vec<String> = vault
-        .collections
-        .iter()
-        .filter(|collection| item.collection_ids.contains(&collection.id))
-        .map(|collection| collection.name.clone())
-        .collect();
-    names.sort();
-    names.dedup();
-    names
 }
 
 /// The plan's changes in a few words, leaving out what does not happen, as
