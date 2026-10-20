@@ -117,6 +117,7 @@ run stops and the destination stays as it was.
 | The run stops when | Likely cause | To go ahead anyway |
 | --- | --- | --- |
 | Items in the source are copies of destination items | Source and destination are swapped. | Fix the settings, or `run --reverse` if you [switched them on purpose](#switching-the-source-and-destination). |
+| A new copy is linked to an existing destination item by a marker of another pair | A server address, account or scope changed. | Check the settings and follow [server address changes](limitations.md#server-address-changes). |
 | Source and destination are the same vault | A settings mistake. | Fix the settings. |
 | Copies changed in the destination since a run wrote them | Someone edited, moved, archived or attached a file to a copy. | Make the change in the source, or `run --allow-overwrite` to put the source version back. |
 | The run would delete more than half of the copies | The source is empty, the wrong account, or filtered too much. | `run --allow-mass-delete` |

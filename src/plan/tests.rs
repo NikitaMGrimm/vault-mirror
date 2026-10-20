@@ -2222,3 +2222,100 @@ fn copies_the_plan_moves_leave_a_folder_and_copies_it_trashes_do_not() {
         "the trashed copy is still in it"
     );
 }
+
+#[test]
+fn foreign_links_refuse_endpoint_changes_and_reversal_without_adopting_copies() {
+    let source = numbered(2);
+    let old_pair = pair(
+        "https://source.example/api/account/personal",
+        "https://dest.example/api/account/personal",
+    );
+    let dest = apply_pair(&source, &old_pair);
+    for new_pair in [
+        pair(
+            "https://moved-source.example/api/account/personal",
+            "https://dest.example/api/account/personal",
+        ),
+        pair(
+            "https://source.example/api/account/personal",
+            "https://moved-dest.example/api/account/personal",
+        ),
+        pair(
+            "https://moved-source.example/api/account/personal",
+            "https://moved-dest.example/api/account/personal",
+        ),
+    ] {
+        for (source, dest) in [(&source, &dest), (&dest, &source)] {
+            let planned = super::plan(source, dest, Mode::Personal, &new_pair, false);
+            assert_eq!(planned.creates.len(), 2);
+            let error = check_foreign_links(&planned, source, dest, &new_pair).unwrap_err();
+            assert_eq!(error.0.len(), 2);
+            assert!(planned.updates.is_empty() && planned.deletes.is_empty());
+            let message = error.to_string();
+            assert!(message.contains("another pair of vaults"));
+            assert!(!message.contains("example") && !message.contains("password"));
+        }
+    }
+}
+
+#[test]
+fn foreign_links_inspect_every_valid_marker_in_both_directions() {
+    let source = numbered(1);
+    let mut dest = apply_pair(&source, OTHER_PAIR);
+    let mut unrelated = marker_of(&dest.items[0], OTHER_PAIR).unwrap();
+    unrelated.source_id = "unrelated-third-vault-item".into();
+    let Some(Node::List(fields)) = dest.items[0].content.get_mut("fields") else {
+        panic!()
+    };
+    fields.push(unrelated.to_field());
+    fields.push(map(vec![
+        ("name", text(MARKER_FIELD)),
+        ("value", text("not a valid marker")),
+    ]));
+    for (source, dest) in [(&source, &dest), (&dest, &source)] {
+        let planned = plan(source, dest, Mode::Personal);
+        assert!(check_foreign_links(&planned, source, dest, PAIR).is_err());
+    }
+}
+
+#[test]
+fn foreign_links_only_block_selected_creates_including_links_in_trash() {
+    let original = numbered(3);
+    let mut copies = apply_pair(&original, OTHER_PAIR);
+    let filtered = vault(vec![original.items[2].clone()]);
+    let unrelated = vault(vec![copies.items[0].clone()]);
+    let planned = plan(&filtered, &unrelated, Mode::Personal);
+    assert_eq!(planned.creates.len(), 1);
+    assert!(check_foreign_links(&planned, &filtered, &unrelated, PAIR).is_ok());
+
+    copies.items[2].in_trash = true;
+    let linked_trash = vault(vec![copies.items[2].clone()]);
+    let planned = plan(&filtered, &linked_trash, Mode::Personal);
+    let error = check_foreign_links(&planned, &filtered, &linked_trash, PAIR).unwrap_err();
+    assert_eq!(error.0, [filtered.items[0].id.clone()]);
+
+    let mut current = mirrored(&original, Mode::Personal);
+    current.items.extend(copies.items);
+    let planned = plan(&original, &current, Mode::Personal);
+    assert!(planned.creates.is_empty());
+    assert!(check_foreign_links(&planned, &original, &current, PAIR).is_ok());
+}
+
+#[test]
+fn ordinary_first_copy_and_unrelated_third_vault_forwarding_are_supported() {
+    let source = numbered(2);
+    let empty = Vault::default();
+    let first = plan(&source, &empty, Mode::Personal);
+    assert!(check_foreign_links(&first, &source, &empty, PAIR).is_ok());
+    let forwarded = apply_pair(&source, OTHER_PAIR);
+    let destination = vault(vec![login("independent", "Independent", "secret")]);
+    let planned = plan(&forwarded, &destination, Mode::Personal);
+    assert_eq!(planned.creates.len(), 2);
+    assert!(check_foreign_links(&planned, &forwarded, &destination, PAIR).is_ok());
+    let trashed = vault(vec![Item {
+        in_trash: true,
+        ..destination.items[0].clone()
+    }]);
+    let planned = plan(&forwarded, &trashed, Mode::Personal);
+    assert!(check_foreign_links(&planned, &forwarded, &trashed, PAIR).is_ok());
+}

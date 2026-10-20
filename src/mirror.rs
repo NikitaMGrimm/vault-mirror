@@ -644,6 +644,7 @@ impl<'a> Run<'a> {
             self.dest.account.premium,
             mode,
         )?;
+        plan::check_foreign_links(&plan, &source_vault, dest_vault, &pair)?;
         // Only an individual vault's folders are mirrored, and its own.
         let receipts = (mode == Mode::Personal)
             .then(|| self.folders.of(&plan::owner(&pair, &vault_key(self.dest))));
