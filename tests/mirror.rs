@@ -1456,3 +1456,98 @@ async fn ciphertext_in_an_unsupported_format_stops_the_run() -> Result<()> {
     assert!(dest.load(&PERSONAL).await?.items.is_empty());
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attachment_edits_after_copying_stop_before_obsolete_deletion() -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use vault_mirror::mirror::{self, Endpoint, Reporter};
+
+    struct Edit<'a> {
+        dest: &'a Account,
+        copy_id: String,
+        remove: bool,
+        fired: AtomicBool,
+    }
+    impl Reporter for Edit<'_> {
+        fn status(&self, verb: &str, _: &str) {
+            if verb != "Copied" || self.fired.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let item = self.dest.get_item(&PERSONAL, &self.copy_id).await?;
+                    if self.remove {
+                        self.dest
+                            .delete_attachment(&item.id, &item.attachments[0].id)
+                            .await?;
+                    } else {
+                        self.dest
+                            .upload_attachment(&PERSONAL, &item, "concurrent.txt", b"edit")
+                            .await?;
+                    }
+                    anyhow::Ok(())
+                })
+            })
+            .unwrap();
+        }
+        fn warn(&self, _: &str) {}
+    }
+
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    for remove in [false, true] {
+        let (source, dest) = sandbox.pair().await?;
+        seed_extra(&source, 4).await?;
+        run(&source, &dest, &options()).await?;
+        let originals = source.load(&PERSONAL).await?;
+        let item = by_name(&originals, "Extra note 0");
+        let obsolete = by_name(&originals, "Extra note 3");
+        let copies = dest.load(&PERSONAL).await?;
+        let copy_id = by_name(&copies, "Extra note 0").id.clone();
+        let obsolete_id = by_name(&copies, "Extra note 3").id.clone();
+        source
+            .upload_attachment(&PERSONAL, item, "file.txt", b"snapshot bytes")
+            .await?;
+        source
+            .set_archived(std::slice::from_ref(&item.id), true)
+            .await?;
+        source
+            .trash_items(std::slice::from_ref(&obsolete.id))
+            .await?;
+        let source_read = protect(&source, &PERSONAL).await?;
+        let dest_read = protect(&dest, &PERSONAL).await?;
+        let edit = Edit {
+            dest: &dest,
+            copy_id,
+            remove,
+            fired: AtomicBool::new(false),
+        };
+        let result = mirror::mirror(
+            &Endpoint {
+                account: &source,
+                scope: PERSONAL,
+            },
+            &Endpoint {
+                account: &dest,
+                scope: PERSONAL,
+            },
+            &source_read,
+            &dest_read,
+            &options(),
+            &folders(),
+            &edit,
+        )
+        .await;
+        assert!(edit.fired.load(Ordering::SeqCst));
+        assert!(result.is_err());
+        let after = dest.load(&PERSONAL).await?;
+        assert!(
+            after
+                .items
+                .iter()
+                .any(|item| item.id == obsolete_id && !item.in_trash)
+        );
+    }
+    Ok(())
+}

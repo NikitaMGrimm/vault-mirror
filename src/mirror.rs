@@ -1713,6 +1713,368 @@ mod tests {
         }
     }
 
+    mod executor {
+        use super::*;
+        use crate::{
+            crypto::SymKey,
+            snapshot,
+            store::{Keys, Store},
+        };
+        use serde_json::{Value, json};
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::{Arc, LazyLock, Mutex, atomic::AtomicBool},
+            thread,
+            time::Duration,
+        };
+        use time::OffsetDateTime;
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Change {
+            None,
+            Add,
+            Remove,
+            Rename,
+            Duplicate,
+        }
+
+        struct State {
+            source: Value,
+            dest: Value,
+            blob: Vec<u8>,
+            requests: Vec<String>,
+            change: Change,
+            change_on_marker: bool,
+            updates: usize,
+            renamed: String,
+        }
+
+        impl State {
+            fn change_files(&mut self) {
+                let files = self.dest["ciphers"][0]["attachments"]
+                    .as_array_mut()
+                    .unwrap();
+                match self.change {
+                    Change::None => {}
+                    Change::Add => {
+                        let mut extra = files[0].clone();
+                        extra["id"] = json!("concurrent");
+                        files.push(extra);
+                    }
+                    Change::Remove => {
+                        files.clear();
+                    }
+                    Change::Rename => {
+                        files[0]["fileName"] = json!(self.renamed);
+                    }
+                    Change::Duplicate => {
+                        files.push(files[0].clone());
+                    }
+                }
+            }
+        }
+
+        struct Server {
+            url: String,
+            state: Arc<Mutex<State>>,
+            stop: Arc<AtomicBool>,
+            task: Option<thread::JoinHandle<()>>,
+        }
+
+        impl Server {
+            fn start(change: Change, change_on_marker: bool) -> Self {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let url = format!("http://{}", listener.local_addr().unwrap());
+                let state = Arc::new(Mutex::new(State {
+                    source: Value::Null,
+                    dest: Value::Null,
+                    blob: vec![],
+                    requests: vec![],
+                    change,
+                    change_on_marker,
+                    updates: 0,
+                    renamed: String::new(),
+                }));
+                let stop = Arc::new(AtomicBool::new(false));
+                let (shared, stopped, origin) = (state.clone(), stop.clone(), url.clone());
+                let task = thread::spawn(move || {
+                    while !stopped.load(Ordering::SeqCst) {
+                        let mut socket = match listener.accept() {
+                            Ok((socket, _)) => socket,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(2));
+                                continue;
+                            }
+                            Err(e) => panic!("{e}"),
+                        };
+                        socket
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut request = Vec::new();
+                        let mut buffer = [0; 4096];
+                        let (head, body) = loop {
+                            let size = socket.read(&mut buffer).unwrap();
+                            assert_ne!(size, 0);
+                            request.extend_from_slice(&buffer[..size]);
+                            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                                let head = String::from_utf8_lossy(&request[..end]).into_owned();
+                                let length = head
+                                    .lines()
+                                    .find_map(|line| {
+                                        let (name, value) = line.split_once(':')?;
+                                        name.eq_ignore_ascii_case("content-length")
+                                            .then(|| value.trim().parse::<usize>().unwrap())
+                                    })
+                                    .unwrap_or(0);
+                                if request.len() >= end + 4 + length {
+                                    break (head, request[end + 4..].to_vec());
+                                }
+                            }
+                        };
+                        let mut words = head.lines().next().unwrap().split_whitespace();
+                        let (method, path) = (words.next().unwrap(), words.next().unwrap());
+                        let mut state = shared.lock().unwrap();
+                        state.requests.push(format!("{method} {path}"));
+                        let response = match (method, path) {
+                            ("POST", p) if p.ends_with("/identity/connect/token") => {
+                                json!({"access_token":"synthetic", "expires_in":3600})
+                            }
+                            ("GET", p) if p.ends_with("/api/config") => {
+                                json!({"server":{"name":"Vaultwarden"}})
+                            }
+                            ("GET", "/source/api/sync?excludeDomains=true") => state.source.clone(),
+                            ("GET", "/dest/api/sync?excludeDomains=true") => state.dest.clone(),
+                            ("POST", "/dest/api/ciphers/copy-main/attachment/v2") => {
+                                let body: Value = serde_json::from_slice(&body).unwrap();
+                                state.dest["ciphers"][0]["attachments"] = json!([{
+                                    "id":"uploaded", "fileName":body["fileName"], "key":body["key"], "size":4
+                                }]);
+                                json!({"attachmentId":"uploaded", "fileUploadType":1, "url":format!("{origin}/blob")})
+                            }
+                            ("PUT", "/blob") => {
+                                state.blob = body;
+                                json!({})
+                            }
+                            ("GET", "/blob") => {
+                                let header = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    state.blob.len()
+                                );
+                                socket.write_all(header.as_bytes()).unwrap();
+                                socket.write_all(&state.blob).unwrap();
+                                continue;
+                            }
+                            ("GET", "/dest/api/ciphers/copy-main/attachment/uploaded") => {
+                                json!({"url":format!("{origin}/blob")})
+                            }
+                            ("GET", "/dest/api/ciphers/copy-main") => {
+                                state.dest["ciphers"][0].clone()
+                            }
+                            ("PUT", "/dest/api/ciphers/copy-main") => {
+                                let mut updated: Value = serde_json::from_slice(&body).unwrap();
+                                updated["id"] = json!("copy-main");
+                                updated["attachments"] =
+                                    state.dest["ciphers"][0]["attachments"].clone();
+                                state.dest["ciphers"][0] = updated;
+                                state.updates += 1;
+                                if state.change_on_marker && state.updates == 2 {
+                                    state.change_files();
+                                }
+                                state.dest["ciphers"][0].clone()
+                            }
+                            ("PUT", "/dest/api/ciphers/archive") => {
+                                state.dest["ciphers"][0]["archivedDate"] =
+                                    json!("2026-10-20T00:00:00Z");
+                                json!({})
+                            }
+                            ("PUT", "/dest/api/ciphers/delete") => {
+                                state.dest["ciphers"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .retain(|i| i["id"] != "copy-obsolete");
+                                json!({})
+                            }
+                            _ => panic!("unexpected executor request {method} {path}"),
+                        };
+                        let body = response.to_string();
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        socket.write_all(header.as_bytes()).unwrap();
+                        socket.write_all(body.as_bytes()).unwrap();
+                    }
+                });
+                Self {
+                    url,
+                    state,
+                    stop,
+                    task: Some(task),
+                }
+            }
+
+            async fn accounts(&self) -> (Account, Account) {
+                let source = crate::vault::tests::account(
+                    &format!("{}/source", self.url),
+                    SymKey::generate(),
+                )
+                .await;
+                let key = SymKey::generate();
+                let renamed = key.encrypt_str("renamed.txt").unwrap();
+                let dest = crate::vault::tests::account(&format!("{}/dest", self.url), key).await;
+                let pair = plan::pair(&vault_key(&endpoint(&source)), &vault_key(&endpoint(&dest)));
+                let mut original = Vault::default();
+                for id in ["main", "kept-1", "kept-2", "obsolete"] {
+                    let mut item = item(id, None, &[]);
+                    item.content = [
+                        ("type".into(), Node::Number(2.into())),
+                        ("name".into(), Node::secret("synthetic")),
+                        (
+                            "secureNote".into(),
+                            Node::Map([("type".into(), Node::Number(0.into()))].into()),
+                        ),
+                    ]
+                    .into();
+                    original.items.push(item);
+                }
+                let planned =
+                    plan::plan(&original, &Vault::default(), Mode::Personal, &pair, false);
+                let copies: Vec<_> = planned
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        let mut copy = original.items[entry.source].clone();
+                        copy.id = format!("copy-{}", copy.id);
+                        copy.content = entry
+                            .draft(
+                                &original,
+                                &HashMap::new(),
+                                &HashMap::new(),
+                                false,
+                                FileWrite::Copied(&[]),
+                            )
+                            .unwrap()
+                            .content;
+                        copy
+                    })
+                    .collect();
+                let mut state = self.state.lock().unwrap();
+                state.dest = dest.test_sync(&copies);
+                state.dest["ciphers"][0]["attachments"] = json!([]);
+                state.source = source.test_sync(&original.items[..3]);
+                state.source["ciphers"][0]["archivedDate"] = json!("2026-10-20T00:00:00Z");
+                // The source read has a manifest. Transfer bytes come only from its snapshot.
+                // Reuse source ciphertext for an attachment name.
+                state.source["ciphers"][0]["attachments"] = json!([{"id":"source-file", "fileName":state.source["ciphers"][0]["name"], "size":4}]);
+                state.renamed = renamed;
+                (source, dest)
+            }
+        }
+
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::SeqCst);
+                self.task.take().unwrap().join().unwrap();
+            }
+        }
+
+        impl Reporter for Server {
+            fn status(&self, verb: &str, _: &str) {
+                if verb == "Copied" {
+                    let mut state = self.state.lock().unwrap();
+                    if !state.change_on_marker {
+                        state.change_files();
+                    }
+                }
+            }
+            fn warn(&self, _: &str) {}
+        }
+
+        fn endpoint(account: &Account) -> Endpoint<'_> {
+            Endpoint {
+                account,
+                scope: Scope::Personal,
+            }
+        }
+
+        static BACKUPS: LazyLock<(tempfile::TempDir, Keys)> = LazyLock::new(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let keys = Keys::open(dir.path(), "synthetic passphrase").unwrap();
+            (dir, keys)
+        });
+
+        async fn execute(server: &Server) -> Result<Outcome, MirrorError> {
+            let (source, dest) = server.accounts().await;
+            let source_read = source.load_with_traits(&Scope::Personal).await.unwrap();
+            let dest_read = dest.load_with_traits(&Scope::Personal).await.unwrap();
+            let (dir, keys) = &*BACKUPS;
+            let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+            let writer = store.begin(OffsetDateTime::UNIX_EPOCH).unwrap();
+            writer.write_attachment("source-file", b"file").unwrap();
+            let id = writer
+                .finish(&snapshot::build(source_read.vault(), &Scope::Personal).unwrap())
+                .unwrap();
+            mirror(
+                &endpoint(&source),
+                &endpoint(&dest),
+                &Protected {
+                    read: source_read,
+                    snapshot: store.snapshot(&id),
+                },
+                &Protected {
+                    read: dest_read,
+                    snapshot: store.snapshot(&id),
+                },
+                &MirrorOptions::default(),
+                &FolderReceipts::new(dir.path()),
+                server,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn archive_finalization_rejects_attachment_changes_before_obsolete_deletion() {
+            for change_on_marker in [false, true] {
+                for change in [
+                    Change::Add,
+                    Change::Remove,
+                    Change::Rename,
+                    Change::Duplicate,
+                ] {
+                    let server = Server::start(change, change_on_marker);
+                    let result = execute(&server).await;
+                    assert!(
+                        result.is_err(),
+                        "accepted {change:?}, marker={change_on_marker}"
+                    );
+                    let state = server.state.lock().unwrap();
+                    assert!(
+                        !state
+                            .requests
+                            .iter()
+                            .any(|r| r == "PUT /dest/api/ciphers/delete")
+                    );
+                    assert!(
+                        state.dest["ciphers"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|i| i["id"] == "copy-obsolete")
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn archive_finalization_accepts_the_checked_attachment_manifest() {
+            let server = Server::start(Change::None, false);
+            let outcome = execute(&server).await.unwrap();
+            assert_eq!(outcome.summary.attachments_copied, 1);
+            assert_eq!(outcome.summary.items_deleted, 1);
+        }
+    }
     #[test]
     fn plans_are_described_by_what_changes() {
         let summary = Summary {
