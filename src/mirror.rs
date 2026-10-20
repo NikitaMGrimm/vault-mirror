@@ -17,7 +17,7 @@ use crate::{
     },
     store::{FolderReceipts, Receipts, Snapshot},
     text::{count, listed},
-    vault::{Account, Item, Scope, ServerTraits, Vault, VaultRead, WRITES_AT_ONCE},
+    vault::{Account, Attachment, Item, Scope, ServerTraits, Vault, VaultRead, WRITES_AT_ONCE},
 };
 
 /// Receives progress lines. Messages never contain vault content, only
@@ -224,17 +224,52 @@ fn vault_key(endpoint: &Endpoint<'_>) -> String {
     serde_json::json!([url.trim_end_matches('/'), endpoint.account.user_id, scope]).to_string()
 }
 
+// Only a verified transfer constructs this evidence. Later item responses
+// describe current state, not the files this run proved it copied.
+struct CheckedFiles(Vec<Attachment>);
+
+impl CheckedFiles {
+    fn write(&self) -> FileWrite<'_> {
+        FileWrite::Copied(&self.0)
+    }
+}
+
+struct Written {
+    entry: usize,
+    item: Item,
+    files: Option<CheckedFiles>,
+}
+
+fn file_manifest(files: &[Attachment]) -> Vec<(&str, &str)> {
+    let mut manifest: Vec<_> = files
+        .iter()
+        .map(|file| (file.id.as_str(), file.file_name.as_str()))
+        .collect();
+    manifest.sort_unstable();
+    manifest
+}
+
+fn check_files(item: &Item, expected: &[Attachment]) -> Result<()> {
+    if file_manifest(&item.attachments) != file_manifest(expected) {
+        bail!(
+            "item {} changed during the run. Run again to copy it",
+            item.id
+        );
+    }
+    Ok(())
+}
+
 /// Copies `from_item`'s attachments, with their content out of `files`, to
 /// `to`'s item, then deletes its attachments `old`, as this run last wrote
 /// it. The copies are uploaded and read back before `old` is deleted, so a
 /// failed upload leaves the files it was replacing. Returns the item as the
-/// server then holds it, and how many files it copied.
+/// server then holds it, with the verified attachment evidence.
 async fn copy_attachments(
     (files, from_item): (&Snapshot<'_>, &Item),
     (to, to_item): (&Endpoint<'_>, &Item),
     old: &[String],
     mode: Mode,
-) -> Result<(Item, usize)> {
+) -> Result<(Item, CheckedFiles)> {
     let mut copied = Vec::new();
     for attachment in &from_item.attachments {
         let data = files.attachment(&attachment.id).with_context(|| {
@@ -263,16 +298,19 @@ async fn copy_attachments(
             .await?;
     }
     let stored = reread(to, to_item, mode).await?;
-    // Any other file was added since this run read the item, and is left for
-    // the next run, which backs it up first.
-    let wanted: BTreeSet<&str> = copied.iter().map(|(id, ..)| id.as_str()).collect();
-    if attachment_ids(&stored) != wanted {
+    let mut expected: Vec<_> = copied
+        .iter()
+        .map(|(id, name, _)| (id.as_str(), *name))
+        .collect();
+    expected.sort_unstable();
+    if file_manifest(&stored.attachments) != expected {
         bail!(
             "item {} changed during the run. Run again to copy it",
             to_item.id
         );
     }
-    Ok((stored, copied.len()))
+    let checked = CheckedFiles(stored.attachments.clone());
+    Ok((stored, checked))
 }
 
 /// Reads `item` back and fails unless it holds each `uploaded` file, by id,
@@ -361,10 +399,6 @@ fn mode(source: &Scope, dest: &Scope) -> Result<Mode> {
             "the source and destination must both be individual vaults or both be organizations"
         ),
     }
-}
-
-fn attachment_ids(item: &Item) -> BTreeSet<&str> {
-    item.attachments.iter().map(|a| a.id.as_str()).collect()
 }
 
 /// Whether two reads of an item found it in the same state, in everything
@@ -894,7 +928,17 @@ impl<'a> Run<'a> {
             .account
             .create_items(&dest.scope, &drafts, &folder_names, &|n| writes.add(n))
             .await?;
-        let mut written: Vec<(usize, Item)> = plan.creates.iter().copied().zip(new_items).collect();
+        let mut written: Vec<Written> = plan
+            .creates
+            .iter()
+            .copied()
+            .zip(new_items)
+            .map(|(entry, item)| Written {
+                entry,
+                item,
+                files: None,
+            })
+            .collect();
         let created = written.len();
 
         let updated: Vec<(usize, Item)> = stream::iter(plan.updates.iter().map(|update| {
@@ -920,7 +964,11 @@ impl<'a> Run<'a> {
         .buffer_unordered(WRITES_AT_ONCE)
         .try_collect()
         .await?;
-        written.extend(updated);
+        written.extend(updated.into_iter().map(|(entry, item)| Written {
+            entry,
+            item,
+            files: None,
+        }));
         if created > 0 {
             self.reporter.status("Created", &count(created, "item"));
         }
@@ -937,14 +985,12 @@ impl<'a> Run<'a> {
             })
             .collect();
         let transfers: Vec<(usize, &Item, &[String])> = (written[..created].iter())
-            .filter(|(entry_index, _)| copies_files(*entry_index))
-            .map(|(entry_index, item)| (*entry_index, item, &[][..]))
-            .chain(
-                (written[created..].iter()).filter_map(|(entry_index, item)| {
-                    let old = old_files.get(entry_index)?;
-                    Some((*entry_index, item, old.as_slice()))
-                }),
-            )
+            .filter(|written| copies_files(written.entry))
+            .map(|written| (written.entry, &written.item, &[][..]))
+            .chain((written[created..].iter()).filter_map(|written| {
+                let old = old_files.get(&written.entry)?;
+                Some((written.entry, &written.item, old.as_slice()))
+            }))
             .collect();
         let uploads = Tally::new(
             self.reporter,
@@ -958,7 +1004,7 @@ impl<'a> Run<'a> {
                 .sum(),
             "attachments",
         );
-        let copied: Vec<(usize, usize, Item)> =
+        let copied: Vec<Written> =
             stream::iter(transfers.into_iter().map(|(entry_index, dest_item, old)| {
                 let (replacement, uploads) = (&replacement, &uploads);
                 async move {
@@ -966,30 +1012,35 @@ impl<'a> Run<'a> {
                     let (stored, copied) =
                         copy_attachments((source_files, source_item), (dest, dest_item), old, mode)
                             .await?;
-                    uploads.add(copied);
-                    let draft =
-                        replacement(entry_index, &stored, FileWrite::Copied(&stored.attachments))?;
+                    uploads.add(copied.0.len());
+                    let draft = replacement(entry_index, &stored, copied.write())?;
                     let finished = dest
                         .account
                         .update_item(&dest.scope, &stored, &draft)
                         .await
                         .with_context(|| format!("updating destination item {}", dest_item.id))?;
-                    anyhow::Ok((entry_index, copied, finished))
+                    anyhow::Ok(Written {
+                        entry: entry_index,
+                        item: finished,
+                        files: Some(copied),
+                    })
                 }
             }))
             // Attachments are held in memory while they are re-encrypted.
             .buffer_unordered(2)
             .try_collect()
             .await?;
-        let mut total = 0;
-        let mut finished: HashMap<usize, Item> = HashMap::new();
-        for (entry_index, copied, item) in copied {
-            total += copied;
-            finished.insert(entry_index, item);
-        }
-        for (entry_index, item) in &mut written {
-            if let Some(done) = finished.remove(entry_index) {
-                *item = done;
+        let total: usize = copied
+            .iter()
+            .map(|written| written.files.as_ref().unwrap().0.len())
+            .sum();
+        let mut finished: HashMap<usize, Written> = copied
+            .into_iter()
+            .map(|written| (written.entry, written))
+            .collect();
+        for written in &mut written {
+            if let Some(done) = finished.remove(&written.entry) {
+                *written = done;
             }
         }
         if total > 0 {
@@ -1002,13 +1053,13 @@ impl<'a> Run<'a> {
         // to an item's archive state.
         let wanted =
             |entry_index: usize| source_vault.items[plan.entries[entry_index].source].archived;
-        let changing: Vec<&(usize, Item)> = (written.iter())
-            .filter(|(entry_index, item)| item.archived != wanted(*entry_index))
+        let changing: Vec<&Written> = (written.iter())
+            .filter(|written| written.item.archived != wanted(written.entry))
             .collect();
         for archived in [true, false] {
             let ids: Vec<String> = (changing.iter())
-                .filter(|(entry_index, _)| wanted(*entry_index) == archived)
-                .map(|(_, item)| item.id.clone())
+                .filter(|written| wanted(written.entry) == archived)
+                .map(|written| written.item.id.clone())
                 .collect();
             if ids.is_empty() {
                 continue;
@@ -1029,15 +1080,25 @@ impl<'a> Run<'a> {
         // Each copy's marker records the archive state it was written in,
         // so a run that stops before the state is set takes no copy for
         // changed by hand. Now the state is set, the marker follows.
-        stream::iter(changing.into_iter().map(|(entry_index, item)| {
-            let (replacement, copies_files) = (&replacement, &copies_files);
+        stream::iter(changing.into_iter().map(|written| {
+            let replacement = &replacement;
+            let skip_attachments = self.options.skip_attachments;
             async move {
+                let item = &written.item;
                 let stored = reread(dest, item, mode).await?;
-                let files = match copies_files(*entry_index) {
-                    true => FileWrite::Copied(&stored.attachments),
-                    false => FileWrite::Kept,
+                let files = match &written.files {
+                    Some(checked) => {
+                        check_files(&stored, &checked.0)?;
+                        checked.write()
+                    }
+                    None => {
+                        if !skip_attachments {
+                            check_files(&stored, &item.attachments)?;
+                        }
+                        FileWrite::Kept
+                    }
                 };
-                let draft = replacement(*entry_index, &stored, files)?;
+                let draft = replacement(written.entry, &stored, files)?;
                 (dest.account.update_item(&dest.scope, &stored, &draft).await)
                     .with_context(|| format!("updating destination item {}", item.id))?;
                 anyhow::Ok(())
@@ -1713,6 +1774,400 @@ mod tests {
         }
     }
 
+    mod executor {
+        use super::*;
+        use crate::{
+            crypto::SymKey,
+            snapshot,
+            store::{Keys, Store},
+        };
+        use serde_json::{Value, json};
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::{Arc, LazyLock, Mutex, atomic::AtomicBool},
+            thread,
+            time::Duration,
+        };
+        use time::OffsetDateTime;
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Change {
+            None,
+            Add,
+            Remove,
+            Rename,
+            Duplicate,
+        }
+
+        struct State {
+            source: Value,
+            dest: Value,
+            blob: Vec<u8>,
+            requests: Vec<String>,
+            change: Change,
+            change_on_marker: bool,
+            updates: usize,
+            transfer_reads: usize,
+            change_on_transfer_read: bool,
+            renamed: String,
+        }
+
+        impl State {
+            fn change_files(&mut self) {
+                let files = self.dest["ciphers"][0]["attachments"]
+                    .as_array_mut()
+                    .unwrap();
+                match self.change {
+                    Change::None => {}
+                    Change::Add => {
+                        let mut extra = files[0].clone();
+                        extra["id"] = json!("concurrent");
+                        files.push(extra);
+                    }
+                    Change::Remove => {
+                        files.clear();
+                    }
+                    Change::Rename => {
+                        files[0]["fileName"] = json!(self.renamed);
+                    }
+                    Change::Duplicate => {
+                        files.push(files[0].clone());
+                    }
+                }
+            }
+        }
+
+        struct Server {
+            url: String,
+            state: Arc<Mutex<State>>,
+            stop: Arc<AtomicBool>,
+            task: Option<thread::JoinHandle<()>>,
+        }
+
+        impl Server {
+            fn start(change: Change, change_on_marker: bool) -> Self {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let url = format!("http://{}", listener.local_addr().unwrap());
+                let state = Arc::new(Mutex::new(State {
+                    source: Value::Null,
+                    dest: Value::Null,
+                    blob: vec![],
+                    requests: vec![],
+                    change,
+                    change_on_marker,
+                    updates: 0,
+                    transfer_reads: 0,
+                    change_on_transfer_read: false,
+                    renamed: String::new(),
+                }));
+                let stop = Arc::new(AtomicBool::new(false));
+                let (shared, stopped, origin) = (state.clone(), stop.clone(), url.clone());
+                let task = thread::spawn(move || {
+                    while !stopped.load(Ordering::SeqCst) {
+                        let mut socket = match listener.accept() {
+                            Ok((socket, _)) => socket,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(2));
+                                continue;
+                            }
+                            Err(e) => panic!("{e}"),
+                        };
+                        // Windows inherits the listener's nonblocking mode.
+                        socket.set_nonblocking(false).unwrap();
+                        socket
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut request = Vec::new();
+                        let mut buffer = [0; 4096];
+                        let (head, body) = loop {
+                            let size = socket.read(&mut buffer).unwrap();
+                            assert_ne!(size, 0);
+                            request.extend_from_slice(&buffer[..size]);
+                            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                                let head = String::from_utf8_lossy(&request[..end]).into_owned();
+                                let length = head
+                                    .lines()
+                                    .find_map(|line| {
+                                        let (name, value) = line.split_once(':')?;
+                                        name.eq_ignore_ascii_case("content-length")
+                                            .then(|| value.trim().parse::<usize>().unwrap())
+                                    })
+                                    .unwrap_or(0);
+                                if request.len() >= end + 4 + length {
+                                    break (head, request[end + 4..].to_vec());
+                                }
+                            }
+                        };
+                        let mut words = head.lines().next().unwrap().split_whitespace();
+                        let (method, path) = (words.next().unwrap(), words.next().unwrap());
+                        let mut state = shared.lock().unwrap();
+                        state.requests.push(format!("{method} {path}"));
+                        let response = match (method, path) {
+                            ("POST", p) if p.ends_with("/identity/connect/token") => {
+                                json!({"access_token":"synthetic", "expires_in":3600})
+                            }
+                            ("GET", p) if p.ends_with("/api/config") => {
+                                json!({"server":{"name":"Vaultwarden"}})
+                            }
+                            ("GET", "/source/api/sync?excludeDomains=true") => state.source.clone(),
+                            ("GET", "/dest/api/sync?excludeDomains=true") => state.dest.clone(),
+                            ("POST", "/dest/api/ciphers/copy-main/attachment/v2") => {
+                                let body: Value = serde_json::from_slice(&body).unwrap();
+                                state.dest["ciphers"][0]["attachments"] = json!([{
+                                    "id":"uploaded", "fileName":body["fileName"], "key":body["key"], "size":4
+                                }]);
+                                json!({"attachmentId":"uploaded", "fileUploadType":1, "url":format!("{origin}/blob")})
+                            }
+                            ("PUT", "/blob") => {
+                                state.blob = body;
+                                json!({})
+                            }
+                            ("GET", "/blob") => {
+                                let header = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    state.blob.len()
+                                );
+                                socket.write_all(header.as_bytes()).unwrap();
+                                socket.write_all(&state.blob).unwrap();
+                                continue;
+                            }
+                            ("GET", "/dest/api/ciphers/copy-main/attachment/uploaded") => {
+                                json!({"url":format!("{origin}/blob")})
+                            }
+                            ("GET", "/dest/api/ciphers/copy-main") => {
+                                state.transfer_reads += 1;
+                                if state.change_on_transfer_read && state.transfer_reads == 2 {
+                                    state.change_files();
+                                }
+                                state.dest["ciphers"][0].clone()
+                            }
+                            ("PUT", "/dest/api/ciphers/copy-main") => {
+                                let mut updated: Value = serde_json::from_slice(&body).unwrap();
+                                updated["id"] = json!("copy-main");
+                                updated["attachments"] =
+                                    state.dest["ciphers"][0]["attachments"].clone();
+                                state.dest["ciphers"][0] = updated;
+                                state.updates += 1;
+                                if state.change_on_marker && state.updates == 2 {
+                                    state.change_files();
+                                }
+                                state.dest["ciphers"][0].clone()
+                            }
+                            ("PUT", "/dest/api/ciphers/archive") => {
+                                state.dest["ciphers"][0]["archivedDate"] =
+                                    json!("2026-10-20T00:00:00Z");
+                                json!({})
+                            }
+                            ("PUT", "/dest/api/ciphers/delete") => {
+                                state.dest["ciphers"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .retain(|i| i["id"] != "copy-obsolete");
+                                json!({})
+                            }
+                            _ => panic!("unexpected executor request {method} {path}"),
+                        };
+                        let body = response.to_string();
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        socket.write_all(header.as_bytes()).unwrap();
+                        socket.write_all(body.as_bytes()).unwrap();
+                    }
+                });
+                Self {
+                    url,
+                    state,
+                    stop,
+                    task: Some(task),
+                }
+            }
+
+            async fn accounts(&self) -> (Account, Account) {
+                let source = crate::vault::tests::account(
+                    &format!("{}/source", self.url),
+                    SymKey::generate(),
+                )
+                .await;
+                let key = SymKey::generate();
+                let renamed = key.encrypt_str("renamed.txt").unwrap();
+                let dest = crate::vault::tests::account(&format!("{}/dest", self.url), key).await;
+                let pair = plan::pair(&vault_key(&endpoint(&source)), &vault_key(&endpoint(&dest)));
+                let mut original = Vault::default();
+                for id in ["main", "kept-1", "kept-2", "obsolete"] {
+                    let mut item = item(id, None, &[]);
+                    item.content = [
+                        ("type".into(), Node::Number(2.into())),
+                        ("name".into(), Node::secret("synthetic")),
+                        (
+                            "secureNote".into(),
+                            Node::Map([("type".into(), Node::Number(0.into()))].into()),
+                        ),
+                    ]
+                    .into();
+                    original.items.push(item);
+                }
+                let planned =
+                    plan::plan(&original, &Vault::default(), Mode::Personal, &pair, false);
+                let copies: Vec<_> = planned
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        let mut copy = original.items[entry.source].clone();
+                        copy.id = format!("copy-{}", copy.id);
+                        copy.content = entry
+                            .draft(
+                                &original,
+                                &HashMap::new(),
+                                &HashMap::new(),
+                                false,
+                                FileWrite::Copied(&[]),
+                            )
+                            .unwrap()
+                            .content;
+                        copy
+                    })
+                    .collect();
+                let mut state = self.state.lock().unwrap();
+                state.dest = dest.test_sync(&copies);
+                state.dest["ciphers"][0]["attachments"] = json!([]);
+                state.source = source.test_sync(&original.items[..3]);
+                state.source["ciphers"][0]["archivedDate"] = json!("2026-10-20T00:00:00Z");
+                // The source read has a manifest. Transfer bytes come only from its snapshot.
+                // Reuse source ciphertext for an attachment name.
+                state.source["ciphers"][0]["attachments"] = json!([{"id":"source-file", "fileName":state.source["ciphers"][0]["name"], "size":4}]);
+                state.renamed = renamed;
+                (source, dest)
+            }
+        }
+
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::SeqCst);
+                self.task.take().unwrap().join().unwrap();
+            }
+        }
+
+        impl Reporter for Server {
+            fn status(&self, verb: &str, _: &str) {
+                if verb == "Copied" {
+                    let mut state = self.state.lock().unwrap();
+                    if !state.change_on_marker {
+                        state.change_files();
+                    }
+                }
+            }
+            fn warn(&self, _: &str) {}
+        }
+
+        fn endpoint(account: &Account) -> Endpoint<'_> {
+            Endpoint {
+                account,
+                scope: Scope::Personal,
+            }
+        }
+
+        static BACKUPS: LazyLock<(tempfile::TempDir, Keys)> = LazyLock::new(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let keys = Keys::open(dir.path(), "synthetic passphrase").unwrap();
+            (dir, keys)
+        });
+
+        async fn execute(server: &Server) -> Result<Outcome, MirrorError> {
+            let (source, dest) = server.accounts().await;
+            let source_read = source.load_with_traits(&Scope::Personal).await.unwrap();
+            let dest_read = dest.load_with_traits(&Scope::Personal).await.unwrap();
+            let (dir, keys) = &*BACKUPS;
+            let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+            let writer = store.begin(OffsetDateTime::UNIX_EPOCH).unwrap();
+            writer.write_attachment("source-file", b"file").unwrap();
+            let id = writer
+                .finish(&snapshot::build(source_read.vault(), &Scope::Personal).unwrap())
+                .unwrap();
+            mirror(
+                &endpoint(&source),
+                &endpoint(&dest),
+                &Protected {
+                    read: source_read,
+                    snapshot: store.snapshot(&id),
+                },
+                &Protected {
+                    read: dest_read,
+                    snapshot: store.snapshot(&id),
+                },
+                &MirrorOptions::default(),
+                &FolderReceipts::new(dir.path()),
+                server,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn archive_finalization_rejects_attachment_changes_before_obsolete_deletion() {
+            for change_on_marker in [false, true] {
+                for change in [
+                    Change::Add,
+                    Change::Remove,
+                    Change::Rename,
+                    Change::Duplicate,
+                ] {
+                    let server = Server::start(change, change_on_marker);
+                    let result = execute(&server).await;
+                    assert!(
+                        result.is_err(),
+                        "accepted {change:?}, marker={change_on_marker}"
+                    );
+                    let state = server.state.lock().unwrap();
+                    assert!(
+                        !state
+                            .requests
+                            .iter()
+                            .any(|r| r == "PUT /dest/api/ciphers/delete")
+                    );
+                    assert!(
+                        state.dest["ciphers"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|i| i["id"] == "copy-obsolete")
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn transfer_final_reread_checks_names_and_manifest_multiplicity() {
+            for change in [
+                Change::Add,
+                Change::Remove,
+                Change::Rename,
+                Change::Duplicate,
+            ] {
+                let server = Server::start(change, false);
+                server.state.lock().unwrap().change_on_transfer_read = true;
+                let error = execute(&server).await.unwrap_err();
+                assert_eq!(error.stage, "copying attachments");
+                let state = server.state.lock().unwrap();
+                assert!(
+                    !state
+                        .requests
+                        .iter()
+                        .any(|r| r == "PUT /dest/api/ciphers/delete")
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn archive_finalization_accepts_the_checked_attachment_manifest() {
+            let server = Server::start(Change::None, false);
+            let outcome = execute(&server).await.unwrap();
+            assert_eq!(outcome.summary.attachments_copied, 1);
+            assert_eq!(outcome.summary.items_deleted, 1);
+        }
+    }
     #[test]
     fn plans_are_described_by_what_changes() {
         let summary = Summary {

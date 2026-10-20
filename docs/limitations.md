@@ -74,6 +74,9 @@ the destination refuses to archive a copy.
 
 ## Changes during a run
 
+Make lasting edits in the source. Avoid editing destination copies while a run
+is in progress.
+
 Source visibility checks are separate requests from the vault read. A setting
 can turn off and back on between the checks without being detected. The checks
 cannot guarantee that the source showed every item during that interval.
