@@ -109,7 +109,7 @@ backup can't download it, so every run stops before it changes anything, with
 an error such as:
 
 ```text
-error: the run failed during destination backup: downloading attachment <attachment id> of item <item id>: …
+error: vault-mirror FAILED; during destination backup: downloading attachment <attachment id> of item <item id>: …
 ```
 
 Until you fix it, no new snapshot of that vault is made and none is pruned, so

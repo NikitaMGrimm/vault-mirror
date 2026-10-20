@@ -22,6 +22,10 @@ copy attachments there stops before changing the vault. To copy items without
 their attachments, set [`SKIP_ATTACHMENTS=true`](configuration.md#what-to-mirror).
 Backups still include the attachments.
 
+Both servers must show every supported item type, even if your vault holds only
+logins. Bitwarden servers can hide newer types and block runs. Check the
+[server restrictions](limitations.md#server-restrictions) before setup.
+
 ## Step 1: Get the API keys
 
 vault-mirror logs in with each account's personal API key and master password.
