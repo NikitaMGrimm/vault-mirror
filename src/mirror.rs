@@ -1849,6 +1849,159 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn foreign_links_refuse_check_and_mirror_with_all_overrides() {
+            for run in [false, true] {
+                let server = Server::start(&[true]);
+                let (source, dest) = server.accounts().await;
+                let source_read = source.load_with_traits(&Scope::Personal).await.unwrap();
+                let foreign_pair = plan::pair("old source endpoint", "destination endpoint");
+                let planned = plan::plan(
+                    source_read.vault(),
+                    &Vault::default(),
+                    Mode::Personal,
+                    &foreign_pair,
+                    false,
+                );
+                let copies: Vec<_> = planned
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        let mut copy = source_read.vault().items[entry.source].clone();
+                        copy.id = format!("copy-{}", copy.id);
+                        copy.content = entry
+                            .draft(
+                                source_read.vault(),
+                                &HashMap::new(),
+                                &HashMap::new(),
+                                false,
+                                FileWrite::Copied(&[]),
+                            )
+                            .unwrap()
+                            .content;
+                        copy
+                    })
+                    .collect();
+                server.state.lock().unwrap().dest = dest.test_sync(&copies);
+                let options = MirrorOptions {
+                    safety: Safety {
+                        allow_mass_delete: true,
+                        allow_reverse: true,
+                        allow_overwrite: true,
+                    },
+                    ..MirrorOptions::default()
+                };
+                let (dir, keys) = &*BACKUPS;
+                let folders = FolderReceipts::new(dir.path());
+                let result = if run {
+                    let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+                    let (_, protected) =
+                        backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                            .await
+                            .unwrap();
+                    let (_, destination) =
+                        backup(&dest, &Scope::Personal, &store, &backup_options(), &Quiet)
+                            .await
+                            .unwrap();
+                    mirror(
+                        &endpoint(&source),
+                        &endpoint(&dest),
+                        &protected,
+                        &destination,
+                        &options,
+                        &folders,
+                        &Quiet,
+                    )
+                    .await
+                } else {
+                    let destination = dest.load(&Scope::Personal).await.unwrap();
+                    check(
+                        &endpoint(&source),
+                        &endpoint(&dest),
+                        &source_read,
+                        &destination,
+                        &options,
+                        &folders,
+                        &Quiet,
+                    )
+                    .await
+                };
+                assert!(result.is_err(), "foreign links accepted, run={run}");
+                let message = format!("{:#}", result.unwrap_err().source);
+                assert!(message.contains("another pair of vaults"));
+                assert!(
+                    !server
+                        .requests()
+                        .iter()
+                        .any(|request| request.starts_with("PUT ")
+                            || request.starts_with("POST ")
+                            || request.starts_with("DELETE "))
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn filtering_out_a_foreign_link_still_allows_an_unrelated_create() {
+            let server = Server::start(&[true]);
+            let (source, dest) = server.accounts().await;
+            let original = source.load_with_traits(&Scope::Personal).await.unwrap();
+            let foreign = plan::plan(
+                original.vault(),
+                &Vault::default(),
+                Mode::Personal,
+                &plan::pair("previous", "pair"),
+                false,
+            );
+            let mut copy = original.vault().items[0].clone();
+            copy.id = "foreign-copy".into();
+            copy.content = foreign.entries[0]
+                .draft(
+                    original.vault(),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    false,
+                    FileWrite::Copied(&[]),
+                )
+                .unwrap()
+                .content;
+            {
+                let mut state = server.state.lock().unwrap();
+                state.dest = dest.test_sync(&[copy]);
+                state.source["folders"] =
+                    json!([{"id":"excluded-folder", "name":state.source["ciphers"][0]["name"]}]);
+                state.source["ciphers"][0]["folderId"] = json!("excluded-folder");
+            }
+            let source_read = source.load_with_traits(&Scope::Personal).await.unwrap();
+            let destination = dest.load(&Scope::Personal).await.unwrap();
+            let options = MirrorOptions {
+                filter: Filter {
+                    include: vec![],
+                    exclude: vec!["synthetic vault content".into()],
+                },
+                ..MirrorOptions::default()
+            };
+            let outcome = check(
+                &endpoint(&source),
+                &endpoint(&dest),
+                &source_read,
+                &destination,
+                &options,
+                &FolderReceipts::new(BACKUPS.0.path()),
+                &Quiet,
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome.summary.items_created, 1);
+            assert!(
+                !server
+                    .requests()
+                    .iter()
+                    .any(|request| request.starts_with("PUT ")
+                        || request.starts_with("POST ")
+                        || request.starts_with("DELETE "))
+            );
+        }
+
+        #[tokio::test]
         async fn observed_visibility_transitions_refuse_before_snapshot_commit_or_prune() {
             for shown in [[false, true], [true, false]] {
                 let server = Server::start(&shown);
