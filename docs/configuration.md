@@ -25,7 +25,7 @@ How each tool reads it:
 
 | Program | How to use the settings file |
 | --- | --- |
-| Docker Compose | Raw `env_file`, a read-only file mount, and `--env-file` in the entrypoint (as `init` writes them) |
+| Docker Compose | A read-only file mount and `--env-file` in the entrypoint (as `init` writes them) |
 | `docker run` | `--env-file vault-mirror.env` |
 | vault-mirror binary | `vault-mirror --env-file vault-mirror.env <command>` |
 
@@ -103,12 +103,11 @@ Instead of `init`:
        entrypoint: ["/vault-mirror", "--env-file", "/run/vault-mirror.env"]
        command: daemon
        user: "$(id -u):$(id -g)"
-       env_file:
-         - path: vault-mirror.env
-           format: raw
        volumes:
          - ./backups:/data
          - ./vault-mirror.env:/run/vault-mirror.env:ro
+       healthcheck:
+         test: ["CMD", "/vault-mirror", "--env-file", "/run/vault-mirror.env", "healthcheck"]
        restart: unless-stopped
        # Gives a run in progress up to 5 minutes to finish when the container stops.
        stop_grace_period: 5m

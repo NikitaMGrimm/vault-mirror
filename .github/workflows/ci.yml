@@ -255,8 +255,67 @@ jobs:
             fi
             grep -q 'sets a name that is not a setting' "$compose_dir/output"
           done
-          printf '%s\n' 'SOURCE_PASSWORD_FILE=/unavailable-secret' > "$compose_dir/vault-mirror.env"
-          docker compose -f "$compose_dir/compose.yaml" run --rm -e SOURCE_TOKEN=unrelated vault-mirror snapshots
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import time
+
+          directory = Path(os.environ["COMPOSE_TEST_DIR"])
+          compose = ["docker", "compose", "-f", str(directory / "compose.yaml")]
+          settings = directory / "vault-mirror.env"
+          backups = directory / "backups"
+          for name in ("custom", "override"):
+              (backups / name).mkdir()
+          settings.write_text("BACKUPS_DIR=/data/custom\nSOURCE_PASSWORD_FILE=/unavailable-secret\nBACKUP_PASSPHRASE_FILE=/unavailable-secret\n")
+          subprocess.run([*compose, "run", "--rm", "vault-mirror", "snapshots"], check=True)
+          assert (backups / "custom/run.lock").is_file()
+          assert not (backups / "custom/key.age").exists()
+          subprocess.run([*compose, "run", "--rm", "-e", "BACKUPS_DIR=/data/override", "-e", "SOURCE_TOKEN=unrelated", "vault-mirror", "snapshots"], check=True)
+          assert (backups / "override/run.lock").is_file()
+
+          settings.write_text("BACKUPS_DIR=/data/custom\nSOURCE_SERVER=invalid://synthetic\nSOURCE_CLIENT_ID=user.synthetic\nSOURCE_CLIENT_SECRET=synthetic-secret\nSOURCE_PASSWORD=synthetic-password\nBACKUP_PASSPHRASE=synthetic 'quoted' \"passphrase\" $literal\nSCHEDULE=0 0 1 1 *\n")
+          try:
+              subprocess.run([*compose, "up", "-d"], check=True)
+              container = subprocess.check_output([*compose, "ps", "-q", "vault-mirror"], text=True).strip()
+              config = json.loads(subprocess.check_output(["docker", "inspect", container], text=True))[0]["Config"]
+              environment = dict(entry.split("=", 1) for entry in config["Env"])
+              assert not any(name.startswith(("SOURCE_", "DEST_", "BACKUP_")) or name == "BACKUPS_DIR" for name in environment)
+              assert environment["VAULT_MIRROR_DEFAULT_BACKUPS_DIR"] == "/data"
+              healthcheck = config["Healthcheck"]["Test"]
+              assert healthcheck == ["CMD", "/vault-mirror", "--env-file", "/run/vault-mirror.env", "healthcheck"]
+              status = backups / "custom/last-run.json"
+              for _ in range(150):
+                  if status.is_file():
+                      break
+                  time.sleep(0.2)
+              assert status.is_file(), "the synthetic daemon run did not finish"
+              now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              result = {"status": "success", "started_at": now, "finished_at": now, "duration_seconds": 1.0, "version": "test"}
+              status.write_text(json.dumps(result))
+              subprocess.run(["docker", "exec", container, *healthcheck[1:]], check=True)
+              result["status"] = "failed"
+              status.write_text(json.dumps(result))
+              assert subprocess.run(["docker", "exec", container, *healthcheck[1:]]).returncode != 0
+              replacement = directory / "replacement.env"
+              replacement.write_text(settings.read_text().replace("BACKUPS_DIR=/data/custom", "BACKUPS_DIR=/data/override"))
+              replacement.replace(settings)
+              subprocess.run([*compose, "up", "-d", "--force-recreate", "vault-mirror"], check=True)
+              container = subprocess.check_output([*compose, "ps", "-q", "vault-mirror"], text=True).strip()
+              status = backups / "override/last-run.json"
+              for _ in range(150):
+                  if status.is_file():
+                      break
+                  time.sleep(0.2)
+              assert status.is_file(), "the recreated service did not read the replacement settings"
+              result["status"] = "success"
+              status.write_text(json.dumps(result))
+              subprocess.run(["docker", "exec", container, *healthcheck[1:]], check=True)
+          finally:
+              subprocess.run([*compose, "down"], check=True)
+          PY
 
   # The one check the main branch requires, so jobs can change without
   # changing the ruleset. A skipped job, such as every job for a

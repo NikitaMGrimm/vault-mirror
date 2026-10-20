@@ -38,12 +38,70 @@ fn snapshots_need_only_the_backup_directory() {
 }
 
 #[test]
+fn backup_directory_precedence_includes_the_image_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("vault-mirror.env");
+    for (case, file, explicit, expected) in [
+        ("native", None, None, "backups"),
+        ("image", None, None, "image-backups"),
+        ("file", Some("file-backups"), None, "file-backups"),
+        (
+            "override",
+            Some("file-backups"),
+            Some("override-backups"),
+            "override-backups",
+        ),
+    ] {
+        let working = dir.path().join(case);
+        fs::create_dir(&working).unwrap();
+        for path in [
+            "backups",
+            "image-backups",
+            "file-backups",
+            "override-backups",
+        ] {
+            fs::create_dir(working.join(path)).unwrap();
+        }
+        let text = format!(
+            "SOURCE_PASSWORD_FILE=/unavailable-secret\nBACKUP_PASSPHRASE_FILE=/unavailable-secret\n{}",
+            file.map(|path| format!("BACKUPS_DIR={path}\n"))
+                .unwrap_or_default()
+        );
+        fs::write(&settings, text).unwrap();
+        let mut command = vault_mirror();
+        command
+            .current_dir(&working)
+            .arg("--env-file")
+            .arg(&settings)
+            .arg("snapshots");
+        if case != "native" {
+            command.env("VAULT_MIRROR_DEFAULT_BACKUPS_DIR", "image-backups");
+        }
+        if let Some(path) = explicit {
+            command.env("BACKUPS_DIR", path);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            working.join(expected).join("run.lock").is_file(),
+            "{case}: wrong backup directory"
+        );
+        assert!(!working.join(expected).join("key.age").exists());
+    }
+}
+
+#[test]
 fn an_export_needs_only_the_backup_passphrase() {
     use serde_json::json;
     use vault_mirror::store::{Keys, Store};
 
     let dir = tempfile::tempdir().unwrap();
-    let keys = Keys::open(dir.path(), "synthetic passphrase").unwrap();
+    let passphrase = "synthetic 'quoted' \"passphrase\" $literal";
+    let keys = Keys::open(dir.path(), passphrase).unwrap();
     let store = Store::new(dir.path(), "source", &keys);
     let writer = store.begin(time::OffsetDateTime::now_utc()).unwrap();
     writer
@@ -53,15 +111,18 @@ fn an_export_needs_only_the_backup_passphrase() {
         .finish(&json!({"encrypted":false,"folders":[],"items":[{"id":"item-id","type":2,"name":"synthetic item","notes":"synthetic note"}],"vaultMirror":{"scope":"personal","plainStrings":{},"attachments":[{"itemId":"item-id","attachmentId":"attachment-id","fileName":"../recovered.txt"}]}}))
         .unwrap();
     let output_dir = dir.path().join("recovered");
+    let settings = dir.path().join("vault-mirror.env");
+    fs::write(
+        &settings,
+        format!("SOURCE_PASSWORD_FILE=/unavailable-secret\nBACKUP_PASSPHRASE={passphrase}\n"),
+    )
+    .unwrap();
     let command = |output_dir: &std::path::Path| {
         let mut command = vault_mirror();
         command
             .env("BACKUPS_DIR", dir.path())
-            .env(
-                "SOURCE_PASSWORD_FILE",
-                dir.path().join("unavailable-source-secret"),
-            )
-            .env("BACKUP_PASSPHRASE", "synthetic passphrase")
+            .arg("--env-file")
+            .arg(&settings)
             .arg("export")
             .arg("--output")
             .arg(output_dir);
@@ -502,6 +563,10 @@ fn healthcheck_reads_the_backup_directory_from_the_settings_file() {
 
     let output = vault_mirror()
         .current_dir(dir.path())
+        .env(
+            "VAULT_MIRROR_DEFAULT_BACKUPS_DIR",
+            dir.path().join("image-backups"),
+        )
         .arg("--env-file")
         .arg(&settings)
         .arg("healthcheck")
@@ -536,6 +601,7 @@ fn a_misspelt_setting_in_the_settings_file_is_refused() {
     let settings = dir.path().join("vault-mirror.env");
     for line in [
         "INCLUDE_FOLDER=Work",
+        "VAULT_MIRROR_DEFAULT_BACKUPS_DIR=/data",
         "SCHEDULE_FILE=/run/secrets/schedule",
         "pass word=hunter2",
         // A secret that lost its line break, left of the `=` it holds.

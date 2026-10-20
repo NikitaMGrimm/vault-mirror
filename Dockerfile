@@ -22,7 +22,7 @@ COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifica
 COPY --from=build /vault-mirror /vault-mirror
 COPY --from=build --chown=65532:65532 /data /data
 USER 65532:65532
-ENV BACKUPS_DIR=/data
+ENV VAULT_MIRROR_DEFAULT_BACKUPS_DIR=/data
 VOLUME /data
 # Reports unhealthy when the last run failed or is older than 26 hours.
 HEALTHCHECK --interval=5m --timeout=10s --start-period=26h CMD ["/vault-mirror", "healthcheck"]
