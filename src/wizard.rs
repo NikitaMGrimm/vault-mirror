@@ -309,12 +309,11 @@ fn compose_file(dir: &Path) -> Result<String> {
              entrypoint: [\"/vault-mirror\", \"--env-file\", \"/run/vault-mirror.env\"]\n    \
              command: daemon\n\
          {user}    \
-             env_file:\n      \
-               - path: {ENV_FILE}\n        \
-                 format: raw\n    \
              volumes:\n      \
                - ./backups:/data\n      \
                - ./vault-mirror.env:/run/vault-mirror.env:ro\n    \
+             healthcheck:\n      \
+               test: [\"CMD\", \"/vault-mirror\", \"--env-file\", \"/run/vault-mirror.env\", \"healthcheck\"]\n    \
              restart: unless-stopped\n    \
              # Gives a run in progress up to 5 minutes to finish when the container stops.\n    \
              stop_grace_period: 5m\n"
@@ -437,6 +436,17 @@ mod tests {
             compose.contains("\n    stop_grace_period: 5m\n"),
             "missing stop grace period"
         );
+    }
+
+    #[test]
+    fn compose_reads_settings_only_from_the_mounted_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let compose = compose_file(dir.path()).unwrap();
+        assert!(
+            !compose.contains("env_file:"),
+            "settings injected into the container environment"
+        );
+        assert!(compose.contains("    healthcheck:\n      test: [\"CMD\", \"/vault-mirror\", \"--env-file\", \"/run/vault-mirror.env\", \"healthcheck\"]\n"), "healthcheck does not read the mounted settings");
     }
 
     #[test]

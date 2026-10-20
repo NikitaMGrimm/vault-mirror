@@ -37,6 +37,12 @@ runs until they finish. Keep `run.lock` when copying backups for
 The generated `compose.yaml` gives a run five minutes to finish when the
 container stops. Raise `stop_grace_period` for large vaults.
 
+After editing `vault-mirror.env`, apply the settings with:
+
+```sh
+docker compose up -d --force-recreate vault-mirror
+```
+
 ### systemd
 
 To run vault-mirror nightly with a systemd timer instead of the daemon, run

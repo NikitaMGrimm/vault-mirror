@@ -131,7 +131,7 @@ To get a message when a run fails, set `NOTIFY_FAILURE_URL` in
 the change:
 
 ```sh
-docker compose up -d
+docker compose up -d --force-recreate vault-mirror
 ```
 
 ## If a run stops

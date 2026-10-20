@@ -213,6 +213,7 @@ pub fn backups_dir(env: &HashMap<String, String>) -> PathBuf {
     PathBuf::from(
         Env(env)
             .get("BACKUPS_DIR")
+            .or_else(|| Env(env).get("VAULT_MIRROR_DEFAULT_BACKUPS_DIR"))
             .unwrap_or_else(|| "backups".into()),
     )
 }
