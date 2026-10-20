@@ -27,7 +27,7 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// waiting.
 const RATE_LIMIT_PATIENCE: Duration = Duration::from_secs(15 * 60);
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum ApiError {
     #[error("{context}: the server answered {status}: {message}")]
     Status {
@@ -48,6 +48,12 @@ pub enum ApiError {
     Unexpected { context: String, detail: String },
     #[error("invalid server URL: {detail}")]
     InvalidUrl { detail: String },
+}
+
+impl std::fmt::Debug for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 impl ApiError {
@@ -690,6 +696,43 @@ pub async fn prelogin(http: &reqwest::Client, urls: &ServerUrls, email: &str) ->
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn transport_diagnostics_never_expose_signed_urls() {
+        let token = "synthetic-signed-download-token";
+        let url = format!("http://127.0.0.1:1/attachment?token={token}");
+        let cause = build_http_client(&ClientOptions::default())
+            .unwrap()
+            .get(&url)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(format!("{cause:?}").contains(token));
+        let error = transport("downloading an attachment", cause);
+        for output in [
+            format!("{error}"),
+            format!("{error:?}"),
+            format!("{error:#?}"),
+        ] {
+            assert!(
+                !output.contains(token),
+                "diagnostic exposed the signed token"
+            );
+            assert!(!output.contains(&url), "diagnostic exposed the request URL");
+            assert!(output.contains("downloading an attachment"));
+        }
+        let wrapped = anyhow::Error::new(error).context("backing up the vault");
+        for output in [format!("{wrapped:?}"), format!("{wrapped:#?}")] {
+            assert!(
+                !output.contains(token),
+                "wrapped diagnostic exposed the signed token"
+            );
+            assert!(
+                !output.contains(&url),
+                "wrapped diagnostic exposed the request URL"
+            );
+        }
+    }
 
     #[test]
     fn diagnostic_output_redacts_api_secrets() {
