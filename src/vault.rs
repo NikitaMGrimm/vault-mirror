@@ -198,7 +198,7 @@ pub struct Vault {
     pub folders_used_elsewhere: BTreeSet<String>,
 }
 
-/// A vault read with matching item visibility observations before and after it.
+/// A vault read with complete, matching item visibility observations around it.
 pub struct VaultRead {
     vault: Vault,
     traits: ServerTraits,
@@ -353,6 +353,13 @@ impl Account {
             bail!(
                 "the server's item visibility changed while reading the vault. Run again \
                  when its settings are stable"
+            );
+        }
+        if !traits.hidden_item_types.is_empty() {
+            bail!(
+                "the server does not show bank accounts, driver's licences or passports yet, \
+                 so the vault cannot be read completely. Enable these item types on the server, \
+                 or use a server that shows them"
             );
         }
         Ok(VaultRead { vault, traits })
@@ -1115,13 +1122,6 @@ pub struct ServerTraits {
     pub items_need_collections: bool,
     /// Whether updates preserve organization members' private metadata.
     pub organization_updates_safe: bool,
-}
-
-impl ServerTraits {
-    pub fn hides(&self, item: &Item) -> bool {
-        item.item_type()
-            .is_some_and(|kind| self.hidden_item_types.contains(&kind))
-    }
 }
 
 fn server_traits(config: &Value) -> ServerTraits {
