@@ -1417,6 +1417,7 @@ mod tests {
             AfterFolder,
             AmbiguousDelete,
             Verification,
+            HiddenVerification,
             Cleanup,
         }
 
@@ -1425,6 +1426,9 @@ mod tests {
             failure: Failure,
             delete_attempts: usize,
             shown: VecDeque<bool>,
+            dest_shown: Option<VecDeque<bool>>,
+            source_hidden: bool,
+            dest_hidden: bool,
             source: Value,
             dest: Value,
             requests: Vec<String>,
@@ -1500,14 +1504,39 @@ mod tests {
                                 } else {
                                     *state.shown.front().unwrap()
                                 };
+                                state.source_hidden = !shown;
                                 json!({"server": null, "featureStates": {
                                     "pm-32009-new-item-types": shown
                                 }})
                             }
                             ("GET", "/dest/api/config") => {
-                                json!({"server": {"name": "Vaultwarden"}})
+                                if let Some(shown) = &mut state.dest_shown {
+                                    let shown = if shown.len() > 1 {
+                                        shown.pop_front().unwrap()
+                                    } else {
+                                        *shown.front().unwrap()
+                                    };
+                                    state.dest_hidden = !shown;
+                                    json!({"server": null, "featureStates": {
+                                        "pm-32009-new-item-types": shown
+                                    }})
+                                } else if state.failure == Failure::HiddenVerification
+                                    && state.delete_attempts > 0
+                                {
+                                    json!({"server": null, "featureStates": {}})
+                                } else {
+                                    json!({"server": {"name": "Vaultwarden"}})
+                                }
                             }
-                            ("GET", "/source/api/sync?excludeDomains=true") => state.source.clone(),
+                            ("GET", "/source/api/sync?excludeDomains=true") => {
+                                let mut sync = state.source.clone();
+                                if state.source_hidden {
+                                    sync["ciphers"].as_array_mut().unwrap().retain(|item| {
+                                        !matches!(item["type"].as_u64(), Some(6..=8))
+                                    });
+                                }
+                                sync
+                            }
                             ("GET", "/dest/api/sync?excludeDomains=true") => {
                                 if state.failure == Failure::Verification
                                     && state.delete_attempts > 0
@@ -1515,10 +1544,28 @@ mod tests {
                                     status = "400 Bad Request";
                                     json!({"message":"synthetic verification failure"})
                                 } else {
-                                    state.dest.clone()
+                                    let mut sync = state.dest.clone();
+                                    if state.dest_hidden
+                                        || (state.failure == Failure::HiddenVerification
+                                            && state.delete_attempts > 0)
+                                    {
+                                        sync["ciphers"].as_array_mut().unwrap().retain(|item| {
+                                            !matches!(item["type"].as_u64(), Some(6..=8))
+                                        });
+                                    }
+                                    sync
                                 }
                             }
                             ("GET", "/dest/api/accounts/profile") => json!({"organizations":[]}),
+                            ("POST", "/dest/api/ciphers") => {
+                                let mut cipher: Value = serde_json::from_slice(&body).unwrap();
+                                cipher["id"] = json!("duplicate-passport");
+                                state.dest["ciphers"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .push(cipher.clone());
+                                cipher
+                            }
                             ("POST", "/dest/api/folders") => {
                                 let mut folder: Value = serde_json::from_slice(&body).unwrap();
                                 folder["id"] = json!("created-folder");
@@ -1999,6 +2046,168 @@ mod tests {
                     .any(|request| request.starts_with("PUT ")
                         || request.starts_with("POST ")
                         || request.starts_with("DELETE "))
+            );
+        }
+
+        #[tokio::test]
+        async fn stable_hidden_backup_preserves_the_prior_full_snapshot() {
+            for destination in [false, true] {
+                let server = Server::start(&[true]);
+                let (source, dest) = server.accounts().await;
+                if !destination {
+                    let mut state = server.state.lock().unwrap();
+                    let mut passport = state.source["ciphers"][0].clone();
+                    passport["id"] = json!("passport");
+                    passport["type"] = json!(8);
+                    state.source["ciphers"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(passport);
+                }
+                let account = if destination { &dest } else { &source };
+                let full = account.load_with_traits(&Scope::Personal).await.unwrap();
+                let (dir, keys) = &*BACKUPS;
+                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+                let document = snapshot::build(full.vault(), &Scope::Personal).unwrap();
+                let prior = store
+                    .begin(OffsetDateTime::UNIX_EPOCH)
+                    .unwrap()
+                    .finish(&document)
+                    .unwrap();
+                {
+                    let mut state = server.state.lock().unwrap();
+                    if destination {
+                        state.dest_shown = Some([false].into());
+                    } else {
+                        state.shown = [false].into();
+                    }
+                }
+                let result =
+                    backup(account, &Scope::Personal, &store, &backup_options(), &Quiet).await;
+                let recovered = store.snapshot(&prior).document().unwrap();
+                assert!(recovered == document);
+                assert_eq!(snapshot::parse(&recovered).unwrap().items().len(), 3);
+                assert_eq!(store.list().unwrap(), [prior]);
+                assert!(result.is_err(), "a stable hidden backup was accepted");
+            }
+        }
+
+        #[tokio::test]
+        async fn stable_hidden_unchanged_backup_does_not_prune_a_full_snapshot() {
+            let server = Server::start(&[true]);
+            let (_, dest) = server.accounts().await;
+            let full = dest.load_with_traits(&Scope::Personal).await.unwrap();
+            let (dir, keys) = &*BACKUPS;
+            let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+            let document = snapshot::build(full.vault(), &Scope::Personal).unwrap();
+            let prior = store
+                .begin(OffsetDateTime::UNIX_EPOCH)
+                .unwrap()
+                .finish(&document)
+                .unwrap();
+            let mut partial = full.vault().clone();
+            partial.items.retain(|item| item.id != "copy-passport");
+            // A prior version may already have accepted an incomplete snapshot.
+            let latest = store
+                .begin(OffsetDateTime::UNIX_EPOCH + time::Duration::days(1))
+                .unwrap()
+                .finish(&snapshot::build(&partial, &Scope::Personal).unwrap())
+                .unwrap();
+            server.state.lock().unwrap().dest_shown = Some([false].into());
+            let result = backup(&dest, &Scope::Personal, &store, &backup_options(), &Quiet).await;
+            let recovered = store.snapshot(&prior).document().unwrap();
+            assert!(recovered == document);
+            assert_eq!(snapshot::parse(&recovered).unwrap().items().len(), 3);
+            assert_eq!(store.list().unwrap(), [prior, latest]);
+            assert!(result.is_err(), "an unchanged hidden backup was accepted");
+        }
+
+        #[tokio::test]
+        async fn destination_hidden_read_cannot_create_duplicates_after_enablement() {
+            let mut outcomes = Vec::new();
+            for run in [false, true] {
+                let server = Server::start(&[true]);
+                let (source, dest) = server.accounts().await;
+                {
+                    let mut state = server.state.lock().unwrap();
+                    let mut passport = state.source["ciphers"][0].clone();
+                    passport["id"] = json!("passport");
+                    passport["type"] = json!(8);
+                    state.source["ciphers"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(passport);
+                    state.dest_shown = Some([false].into());
+                }
+                let (dir, keys) = &*BACKUPS;
+                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+                let folders = FolderReceipts::new(dir.path());
+                let result = async {
+                    if run {
+                        let (_, source_read) =
+                            backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                                .await?;
+                        let (_, dest_read) =
+                            backup(&dest, &Scope::Personal, &store, &backup_options(), &Quiet)
+                                .await?;
+                        server.state.lock().unwrap().dest_shown = Some([true].into());
+                        mirror(
+                            &endpoint(&source),
+                            &endpoint(&dest),
+                            &source_read,
+                            &dest_read,
+                            &MirrorOptions::default(),
+                            &folders,
+                            &Quiet,
+                        )
+                        .await?;
+                    } else {
+                        let source_read = source.load_with_traits(&Scope::Personal).await?;
+                        let dest_read = dest.load_with_traits(&Scope::Personal).await?;
+                        server.state.lock().unwrap().dest_shown = Some([true].into());
+                        check(
+                            &endpoint(&source),
+                            &endpoint(&dest),
+                            &source_read,
+                            dest_read.vault(),
+                            &MirrorOptions::default(),
+                            &folders,
+                            &Quiet,
+                        )
+                        .await?;
+                    }
+                    anyhow::Ok(())
+                }
+                .await;
+                outcomes.push((
+                    run,
+                    result.is_err(),
+                    server.state.lock().unwrap().dest["ciphers"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                ));
+            }
+            assert_eq!(outcomes, [(false, true, 3), (true, true, 3)]);
+        }
+
+        #[tokio::test]
+        async fn final_verification_refuses_stable_hidden_item_types() {
+            let server = Server::start(&[true]);
+            server.state.lock().unwrap().failure = Failure::HiddenVerification;
+            let (source, dest) = server.accounts().await;
+            let (dir, keys) = &*BACKUPS;
+            let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+            let (_, source_read) =
+                backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                    .await
+                    .unwrap();
+            let result = evaluate(&source, &dest, &source_read, &store, true).await;
+            assert_eq!(server.state.lock().unwrap().delete_attempts, 1);
+            let error = result.expect_err("an incomplete final verification was accepted");
+            assert_eq!(
+                error.downcast::<MirrorError>().unwrap().stage,
+                "verifying the destination"
             );
         }
 
