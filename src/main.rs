@@ -52,6 +52,9 @@ struct RunArgs {
     /// Let this run replace or delete copies changed in the destination. The destination backup keeps the changes.
     #[arg(long)]
     allow_overwrite: bool,
+    /// Allow Bitwarden organization updates that can erase members' private folder, favorite and archive data. Backups cannot restore it.
+    #[arg(long)]
+    allow_organization_metadata_loss: bool,
 }
 
 #[derive(Subcommand)]
@@ -207,6 +210,7 @@ fn flags(args: RunArgs) -> RunFlags {
         allow_mass_delete: args.allow_mass_delete,
         reverse: args.reverse,
         allow_overwrite: args.allow_overwrite,
+        allow_organization_metadata_loss: args.allow_organization_metadata_loss,
     }
 }
 

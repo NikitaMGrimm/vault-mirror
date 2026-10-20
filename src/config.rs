@@ -34,6 +34,7 @@ pub struct Config {
     pub backup: BackupConfig,
     pub filter: Filter,
     pub skip_attachments: bool,
+    pub allow_organization_metadata_loss: bool,
     pub ca_cert_file: Option<PathBuf>,
     /// When `daemon` runs: a five- or six-field cron expression, evaluated in
     /// `timezone`.
@@ -198,6 +199,8 @@ impl Config {
             backup,
             filter,
             skip_attachments: env.parse("SKIP_ATTACHMENTS", false)?,
+            allow_organization_metadata_loss: env
+                .parse("ALLOW_ORGANIZATION_METADATA_LOSS", false)?,
             ca_cert_file: env.get("CA_CERT_FILE").map(PathBuf::from),
             schedule: env.get("SCHEDULE"),
             timezone: env.get("TZ"),
@@ -249,6 +252,7 @@ pub fn is_setting(name: &str) -> bool {
             | "INCLUDE_COLLECTIONS"
             | "EXCLUDE_COLLECTIONS"
             | "SKIP_ATTACHMENTS"
+            | "ALLOW_ORGANIZATION_METADATA_LOSS"
             | "CA_CERT_FILE"
             | "SCHEDULE"
             | "TZ"
@@ -316,6 +320,28 @@ mod tests {
             let message = error(with(&[("ALLOW_ORGANIZATION_METADATA_LOSS", value)]));
             assert!(message.contains("ALLOW_ORGANIZATION_METADATA_LOSS has an invalid value"));
         }
+        for (value, expected) in [("false", false), ("true", true)] {
+            let config =
+                Config::from_env(&with(&[("ALLOW_ORGANIZATION_METADATA_LOSS", value)])).unwrap();
+            assert_eq!(config.allow_organization_metadata_loss, expected);
+        }
+    }
+
+    #[test]
+    fn organization_metadata_loss_permission_combines_flags_and_daemon_settings() {
+        use crate::app::{RunFlags, mirror_options};
+
+        let config = Config::from_env(&with(&[])).unwrap();
+        assert!(!mirror_options(&config, RunFlags::default()).allow_organization_metadata_loss);
+        let flags = RunFlags {
+            allow_organization_metadata_loss: true,
+            ..RunFlags::default()
+        };
+        assert!(mirror_options(&config, flags).allow_organization_metadata_loss);
+
+        let config =
+            Config::from_env(&with(&[("ALLOW_ORGANIZATION_METADATA_LOSS", "true")])).unwrap();
+        assert!(mirror_options(&config, RunFlags::default()).allow_organization_metadata_loss);
     }
 
     #[test]
@@ -408,6 +434,7 @@ mod tests {
             "BACKUP_PASSPHRASE_FILE",
             "NOTIFY_FAILURE_URL_FILE",
             "CA_CERT_FILE",
+            "ALLOW_ORGANIZATION_METADATA_LOSS",
             "TZ",
         ] {
             assert!(is_setting(name), "{name}");

@@ -31,6 +31,7 @@ pub struct RunFlags {
     pub allow_mass_delete: bool,
     pub reverse: bool,
     pub allow_overwrite: bool,
+    pub allow_organization_metadata_loss: bool,
 }
 
 /// The record of a run, written to `last-run.json`. It holds counts, times
@@ -198,6 +199,8 @@ pub fn mirror_options(config: &Config, flags: RunFlags) -> MirrorOptions {
         },
         filter: config.filter.clone(),
         skip_attachments: config.skip_attachments,
+        allow_organization_metadata_loss: config.allow_organization_metadata_loss
+            || flags.allow_organization_metadata_loss,
     }
 }
 

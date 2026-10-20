@@ -71,6 +71,7 @@ pub struct MirrorOptions {
     pub filter: Filter,
     /// Leave attachments out: copies keep theirs and new copies get none.
     pub skip_attachments: bool,
+    pub allow_organization_metadata_loss: bool,
 }
 
 /// Names of folders, or of collections in an organization, that select what
@@ -449,15 +450,6 @@ fn check_dest_holds(
             );
         }
     }
-    // Bitwarden can replace private member metadata that its API does not
-    // expose for backup. No safety override can recover those values.
-    if mode == Mode::Organization && !traits.organization_updates_safe && !plan.updates.is_empty() {
-        bail!(
-            "the destination server cannot safely update organization copies without removing \
-             members' private folder, favorite or archive data. Use a Vaultwarden organization \
-             as the destination for ongoing mirroring"
-        );
-    }
     // Organizations pay for attachments themselves.
     let files = plan.summary(source).attachments_copied;
     if mode == Mode::Personal && !premium && files > 0 {
@@ -619,6 +611,26 @@ impl<'a> Run<'a> {
             self.dest.account.premium,
             mode,
         )?;
+        // Bitwarden can replace private member metadata that its API does not
+        // expose for backup. No safety override can recover those values.
+        if mode == Mode::Organization
+            && !traits.organization_updates_safe
+            && !plan.updates.is_empty()
+        {
+            if !self.options.allow_organization_metadata_loss {
+                bail!(
+                    "the destination server cannot safely update organization copies without \
+                     removing members' private folder, favorite or archive data. Pass \
+                     --allow-organization-metadata-loss to accept this loss, or use a Vaultwarden \
+                     destination"
+                );
+            }
+            self.warn(
+                "Organization updates can erase members' private folder, favorite and archive \
+                 data. Backups cannot restore it."
+                    .to_string(),
+            );
+        }
         plan::check_foreign_links(&plan, &source_vault, dest_vault, &pair)?;
         // Only an individual vault's folders are mirrored, and its own.
         let receipts = (mode == Mode::Personal)
@@ -1883,6 +1895,7 @@ mod tests {
                         allow_reverse: true,
                         allow_overwrite: true,
                     },
+                    allow_organization_metadata_loss: true,
                     ..MirrorOptions::default()
                 };
                 let (dir, keys) = &*BACKUPS;
