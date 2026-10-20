@@ -14,6 +14,9 @@ ignore = [
   # many decryptions of ciphertexts they choose. vault-mirror decrypts a few
   # organization keys per run, locally. No fixed `rsa` release exists.
   { id = "RUSTSEC-2023-0071", reason = "not exploitable here; see comment" },
+  # age's localization macros use basic-toml only at build time to read
+  # dependency-owned manifests. No maintained upstream release replaces it.
+  { id = "RUSTSEC-2026-0374", reason = "build-time localization parser; no vault input" },
 ]
 
 [licenses]
