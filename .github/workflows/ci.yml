@@ -208,8 +208,6 @@ jobs:
           toolchain=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile)
           rustup toolchain install "$toolchain" --profile minimal && rustup default "$toolchain"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Diagnose archive attachment interleavings
-        run: RUST_BACKTRACE=full cargo test --locked --lib mirror::tests::executor::archive_finalization_rejects_attachment_changes_before_obsolete_deletion -- --exact --no-capture --test-threads=1
       - run: cargo test --locked
 
   image:
