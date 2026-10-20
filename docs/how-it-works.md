@@ -25,6 +25,11 @@ started or the destination may contain partial changes. Counts in a failed
 result are the planned work. Run again to recheck and finish the copies.
 Without a destination, a run only backs up the source.
 
+In `last-run.json`, `mirror.state` is `complete` or `incomplete`. Failed runs
+keep counts in `mirror.planned` and write uncertainty in `mirror.writes`.
+The first run after upgrading replaces the old status format. Until then,
+`healthcheck` cannot read an older untagged status file.
+
 Folder cleanup is best effort. If a deletion cannot be confirmed, required
 mirroring can still succeed. The result then records `changed: null` and the
 notification reports the cleanup uncertainty.
