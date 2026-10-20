@@ -1008,6 +1008,15 @@ fn optional_list<'a>(cipher: &'a Value, name: &str) -> Result<&'a [Value]> {
 }
 
 fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
+    fn contains_secret(node: &Node) -> bool {
+        match node {
+            Node::Secret(_) => true,
+            Node::List(nodes) => nodes.iter().any(contains_secret),
+            Node::Map(nodes) => nodes.values().any(contains_secret),
+            _ => false,
+        }
+    }
+
     let object = cipher
         .as_object()
         .ok_or_else(|| anyhow!("item is not an object"))?;
@@ -1051,6 +1060,8 @@ fn decrypt_item(cipher: &Value, scope_key: &SymKey) -> Result<Item> {
             content.insert(name.clone(), node);
         } else if is_type_block(name) && node.normalized().is_some() {
             bail!("field {name} is not an object");
+        } else if contains_secret(&node) {
+            bail!("the item has encrypted content in a format that is not supported yet");
         }
     }
 
@@ -1372,7 +1383,11 @@ pub(crate) mod tests {
             "viewPassword": true,
             "permissions": {"delete": true, "restore": true},
             "organizationUseTotp": false,
+            "encryptedFor": enc("synthetic per-account marker"),
             "futureServerFlag": true,
+            "futurePlainText": "per-account setting",
+            "futurePlainNumber": 3,
+            "futurePlainList": [true, "per-account setting", 3],
             "revisionDate": "2026-01-02T03:04:05.000000Z",
             "creationDate": "2026-01-01T00:00:00.000000Z",
             "deletedDate": null,
@@ -1411,6 +1426,101 @@ pub(crate) mod tests {
                 "type"
             ]
         );
+    }
+
+    #[test]
+    fn discarded_encrypted_fields_stop_the_vault_read() {
+        let key = SymKey::generate();
+        let secret = "synthetic future secret";
+        let encrypted = key.encrypt_str(secret).unwrap();
+        for value in [
+            json!(encrypted),
+            json!([encrypted]),
+            json!([null, {"nested": [false, {"value": encrypted}]}]),
+        ] {
+            let mut cipher = full_cipher(&key);
+            cipher["futureUnknownField"] = value;
+            let sync = json!({"ciphers": [cipher], "folders": [], "collections": []});
+            let Err(error) = read_vault(&sync, &Scope::Personal, &key) else {
+                panic!("a vault read silently discarded encrypted content");
+            };
+            let message = format!("{error:#}");
+            assert!(
+                message.contains("not supported"),
+                "unsupported content was not identified"
+            );
+            assert!(
+                !message.contains(secret),
+                "the error exposed decrypted content"
+            );
+            assert!(
+                !message.contains(&encrypted),
+                "the error exposed ciphertext"
+            );
+            assert!(
+                !message.contains("futureUnknownField"),
+                "the error exposed an unknown field name"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn discarded_encrypted_fields_stop_backup_before_acceptance_or_pruning() {
+        use crate::{
+            api::tests::{http_response, http_server},
+            backup::{BackupOptions, backup},
+            mirror::Reporter,
+            snapshot,
+            store::{Keys, Store},
+        };
+
+        struct Quiet;
+        impl Reporter for Quiet {
+            fn status(&self, _: &str, _: &str) {}
+            fn warn(&self, _: &str) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), "synthetic passphrase").unwrap();
+        let store = Store::new(dir.path(), "source", &keys);
+        let now = time::OffsetDateTime::now_utc();
+        let document = snapshot::build(&Vault::default(), &Scope::Personal).unwrap();
+        let old = store
+            .begin(now - time::Duration::days(60))
+            .unwrap()
+            .finish(&document)
+            .unwrap();
+        let key = SymKey::generate();
+        let cipher = json!({
+            "id": "item-1", "type": 1,
+            "name": key.encrypt_str("synthetic item").unwrap(),
+            "futureUnknownField": key.encrypt_str("synthetic future secret").unwrap(),
+        });
+        let sync = json!({"ciphers": [cipher], "folders": [], "collections": []});
+        let (url, requests) = http_server(vec![
+            http_response("200 OK", "", r#"{"access_token":"synthetic-token"}"#),
+            http_response("200 OK", "", "{}"),
+            http_response("200 OK", "", &sync.to_string()),
+            http_response("200 OK", "", "{}"),
+        ]);
+        let account = account(&url, key).await;
+        let result = backup(
+            &account,
+            &Scope::Personal,
+            &store,
+            &BackupOptions {
+                retention_days: 1,
+                now,
+            },
+            &Quiet,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a backup accepted a vault with discarded encrypted content"
+        );
+        assert_eq!(store.list().unwrap(), [old]);
+        assert_eq!(requests.join().unwrap().len(), 3);
     }
 
     fn full_cipher(key: &SymKey) -> Value {
