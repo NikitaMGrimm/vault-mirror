@@ -433,8 +433,18 @@ async fn notify(config: &Config, status: &Status, reporter: &dyn Reporter) {
         &config.notify_failure_url
     };
     let Some(url) = url else { return };
-    let Ok(http) = http_client(config) else {
-        return;
+    // The notification endpoint may not need the vault server's private CA.
+    let http = http_client(config).or_else(|error| {
+        reporter.warn(&format!(
+            "Sending the notification with the standard certificate authorities: {error:#}"
+        ));
+        build_http_client(&ClientOptions::default()).map_err(anyhow::Error::from)
+    });
+    let http = match http {
+        Ok(http) => http,
+        Err(error) => {
+            return reporter.warn(&format!("Could not send the notification: {error:#}"));
+        }
     };
     let sent = http
         .post(url)

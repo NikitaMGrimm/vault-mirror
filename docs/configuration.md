@@ -132,7 +132,9 @@ Instead of `init`:
 Set `CA_CERT_FILE` before `init` if your server uses a private certificate
 authority. `init` saves the certificate's absolute host path in the settings
 file and adds a read-only mount to `compose.yaml`. Native commands use the host
-path. The Compose service uses the mounted certificate.
+path. The Compose service uses the mounted certificate. If a run can't read
+the file, it fails and tries to send its failure notification with the
+standard certificate authorities.
 
 When you run `init` in Docker, mount the certificate at the same absolute path
 on the host and in the container:
