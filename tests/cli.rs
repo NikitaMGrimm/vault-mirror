@@ -8,6 +8,10 @@ use vault_mirror::app::{self, BackupAccess};
 fn vault_mirror() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_vault-mirror"));
     command.env_clear();
+    // Windows can't open network sockets without it.
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", root);
+    }
     command
 }
 
@@ -594,9 +598,10 @@ fn a_missing_ca_file_does_not_suppress_the_failure_notification() {
             assert!(!diagnostic.contains(secret), "a secret was exposed");
         }
     }
-    let (request_line, body) = notifications
-        .try_recv()
-        .expect("the failure notification was sent");
+    // The output was checked for secrets above.
+    let (request_line, body) = notifications.try_recv().unwrap_or_else(|_| {
+        panic!("no failure notification arrived; stdout:\n{stdout}\nstderr:\n{stderr}")
+    });
     assert!(request_line.starts_with("POST /notify?token="));
     assert_eq!(body, app::describe(&status));
     assert!(body.starts_with("vault-mirror FAILED; during configuration: "));
