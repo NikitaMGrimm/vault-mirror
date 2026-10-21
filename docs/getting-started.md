@@ -48,7 +48,7 @@ docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
 `init` asks for:
 
 1. The source's server, `client_id`, `client_secret` and master password. It
-   logs in right away to check them.
+   logs in right away to check them and make sure the server shows the whole vault.
 2. The same for the destination. Answer no to "Mirror the source into a second
    account?" if you only want backups.
 3. How often to run, and in which time zone.

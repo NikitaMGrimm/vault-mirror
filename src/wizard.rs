@@ -256,6 +256,7 @@ async fn ask_vault(
     }
 }
 
+/// Require backup's visibility checks before setup writes the account's settings.
 async fn log_in(env: &HashMap<String, String>, prefix: &str, role: &str) -> Result<()> {
     let config = Config::from_env(env).map_err(|error| anyhow!("{error}"))?;
     let vault = match prefix {
@@ -272,10 +273,10 @@ async fn log_in(env: &HashMap<String, String>, prefix: &str, role: &str) -> Resu
     let http = app::http_client(&config)?;
     let account =
         app::open_account(&config.backups_dir, &http, vault, &prefix.to_lowercase()).await?;
-    let loaded = account.load(&app::scope_of(vault)).await?;
+    let loaded = account.load_with_traits(&app::scope_of(vault)).await?;
     Console::status(
         "Logged in",
-        &format!("to {role}: {}", describe_vault(&loaded)),
+        &format!("to {role}: {}", describe_vault(loaded.vault())),
     );
     Ok(())
 }
@@ -444,6 +445,110 @@ fn local_timezone() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn backup_only_setup_requires_complete_item_visibility() {
+        use std::{
+            io::{BufRead, BufReader, Read},
+            net::TcpListener,
+            sync::mpsc,
+            thread,
+            time::Duration,
+        };
+
+        use serde_json::json;
+        use vault_mirror::crypto::{KdfParams, MasterSecret};
+
+        let password = generate_passphrase().unwrap();
+        let email = format!("{}@example.com", uuid::Uuid::new_v4());
+        let master =
+            MasterSecret::derive(&password, &email, &KdfParams::Pbkdf2 { iterations: 5000 })
+                .unwrap();
+        let keys = master.new_account_keys().unwrap();
+        for visible in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let profile = json!({
+                "id": "synthetic-user",
+                "email": email,
+                "key": keys.wrapped_user_key,
+                "organizations": [],
+            });
+            let (stop, stopped) = mpsc::channel::<()>();
+            let server = thread::spawn(move || {
+                while stopped.try_recv() == Err(mpsc::TryRecvError::Empty) {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(error) => panic!("{error}"),
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut reader = BufReader::new(&mut stream);
+                    let mut request = String::new();
+                    reader.read_line(&mut request).unwrap();
+                    let mut length = 0;
+                    loop {
+                        let mut line = String::new();
+                        assert!(reader.read_line(&mut line).unwrap() > 0);
+                        if line == "\r\n" {
+                            break;
+                        }
+                        if let Some((name, value)) = line.split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+                    reader.read_exact(&mut vec![0; length]).unwrap();
+                    let response = match request.split_whitespace().nth(1).unwrap() {
+                        "/identity/connect/token" => json!({
+                            "access_token": "synthetic-token", "Kdf": 0, "KdfIterations": 5000,
+                        }),
+                        "/api/accounts/profile" => profile.clone(),
+                        "/api/config" => json!({
+                            "featureStates": { "pm-32009-new-item-types": visible },
+                        }),
+                        "/api/sync?excludeDomains=true" => json!({
+                            "folders": [], "collections": [], "ciphers": [],
+                        }),
+                        _ => panic!("unexpected setup request"),
+                    }
+                    .to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                        response.len()
+                    )
+                    .unwrap();
+                }
+            });
+            let env = HashMap::from([
+                ("SOURCE_SERVER".into(), format!("http://{address}")),
+                ("SOURCE_CLIENT_ID".into(), "user.synthetic".into()),
+                ("SOURCE_CLIENT_SECRET".into(), "synthetic secret".into()),
+                ("SOURCE_PASSWORD".into(), password.clone()),
+                ("BACKUPS_DIR".into(), dir.path().display().to_string()),
+                ("BACKUP_PASSPHRASE".into(), "synthetic passphrase".into()),
+            ]);
+            let result = log_in(&env, "SOURCE", "the source").await;
+            drop(stop);
+            server.join().unwrap();
+            if visible {
+                result.unwrap();
+            } else {
+                let error = result.expect_err("setup accepted a server that hides item types");
+                assert!(format!("{error:#}").contains("cannot be read completely"));
+            }
+        }
+    }
 
     #[test]
     fn generated_passphrases_are_long_and_differ() {

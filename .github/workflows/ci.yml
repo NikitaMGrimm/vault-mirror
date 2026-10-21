@@ -22,12 +22,15 @@ env:
 jobs:
   # Decides whether anything but documentation changed. The other jobs skip
   # themselves when nothing did; a skipped required check still counts as
-  # passed, which a workflow-level `paths-ignore` would not allow.
+  # passed, which a workflow-level `paths-ignore` would not allow. The image
+  # job also runs when the configuration guide changes, because it runs the
+  # guide's Compose example.
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.diff.outputs.code }}
+      image: ${{ steps.diff.outputs.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,14 +43,17 @@ jobs:
           # Without a known base, such as on a manual run, everything runs.
           if [[ -z "$BASE" ]] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "image=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git diff --name-only "$BASE" HEAD | tee changed
-          if grep -qvE '\.md$|^docs/|^assets/' changed; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "code=false" >> "$GITHUB_OUTPUT"
-          fi
+          code=false
+          if grep -qvE '\.md$|^docs/|^assets/' changed; then code=true; fi
+          image=$code
+          if grep -qxF 'docs/configuration.md' changed; then image=true; fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - run: python3 .github/scripts/test_ci.py
 
   lint:
     needs: changes
@@ -212,7 +218,7 @@ jobs:
 
   image:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.image == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -319,7 +325,7 @@ jobs:
           PY
 
   # The one check the main branch requires, so jobs can change without
-  # changing the ruleset. A skipped job, such as every job for a
+  # changing the ruleset. A skipped job, such as the Rust jobs for a
   # documentation-only change, counts as passed.
   ci:
     if: always()
