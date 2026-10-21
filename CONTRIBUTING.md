@@ -153,7 +153,9 @@ here in the same pull request.
   and `feat`, `fix` and `perf` titles become the release notes.
 
 CI runs the tests against Vaultwarden and against Bitwarden's own server, and
-skips them when a change only touches Markdown, `docs/` or `assets/`.
+skips them when a change only touches Markdown, `docs/` or `assets/`. A change
+to `docs/configuration.md` still builds the image and runs the guide's Compose
+example.
 
 ## Releases
 
