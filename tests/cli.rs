@@ -8,6 +8,10 @@ use vault_mirror::app::{self, BackupAccess};
 fn vault_mirror() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_vault-mirror"));
     command.env_clear();
+    // Windows can't open network sockets without it.
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", root);
+    }
     command
 }
 
@@ -515,6 +519,93 @@ fn rejected_server_urls_do_not_expose_secrets_in_run_diagnostics() {
         assert!(stdout.contains(&format!("during source login: {error}")));
         assert!(notification == format!("vault-mirror FAILED; during source login: {error}"));
     }
+}
+
+#[test]
+fn a_missing_ca_file_does_not_suppress_the_failure_notification() {
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::mpsc,
+        thread,
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (received, notifications) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+            return;
+        }
+        let mut length = 0;
+        let mut header = String::new();
+        while reader.read_line(&mut header).is_ok_and(|read| read > 2) {
+            if let Some((name, value)) = header.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse().unwrap_or(0);
+            }
+            header.clear();
+        }
+        let mut body = vec![0; length];
+        if reader.read_exact(&mut body).is_ok() {
+            let _ = received.send((request_line, String::from_utf8_lossy(&body).into_owned()));
+        }
+        let _ = reader
+            .get_mut()
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let token = "synthetic-notify-token";
+    let output = vault_mirror()
+        .env("BACKUPS_DIR", dir.path())
+        .env("BACKUP_PASSPHRASE", "synthetic passphrase")
+        .env("SOURCE_SERVER", "http://127.0.0.1:9")
+        .env("SOURCE_CLIENT_ID", "user.synthetic")
+        .env("SOURCE_CLIENT_SECRET", "synthetic secret")
+        .env("SOURCE_PASSWORD", "synthetic password")
+        .env("CA_CERT_FILE", dir.path().join("missing.pem"))
+        .env(
+            "NOTIFY_FAILURE_URL",
+            format!("http://{address}/notify?token={token}"),
+        )
+        .arg("run")
+        .output()
+        .unwrap();
+    // Wakes the server if vault-mirror never connected, so it always ends.
+    let _ = TcpStream::connect(address);
+    server.join().unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let status = app::read_status(dir.path()).unwrap();
+    assert_eq!(status.failure_stage.as_deref(), Some("configuration"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for diagnostic in [stdout.as_ref(), stderr.as_ref()] {
+        for secret in [
+            token,
+            "synthetic passphrase",
+            "synthetic secret",
+            "synthetic password",
+        ] {
+            assert!(!diagnostic.contains(secret), "a secret was exposed");
+        }
+    }
+    // The output was checked for secrets above.
+    let (request_line, body) = notifications.try_recv().unwrap_or_else(|_| {
+        panic!("no failure notification arrived; stdout:\n{stdout}\nstderr:\n{stderr}")
+    });
+    assert!(request_line.starts_with("POST /notify?token="));
+    assert_eq!(body, app::describe(&status));
+    assert!(body.starts_with("vault-mirror FAILED; during configuration: "));
+    assert!(stdout.contains("standard certificate authorities"));
 }
 
 #[test]
