@@ -256,6 +256,7 @@ async fn ask_vault(
     }
 }
 
+/// Require backup's visibility checks before setup writes the account's settings.
 async fn log_in(env: &HashMap<String, String>, prefix: &str, role: &str) -> Result<()> {
     let config = Config::from_env(env).map_err(|error| anyhow!("{error}"))?;
     let vault = match prefix {

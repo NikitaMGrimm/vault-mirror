@@ -10,6 +10,7 @@ import textwrap
 
 
 def run(argv, cwd, env=None):
+    """Capture failures so rejected workflow variants remain available for assertions."""
     return subprocess.run(
         argv, cwd=cwd, env=env, text=True, capture_output=True, timeout=10
     )
@@ -50,6 +51,7 @@ with tempfile.TemporaryDirectory(prefix="vault-mirror-ci-changes-") as directory
     base = run(["git", "rev-parse", "HEAD"], root).stdout.strip()
 
     def classify_change(label, files, base_sha, code, image):
+        """Reset each case to the same base and execute the workflow's own classifier."""
         run(["git", "checkout", "-q", "--detach", base], root).check_returncode()
         for name in files:
             (root / name).write_text(f"changed by {label}\n")
