@@ -459,10 +459,11 @@ mod tests {
         use serde_json::json;
         use vault_mirror::crypto::{KdfParams, MasterSecret};
 
-        let password = "synthetic master password";
-        let email = "setup@example.com";
+        let password = generate_passphrase().unwrap();
+        let email = format!("{}@example.com", uuid::Uuid::new_v4());
         let master =
-            MasterSecret::derive(password, email, &KdfParams::Pbkdf2 { iterations: 5000 }).unwrap();
+            MasterSecret::derive(&password, &email, &KdfParams::Pbkdf2 { iterations: 5000 })
+                .unwrap();
         let keys = master.new_account_keys().unwrap();
         for visible in [true, false] {
             let dir = tempfile::tempdir().unwrap();
@@ -533,7 +534,7 @@ mod tests {
                 ("SOURCE_SERVER".into(), format!("http://{address}")),
                 ("SOURCE_CLIENT_ID".into(), "user.synthetic".into()),
                 ("SOURCE_CLIENT_SECRET".into(), "synthetic secret".into()),
-                ("SOURCE_PASSWORD".into(), password.into()),
+                ("SOURCE_PASSWORD".into(), password.clone()),
                 ("BACKUPS_DIR".into(), dir.path().display().to_string()),
                 ("BACKUP_PASSPHRASE".into(), "synthetic passphrase".into()),
             ]);
