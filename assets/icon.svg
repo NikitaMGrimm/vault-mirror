@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="vault-mirror">
+  <style>
+    .vault { fill: #0969da; }
+    @media (prefers-color-scheme: dark) {
+      .vault { fill: #4493f8; }
+    }
+  </style>
+  <path class="vault" fill-rule="evenodd" d="M2 2h27.64v27.64h-27.64ZM14.02 22.45V17.1A4.42 4.42 0 1 1 17.62 17.1V22.45Z"/>
+</svg>
