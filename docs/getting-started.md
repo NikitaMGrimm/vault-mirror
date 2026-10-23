@@ -42,7 +42,7 @@ Create a directory for vault-mirror's files, and run `init` in it:
 ```sh
 mkdir vault-mirror && cd vault-mirror
 docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
-  ghcr.io/nikitamgrimm/vault-mirror:0.8 init
+  ghcr.io/nikitamgrimm/vault-mirror:0.9 init
 ```
 
 `init` asks for:

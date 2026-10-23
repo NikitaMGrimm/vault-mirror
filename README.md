@@ -73,7 +73,7 @@ before setup.
    ```sh
    mkdir vault-mirror && cd vault-mirror
    docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
-     ghcr.io/nikitamgrimm/vault-mirror:0.8 init
+     ghcr.io/nikitamgrimm/vault-mirror:0.9 init
    ```
 
 3. Start it:
@@ -90,7 +90,7 @@ started](https://github.com/NikitaMGrimm/vault-mirror/blob/main/docs/getting-sta
 The container image runs on linux/amd64 and linux/arm64:
 
 ```sh
-docker pull ghcr.io/nikitamgrimm/vault-mirror:0.8
+docker pull ghcr.io/nikitamgrimm/vault-mirror:0.9
 ```
 
 The [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases) has

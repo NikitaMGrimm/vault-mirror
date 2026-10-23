@@ -70,7 +70,7 @@ Requires=docker.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/docker run --rm --env-file /etc/vault-mirror.env \
-  -v /var/lib/vault-mirror:/data ghcr.io/nikitamgrimm/vault-mirror:0.8 run
+  -v /var/lib/vault-mirror:/data ghcr.io/nikitamgrimm/vault-mirror:0.9 run
 EOF
 
 sudo tee /etc/systemd/system/vault-mirror.timer > /dev/null <<'EOF'
@@ -118,7 +118,7 @@ journalctl -u vault-mirror.service -n 20
 ## Update the container
 
 The generated `compose.yaml` pins the image to the minor version used by
-`init`, such as `0.8`. To get patch updates within that version:
+`init`, such as `0.9`. To get patch updates within that version:
 
 ```sh
 docker compose pull
