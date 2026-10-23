@@ -32,6 +32,8 @@ The container's `daemon` command runs once when it starts, then at the times
 `SCHEDULE` names. The image's health check gives the first run 26 hours. To
 use your own scheduler instead, have it start `vault-mirror run`.
 
+A schedule with no future occurrence stops the daemon before its first run.
+
 Only one `run` or `daemon` run can use a backup directory at a time. While a
 run holds the directory's `run.lock`, `export` and `snapshots` stop straight
 away. These recovery commands can share the lock with each other and block
