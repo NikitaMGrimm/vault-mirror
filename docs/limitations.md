@@ -7,7 +7,7 @@
 Either side can be any of these:
 
 - Bitwarden's cloud, US or EU
-- Bitwarden's self-hosted server (tested with 2026.9)
+- Bitwarden's self-hosted server (tested with 2026.10)
 - Vaultwarden (tested with 1.37)
 
 ## Accounts

@@ -156,6 +156,7 @@ To mirror one organization into another, set both `SOURCE_ORGANIZATION_ID` and
 while the organization is open.
 
 The account must see everything in each organization, or vault-mirror stops.
+Items in members' default collections count too.
 On Bitwarden's servers, that means, for both organizations:
 
 1. Give the account the **Owner** or **Admin** role.

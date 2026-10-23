@@ -524,6 +524,132 @@ async fn collections_the_account_is_not_assigned_to_stop_the_run() -> Result<()>
     Ok(())
 }
 
+#[tokio::test]
+async fn hidden_member_items_stop_backups_and_runs() -> Result<()> {
+    use vault_mirror::{
+        backup::{BackupOptions, backup},
+        snapshot,
+        store::{Keys, Store},
+    };
+
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    let (source, source_scope, source_org) = organization(&sandbox, &sandbox.source_url).await?;
+    if !source.server_traits().await?.items_need_collections {
+        eprintln!("skipping: Vaultwarden has no private member collections");
+        return Ok(());
+    }
+    let (dest, dest_scope, _) = organization(&sandbox, &sandbox.dest_url).await?;
+    let shared = source.load(&source_scope).await?.collections[0].id.clone();
+    let member = source
+        .create_collection(&source_org, "Member collection", None)
+        .await?;
+    let mut member_item = String::new();
+    for (index, sample) in fixtures::samples().into_iter().take(3).enumerate() {
+        let item = source
+            .create_item(
+                &source_scope,
+                &Draft {
+                    content: sample.content,
+                    folder_id: None,
+                    collection_ids: vec![if index == 0 { &member.id } else { &shared }.clone()],
+                },
+            )
+            .await?;
+        if index == 0 {
+            member_item = item.id;
+        }
+    }
+    let options = MirrorOptions::default();
+    let first = run_scoped(
+        &source,
+        source_scope.clone(),
+        &dest,
+        dest_scope.clone(),
+        &options,
+    )
+    .await?;
+    assert_eq!(first.summary.items_created, 3);
+    let before = dest.load(&dest_scope).await?;
+
+    let dir = tempfile::tempdir()?;
+    let keys = Keys::open(dir.path(), "synthetic passphrase")?;
+    let store = Store::new(dir.path(), "source", &keys);
+    let now = time::OffsetDateTime::now_utc();
+    let (complete, _) = backup(
+        &source,
+        &source_scope,
+        &store,
+        &BackupOptions {
+            retention_days: 1,
+            now: now - time::Duration::days(60),
+        },
+        &Capture::default(),
+    )
+    .await?;
+    let complete = complete
+        .snapshot
+        .expect("the first backup makes a snapshot");
+
+    // Bitwarden excludes default member collections from its shared inventory.
+    official_sql(&format!(
+        r#"UPDATE "Collection" SET "Type" = 1 WHERE "Id" = '{id}';
+           DELETE FROM "CollectionUsers" WHERE "CollectionId" = '{id}';"#,
+        id = member.id,
+    ))?;
+    let error = source
+        .load_with_traits(&source_scope)
+        .await
+        .err()
+        .expect("an inaccessible member item must stop the read");
+    assert!(format!("{error:#}").contains("0 collections and 1 item"));
+    let partial = backup(
+        &source,
+        &source_scope,
+        &store,
+        &BackupOptions {
+            retention_days: 1,
+            now,
+        },
+        &Capture::default(),
+    )
+    .await;
+    assert!(partial.is_err(), "a partial backup was accepted");
+    assert_eq!(store.list()?.as_slice(), std::slice::from_ref(&complete));
+    assert_eq!(
+        snapshot::parse(&store.snapshot(&complete).document()?)?
+            .items()
+            .len(),
+        3
+    );
+    assert!(
+        run_scoped(
+            &source,
+            source_scope.clone(),
+            &dest,
+            dest_scope.clone(),
+            &options,
+        )
+        .await
+        .is_err()
+    );
+    assert!(dest.load(&dest_scope).await? == before);
+
+    official_sql(&format!(
+        r#"UPDATE "Collection" SET "Type" = 0 WHERE "Id" = '{id}';
+           INSERT INTO "CollectionUsers" ("CollectionId", "OrganizationUserId", "ReadOnly", "HidePasswords", "Manage")
+           SELECT '{id}', "Id", false, false, true FROM "OrganizationUser"
+           WHERE "OrganizationId" = '{source_org}' AND "UserId" = '{user}';"#,
+        id = member.id,
+        user = source.user_id,
+    ))?;
+    source.trash_items(&[member_item]).await?;
+    let deleted = run_scoped(&source, source_scope, &dest, dest_scope, &options).await?;
+    assert_eq!(deleted.summary.items_deleted, 1);
+    Ok(())
+}
+
 /// An organization item can be in no collection. Bitwarden's server hides
 /// such items from their owner and refuses to create them, so neither side
 /// may lose one silently.

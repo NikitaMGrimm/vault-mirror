@@ -655,7 +655,9 @@ impl Account {
         synced_items: &[Value],
     ) -> Result<()> {
         let collections_path = format!("/organizations/{org}/collections");
-        let items_path = format!("/ciphers/organization-details?organizationId={org}");
+        // Bitwarden otherwise omits items in members' default collections.
+        let items_path =
+            format!("/ciphers/organization-details?organizationId={org}&includeMemberItems=true");
         let (collections, items) = tokio::join!(
             self.session.get(&collections_path),
             self.session.get(&items_path),
@@ -1423,7 +1425,8 @@ pub(crate) mod tests {
                     }
                     "/api/sync?excludeDomains=true" => partial.clone(),
                     "/api/organizations/org/collections" => json!({"data": partial["collections"]}),
-                    "/api/ciphers/organization-details?organizationId=org" => {
+                    "/api/ciphers/organization-details?organizationId=org&includeMemberItems=true" =>
+                    {
                         json!({"data": [{"id": "item-1"}, {"id": "item-2"}]})
                     }
                     _ => panic!("unexpected request {path}"),
@@ -1462,11 +1465,8 @@ pub(crate) mod tests {
                 .iter()
                 .any(|path| path == "/api/organizations/org/collections")
         );
-        assert!(
-            paths
-                .iter()
-                .any(|path| path == "/api/ciphers/organization-details?organizationId=org")
-        );
+        assert!(paths.iter().any(|path| path
+            == "/api/ciphers/organization-details?organizationId=org&includeMemberItems=true"));
     }
 
     #[test]
