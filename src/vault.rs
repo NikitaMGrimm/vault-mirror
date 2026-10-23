@@ -851,6 +851,20 @@ fn check_organization_visible(
         all_collections.with_context(context)?,
         all_items.with_context(context)?,
     );
+    // Both inventories can omit lease-gated items, even for an owner or admin.
+    let check_access_rule = |collection: &Value| -> Result<()> {
+        match collection.get("hasEnabledAccessRule") {
+            None | Some(Value::Bool(false)) => Ok(()),
+            Some(Value::Bool(true)) => bail!(
+                "organization {org} has collection access rules enabled for credential leasing, \
+                 so the vault cannot be read completely. Disable those rules before using \
+                 this organization"
+            ),
+            Some(_) => bail!(
+                "the server's collection in organization {org} has a malformed hasEnabledAccessRule"
+            ),
+        }
+    };
     let hidden = |name: &str, all: &Value, synced: &[Value]| -> Result<usize> {
         let malformed =
             || anyhow!("the server's list of all {name} in organization {org} is malformed");
@@ -862,11 +876,17 @@ fn check_organization_visible(
         let mut visible = HashSet::new();
         for entry in synced {
             if organization_of(entry, &format!("an entry of the synced {name}"))? == Some(org) {
+                if name == "collections" {
+                    check_access_rule(entry)?;
+                }
                 visible.extend(entry.get("id").and_then(Value::as_str));
             }
         }
         let mut hidden = 0;
         for entry in all {
+            if name == "collections" {
+                check_access_rule(entry)?;
+            }
             let id = (entry.get("id").and_then(Value::as_str))
                 .filter(|id| !id.is_empty())
                 .ok_or_else(malformed)?;
@@ -1213,6 +1233,240 @@ pub(crate) mod tests {
             Ok(json!({ "data": [{ "id": "c1" }, { "id": "i2" }] })),
         );
         assert!(format!("{:#}", hidden.unwrap_err()).contains("1 item"));
+    }
+
+    #[test]
+    fn credential_leasing_in_either_collection_response_stops_organization_reads() {
+        for (synced_rule, admin_rule) in [(true, false), (false, true), (true, true)] {
+            let synced = [json!({
+                "id": "c1", "organizationId": "org", "hasEnabledAccessRule": synced_rule,
+            })];
+            let result = check_organization_visible(
+                "org",
+                Ok(json!({"data": [{"id": "c1", "hasEnabledAccessRule": admin_rule}]})),
+                Ok(json!({"data": [{"id": "visible-item"}]})),
+                &synced,
+                &[json!({"id": "visible-item", "organizationId": "org"})],
+            );
+            let message = format!("{:#}", result.unwrap_err());
+            assert!(message.contains("credential leasing"), "{message}");
+        }
+    }
+
+    #[test]
+    fn absent_or_disabled_collection_access_rules_allow_organization_reads() {
+        for synced_rule in [None, Some(json!(false))] {
+            for admin_rule in [None, Some(json!(false))] {
+                let mut collection = json!({"id": "c1", "organizationId": "org"});
+                let mut admin = json!({"id": "c1"});
+                if let Some(rule) = &synced_rule {
+                    collection["hasEnabledAccessRule"] = rule.clone();
+                }
+                if let Some(rule) = admin_rule {
+                    admin["hasEnabledAccessRule"] = rule;
+                }
+                let unrelated = json!({
+                    "id": "c2", "organizationId": "other-org", "hasEnabledAccessRule": true,
+                });
+                assert!(
+                    check_organization_visible(
+                        "org",
+                        Ok(json!({"data": [admin]})),
+                        Ok(json!({"data": []})),
+                        &[collection, unrelated],
+                        &[],
+                    )
+                    .is_ok()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_collection_access_rules_stop_organization_reads() {
+        for rule in [
+            Value::Null,
+            json!("false"),
+            json!(0),
+            json!(1),
+            json!([]),
+            json!({"secret": "synthetic secret"}),
+        ] {
+            for admin_rule in [false, true] {
+                let mut synced = json!({"id": "c1", "organizationId": "org"});
+                let mut admin = json!({"id": "c1"});
+                if admin_rule {
+                    admin["hasEnabledAccessRule"] = rule.clone();
+                } else {
+                    synced["hasEnabledAccessRule"] = rule.clone();
+                }
+                let result = check_organization_visible(
+                    "org",
+                    Ok(json!({"data": [admin]})),
+                    Ok(json!({"data": []})),
+                    &[synced],
+                    &[],
+                );
+                let message = format!("{:#}", result.unwrap_err());
+                assert!(
+                    message.contains("malformed hasEnabledAccessRule"),
+                    "{message}"
+                );
+                assert!(!message.contains("synthetic secret"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_leasing_stops_backup_before_acceptance_or_pruning() {
+        use std::{
+            io::{BufRead, BufReader, Read, Write},
+            net::TcpListener,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        use crate::{
+            api::tests::http_response,
+            backup::{BackupOptions, backup},
+            mirror::Reporter,
+            snapshot,
+            store::{Keys, Store},
+        };
+
+        struct Quiet;
+        impl Reporter for Quiet {
+            fn status(&self, _: &str, _: &str) {}
+            fn warn(&self, _: &str) {}
+        }
+
+        let key = SymKey::generate();
+        let collections: Vec<_> = ["leased", "ordinary"]
+            .map(|id| {
+                json!({
+                    "id": id, "organizationId": "org", "hasEnabledAccessRule": false,
+                    "name": key.encrypt_str(id).unwrap(),
+                })
+            })
+            .into();
+        let ciphers: Vec<_> = (1..=3)
+            .map(|id| {
+                json!({
+                    "id": format!("item-{id}"), "type": 1, "organizationId": "org",
+                    "collectionIds": [if id == 3 { "leased" } else { "ordinary" }],
+                    "name": key.encrypt_str("synthetic item").unwrap(),
+                })
+            })
+            .collect();
+        let scope = Scope::Organization("org".into());
+        let sync = json!({"collections": collections, "ciphers": ciphers, "folders": []});
+        let full = read_vault(&sync, &scope, &key).unwrap();
+        let document = snapshot::build(&full, &scope).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), "synthetic passphrase").unwrap();
+        let store = Store::new(dir.path(), "source", &keys);
+        let now = time::OffsetDateTime::now_utc();
+        let old = store
+            .begin(now - time::Duration::days(60))
+            .unwrap()
+            .finish(&document)
+            .unwrap();
+
+        let mut partial = sync.clone();
+        partial["collections"][0]["hasEnabledAccessRule"] = json!(true);
+        partial["ciphers"].as_array_mut().unwrap().pop();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let requests = thread::spawn(move || {
+            let mut paths = Vec::new();
+            for _ in 0..6 {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                return paths;
+                            }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).unwrap();
+                let path = line.split_whitespace().nth(1).unwrap().to_string();
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    assert_ne!(stream.read_line(&mut line).unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                stream.read_exact(&mut vec![0; length]).unwrap();
+                let body = match path.as_str() {
+                    "/identity/connect/token" => json!({"access_token": "synthetic-token"}),
+                    "/api/config" => {
+                        json!({"server": null, "featureStates": {"pm-32009-new-item-types": true}})
+                    }
+                    "/api/sync?excludeDomains=true" => partial.clone(),
+                    "/api/organizations/org/collections" => json!({"data": partial["collections"]}),
+                    "/api/ciphers/organization-details?organizationId=org" => {
+                        json!({"data": [{"id": "item-1"}, {"id": "item-2"}]})
+                    }
+                    _ => panic!("unexpected request {path}"),
+                };
+                paths.push(path);
+                stream
+                    .get_mut()
+                    .write_all(http_response("200 OK", "", &body.to_string()).as_bytes())
+                    .unwrap();
+            }
+            paths
+        });
+        let mut account = account(&url, SymKey::generate()).await;
+        account.keys.organizations.insert("org".into(), key);
+        let result = backup(
+            &account,
+            &scope,
+            &store,
+            &BackupOptions {
+                retention_days: 1,
+                now,
+            },
+            &Quiet,
+        )
+        .await;
+        let paths = requests.join().unwrap();
+        assert_eq!(
+            store.list().unwrap().as_slice(),
+            std::slice::from_ref(&old),
+            "a partial inventory was committed or old snapshots were pruned"
+        );
+        assert!(result.is_err(), "a backup accepted a lease-filtered vault");
+        assert_eq!(store.snapshot(&old).document().unwrap(), document);
+        assert!(
+            paths
+                .iter()
+                .any(|path| path == "/api/organizations/org/collections")
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|path| path == "/api/ciphers/organization-details?organizationId=org")
+        );
     }
 
     #[test]
