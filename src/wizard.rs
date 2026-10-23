@@ -78,11 +78,7 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
     ]);
     let mut written: Vec<(&str, String)> = Vec::new();
     // A server with a private CA needs it for the logins below too.
-    let ca_cert = std::env::var("CA_CERT_FILE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| ca_cert_file(value.trim()))
-        .transpose()?;
+    let ca_cert = configured_ca_cert()?;
     if let Some(path) = &ca_cert {
         let path = path.display().to_string();
         env.insert("CA_CERT_FILE".into(), path.clone());
@@ -306,6 +302,14 @@ fn env_file(settings: &[(&str, String)]) -> String {
 /// `CA_CERT_FILE` made absolute against the working directory, where the
 /// logins read it, so the settings file and Compose's bind mount find it
 /// from the generated directory too.
+fn configured_ca_cert() -> Result<Option<PathBuf>> {
+    crate::settings()
+        .get("CA_CERT_FILE")
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| ca_cert_file(value.trim()))
+        .transpose()
+}
+
 fn ca_cert_file(value: &str) -> Result<PathBuf> {
     std::path::absolute(value).map_err(|error| anyhow!("CA_CERT_FILE {value}: {error}"))
 }
@@ -627,6 +631,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let absolute = dir.path().join("ca.pem");
         assert_eq!(ca_cert_file(absolute.to_str().unwrap()).unwrap(), absolute);
+    }
+
+    #[test]
+    fn setup_uses_the_ca_from_the_settings_file_with_environment_precedence() {
+        use std::process::Command;
+
+        const PROBE: &str = "VAULT_MIRROR_TEST_CA_SETTINGS";
+        const EXPECTED: &str = "VAULT_MIRROR_TEST_EXPECTED_CA";
+        if let Some(path) = std::env::var_os(PROBE) {
+            let settings = crate::parse_env_file(&fs::read_to_string(path).unwrap()).unwrap();
+            crate::ENV_FILE.set(settings).unwrap();
+            assert_eq!(
+                configured_ca_cert().unwrap(),
+                Some(
+                    std::env::current_dir()
+                        .unwrap()
+                        .join(std::env::var(EXPECTED).unwrap())
+                )
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.env");
+        fs::write(&path, "CA_CERT_FILE= file-ca.pem \n").unwrap();
+        for override_path in [None, Some("environment-ca.pem")] {
+            let mut probe = Command::new(std::env::current_exe().unwrap());
+            probe
+                .arg("--exact")
+                .arg("wizard::tests::setup_uses_the_ca_from_the_settings_file_with_environment_precedence")
+                .env_clear()
+                .env(PROBE, &path)
+                .env(EXPECTED, override_path.unwrap_or("file-ca.pem"))
+                .current_dir(dir.path());
+            if let Some(root) = std::env::var_os("SystemRoot") {
+                probe.env("SystemRoot", root);
+            }
+            if let Some(path) = override_path {
+                probe.env("CA_CERT_FILE", path);
+            }
+            let result = probe.output().unwrap();
+            assert!(
+                result.status.success(),
+                "CA settings probe failed: {}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
     }
 
     #[test]
