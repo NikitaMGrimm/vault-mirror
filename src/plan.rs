@@ -701,10 +701,10 @@ impl Known {
         match (own, link) {
             (Some(own), Some(link)) => {
                 match own.history.generation().cmp(&link.history.generation()) {
-                    std::cmp::Ordering::Greater => Self::own(own, source, dest),
+                    std::cmp::Ordering::Greater => Self::own(own, Some(source), dest),
                     std::cmp::Ordering::Less => Self::link(link, source, dest),
                     std::cmp::Ordering::Equal => {
-                        let own = Self::own(own, source, dest);
+                        let own = Self::own(own, Some(source), dest);
                         let link = Self::link(link, source, dest);
                         Self {
                             content: own
@@ -727,13 +727,13 @@ impl Known {
                     }
                 }
             }
-            (Some(own), None) => Self::own(own, source, dest),
+            (Some(own), None) => Self::own(own, Some(source), dest),
             (None, Some(link)) => Self::link(link, source, dest),
             (None, None) => unreachable!("a pair is linked by at least one marker"),
         }
     }
 
-    fn own(marker: &Marker, source: &Item, dest: &Item) -> Self {
+    fn own(marker: &Marker, source: Option<&Item>, dest: &Item) -> Self {
         Self {
             content: Some(marker.content.clone()),
             archived: Some(marker.archived),
@@ -745,7 +745,8 @@ impl Known {
                 Files::Changed
             } else {
                 Files::Unchanged {
-                    current: marker.source_files == source_files(source),
+                    current: source
+                        .is_some_and(|source| marker.source_files == source_files(source)),
                 }
             },
             receipt: FileReceipt::of(marker),
@@ -789,7 +790,16 @@ impl Known {
 /// With `skip_attachments`, copies keep the attachments they have and new
 /// copies get none, while their markers keep the evidence a later run that
 /// copies attachments needs.
-pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str, skip_attachments: bool) -> Plan {
+/// `source` selects what is mirrored. `source_history` is the full source
+/// read, including filtered-out items and trash, for deletion safety.
+pub fn plan(
+    source: &Vault,
+    source_history: &Vault,
+    dest: &Vault,
+    mode: Mode,
+    pair: &str,
+    skip_attachments: bool,
+) -> Plan {
     let source_places = Places::new(source, mode);
     let dest_places = Places::new(dest, mode);
     // When the destination has two containers with one name, new copies go
@@ -801,6 +811,11 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str, skip_attachmen
     };
 
     let mut entry_by_source_id: HashMap<&str, usize> = HashMap::new();
+    let history_by_source_id: HashMap<&str, &Item> = source_history
+        .items
+        .iter()
+        .map(|item| (item.id.as_str(), item))
+        .collect();
     // A source item can itself be a copy, made when the two vaults had the
     // other roles. Its marker names a destination item. Indexed like
     // `plan.entries`.
@@ -891,20 +906,29 @@ pub fn plan(source: &Vault, dest: &Vault, mode: Mode, pair: &str, skip_attachmen
             // item copied from it names.
             (None, Some(&entry)) => claims.entry(entry).or_default().push((index, None)),
             (None, None) => match &marker {
-                Some(marker) => plan.deletes.push(Delete {
-                    dest: index,
-                    reason: DeleteReason::Stale,
-                    changed_in_dest: Changes {
-                        content: dest_places.content(item) != marker.content,
-                        archive: item.archived != marker.archived,
-                        // Its source item is gone, so nothing can prove
-                        // attachments that no marker vouches for.
-                        files: match marker.files_pending() {
-                            true => !item.attachments.is_empty(),
-                            false => marker.dest_files != dest_files(&item.attachments),
+                Some(marker) => {
+                    let known = match history_by_source_id.get(marker.source_id.as_str()) {
+                        Some(source) => {
+                            let link =
+                                marker_of(source, pair).filter(|link| link.source_id == item.id);
+                            Known::new(Some(marker), link.as_ref(), source, item)
+                        }
+                        None => Known::own(marker, None, item),
+                    };
+                    plan.deletes.push(Delete {
+                        dest: index,
+                        reason: DeleteReason::Stale,
+                        changed_in_dest: Changes {
+                            content: Some(dest_places.content(item)) != known.content,
+                            archive: Some(item.archived) != known.archived,
+                            files: match known.files {
+                                Files::Unchanged { .. } => false,
+                                Files::Changed => true,
+                                Files::Unknown => !item.attachments.is_empty(),
+                            },
                         },
-                    },
-                }),
+                    });
+                }
                 None => plan.untracked += 1,
             },
         }

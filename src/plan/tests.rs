@@ -86,11 +86,11 @@ const PAIR: &str = "111111111111111111111111111111111111111111111111111111111111
 const OTHER_PAIR: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
 fn plan(source: &Vault, dest: &Vault, mode: Mode) -> Plan {
-    super::plan(source, dest, mode, PAIR, false)
+    super::plan(source, source, dest, mode, PAIR, false)
 }
 
 fn skipping(source: &Vault, dest: &Vault) -> Plan {
-    super::plan(source, dest, Mode::Personal, PAIR, true)
+    super::plan(source, source, dest, Mode::Personal, PAIR, true)
 }
 
 fn marker(item: &Item) -> Option<Marker> {
@@ -117,7 +117,7 @@ fn apply(source: &Vault, dest: &Vault, mode: Mode) -> Vault {
 /// Applies a plan as a run that finishes does, without a server: the
 /// destination ends up holding exactly what the final drafts describe.
 fn applied(source: &Vault, dest: &Vault, mode: Mode, skip_attachments: bool) -> Vault {
-    let plan = super::plan(source, dest, mode, PAIR, skip_attachments);
+    let plan = super::plan(source, source, dest, mode, PAIR, skip_attachments);
     let mut next = dest.clone();
     let taken: HashSet<String> = (dest.items.iter().map(|i| i.id.clone()))
         .chain(dest.folders.iter().map(|f| f.id.clone()))
@@ -604,7 +604,14 @@ fn attachments_no_marker_vouches_for_are_not_replaced_unasked() {
     );
 
     // With its source item gone, the copy is not deleted unasked either.
-    let plan = super::plan(&vault(vec![]), &dest, Mode::Personal, PAIR, false);
+    let plan = super::plan(
+        &vault(vec![]),
+        &vault(vec![]),
+        &dest,
+        Mode::Personal,
+        PAIR,
+        false,
+    );
     assert!(plan.deletes[0].changed_in_dest.files);
 }
 
@@ -952,7 +959,14 @@ fn copies_made_without_their_attachments_are_never_complete_duplicates() {
                 true => clones.chain(dest.items.clone()).collect(),
                 false => dest.items.iter().cloned().chain(clones).collect(),
             };
-            let planned = super::plan(&source, &duplicated, Mode::Personal, PAIR, skip_attachments);
+            let planned = super::plan(
+                &source,
+                &source,
+                &duplicated,
+                Mode::Personal,
+                PAIR,
+                skip_attachments,
+            );
             assert_eq!(planned.detached, 1);
             let deleted: Vec<_> = (planned.deletes.iter())
                 .map(|delete| marker(&duplicated.items[delete.dest]).unwrap().source_id)
@@ -1267,11 +1281,11 @@ fn switching_source_and_destination_takes_over_the_copies() {
 
     let original = apply(&mirror, &original, Mode::Personal);
     assert_converged(&mirror, &original, Mode::Personal);
-    let again = super::plan(&mirror, &original, Mode::Personal, PAIR, false);
+    let again = super::plan(&mirror, &mirror, &original, Mode::Personal, PAIR, false);
     assert_eq!(check(&again, &original, &Safety::default()), Ok(()));
 
     // And back: each item still has one marker, and nothing is duplicated.
-    let back = super::plan(&original, &mirror, Mode::Personal, PAIR, false);
+    let back = super::plan(&original, &original, &mirror, Mode::Personal, PAIR, false);
     assert_eq!(back.reversed, 0);
     assert_eq!(check(&back, &mirror, &Safety::default()), Ok(()));
     assert!(!back.has_changes());
@@ -1362,6 +1376,116 @@ fn switching_back_after_archiving_uses_the_last_written_baseline() {
         check(&changed, &b, &Safety::default()),
         Err(SafetyViolation::Overwrites(_))
     ));
+}
+
+fn reversed_history(mode: Mode) -> (Vault, Vault, Vault) {
+    let mut a = numbered(2);
+    match mode {
+        Mode::Personal => {
+            a.folders = vec![folder("drop", "Drop"), folder("keep", "Keep")];
+            a.items[0].folder_id = Some("drop".into());
+            a.items[1].folder_id = Some("keep".into());
+        }
+        Mode::Organization => {
+            a.collections = vec![collection("drop", "Drop"), collection("keep", "Keep")];
+            a.items[0].collection_ids = vec!["drop".into()];
+            a.items[1].collection_ids = vec!["keep".into()];
+        }
+    }
+    a.items[0].attachments = vec![attachment("f1", "file.txt", 10)];
+    let older = mirrored(&a, mode);
+    let mut b = older.clone();
+    edit_notes(&mut b, "second");
+    b.items[0].archived = true;
+    b.items[0].attachments = vec![attachment("f2", "file.txt", 20)];
+    a = apply(&b, &a, mode);
+    assert_eq!(marker(&a.items[0]).unwrap().history.generation(), 2);
+    assert_eq!(marker(&b.items[0]).unwrap().history.generation(), 1);
+    let live = plan(&a, &older, mode);
+    assert!(matches!(
+        check(&live, &older, &Safety::default()),
+        Err(SafetyViolation::Overwrites(_))
+    ));
+    (a, b, older)
+}
+
+fn assert_stale_history(planned: &Plan, dest: &Vault, edited: bool) {
+    assert_eq!(planned.tracked_before, 2);
+    assert_eq!(planned.deletes.len(), 1);
+    assert_eq!(planned.deletes[0].dest, 0);
+    assert_eq!(planned.deletes[0].reason, DeleteReason::Stale);
+    assert_eq!(
+        planned.deletes[0].changed_in_dest,
+        Changes {
+            content: edited,
+            archive: edited,
+            files: edited,
+        }
+    );
+    let expected = if edited {
+        Err(SafetyViolation::Overwrites(vec![dest.items[0].id.clone()]))
+    } else {
+        Ok(())
+    };
+    assert_eq!(check(planned, dest, &Safety::default()), expected);
+    assert_eq!(
+        check(
+            planned,
+            dest,
+            &Safety {
+                allow_overwrite: true,
+                ..Safety::default()
+            }
+        ),
+        Ok(())
+    );
+    assert_eq!(planned.entries.len(), 1);
+    assert_eq!(planned.unchanged, 1);
+    assert!(planned.creates.is_empty() && planned.updates.is_empty());
+}
+
+#[test]
+fn stale_deletions_keep_history_from_source_trash() {
+    for mode in [Mode::Personal, Mode::Organization] {
+        let (mut source, unchanged, edited) = reversed_history(mode);
+        source.items[0].in_trash = true;
+        assert_stale_history(&plan(&source, &edited, mode), &edited, true);
+        assert_stale_history(&plan(&source, &unchanged, mode), &unchanged, false);
+    }
+}
+
+#[test]
+fn stale_deletions_keep_history_from_filtered_source_items() {
+    for mode in [Mode::Personal, Mode::Organization] {
+        let (source, unchanged, edited) = reversed_history(mode);
+        let mut selected = source.clone();
+        selected.items.remove(0);
+        selected.folders.retain(|folder| folder.id == "keep");
+        selected
+            .collections
+            .retain(|collection| collection.id == "keep");
+        for (dest, changed) in [(&edited, true), (&unchanged, false)] {
+            let planned = super::plan(&selected, &source, dest, mode, PAIR, false);
+            assert_stale_history(&planned, dest, changed);
+            assert_eq!(planned.entries[0].source, 0);
+        }
+    }
+}
+
+#[test]
+fn stale_deletions_only_trust_history_linked_to_the_exact_copy() {
+    for foreign_pair in [false, true] {
+        let (mut source, _, dest) = reversed_history(Mode::Personal);
+        let mut link = marker(&source.items[0]).unwrap();
+        if foreign_pair {
+            link.pair = OTHER_PAIR.into();
+        } else {
+            link.source_id = "another-copy".into();
+        }
+        set_marker(&mut source.items[0], link);
+        source.items[0].in_trash = true;
+        assert_stale_history(&plan(&source, &dest, Mode::Personal), &dest, false);
+    }
 }
 
 #[test]
@@ -1847,11 +1971,18 @@ fn markers_of_another_pair_of_vaults_grant_nothing() {
     let source = numbered(2);
     let mirror = mirrored(&source, Mode::Personal);
     // The same copies, as another mirror into this destination made them.
-    let foreign = super::plan(&source, &mirror, Mode::Personal, OTHER_PAIR, false);
+    let foreign = super::plan(&source, &source, &mirror, Mode::Personal, OTHER_PAIR, false);
     assert_eq!(foreign.creates.len(), 2);
     assert_eq!((foreign.untracked, foreign.tracked_before), (2, 0));
     assert!(foreign.updates.is_empty() && foreign.deletes.is_empty());
-    let gone = super::plan(&vault(vec![]), &mirror, Mode::Personal, OTHER_PAIR, false);
+    let gone = super::plan(
+        &vault(vec![]),
+        &vault(vec![]),
+        &mirror,
+        Mode::Personal,
+        OTHER_PAIR,
+        false,
+    );
     assert!(gone.deletes.is_empty());
     assert!(marker_of(&mirror.items[0], OTHER_PAIR).is_none());
     // Copying a copy on, into a third vault, carries no marker of the first pair.
@@ -1866,7 +1997,14 @@ fn markers_of_another_pair_of_vaults_grant_nothing() {
 }
 
 fn apply_pair(source: &Vault, pair: &str) -> Vault {
-    let plan = super::plan(source, &Vault::default(), Mode::Personal, pair, false);
+    let plan = super::plan(
+        source,
+        source,
+        &Vault::default(),
+        Mode::Personal,
+        pair,
+        false,
+    );
     let items = (plan.entries.iter())
         .map(|entry| {
             let draft = (entry.draft(
@@ -1966,7 +2104,7 @@ fn what_vault_mirror_did_not_make_is_left_alone() {
     assert_eq!(kept, &dest.items[0]);
 
     // Later runs leave it alone too.
-    let again = super::plan(&source, &after, Mode::Personal, PAIR, false);
+    let again = super::plan(&source, &source, &after, Mode::Personal, PAIR, false);
     assert!(!again.has_changes());
     assert_eq!(again.untracked, 1);
 }
@@ -1996,6 +2134,7 @@ fn deleting_more_than_half_of_the_copies_is_refused() {
         // Neither the user's items nor another pair's copies count.
         dest.items.push(login("mine", "Mine", "pw"));
         let others = super::plan(
+            &numbered(3),
             &numbered(3),
             &Vault::default(),
             Mode::Personal,
@@ -2246,7 +2385,7 @@ fn foreign_links_refuse_endpoint_changes_and_reversal_without_adopting_copies() 
         ),
     ] {
         for (source, dest) in [(&source, &dest), (&dest, &source)] {
-            let planned = super::plan(source, dest, Mode::Personal, &new_pair, false);
+            let planned = super::plan(source, source, dest, Mode::Personal, &new_pair, false);
             assert_eq!(planned.creates.len(), 2);
             let error = check_foreign_links(&planned, source, dest, &new_pair).unwrap_err();
             assert_eq!(error.0.len(), 2);

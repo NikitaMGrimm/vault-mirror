@@ -570,10 +570,10 @@ impl<'a> Run<'a> {
         source_files: Option<&Snapshot<'_>>,
     ) -> Result<bool> {
         let mode = mode(&self.source.scope, &self.dest.scope)?;
-        let source_vault = source_read.vault();
+        let source_history = source_read.vault();
         let dest_vault = dest_read.vault();
-        ensure_distinct(self.source, self.dest, source_vault, dest_vault)?;
-        let mut source_vault = source_vault.clone();
+        ensure_distinct(self.source, self.dest, source_history, dest_vault)?;
+        let mut source_vault = source_history.clone();
         self.filter(&mut source_vault, mode)?;
         let traits = self
             .dest
@@ -598,6 +598,7 @@ impl<'a> Run<'a> {
         let pair = plan::pair(&vault_key(self.source), &vault_key(self.dest));
         let plan = plan::plan(
             &source_vault,
+            source_history,
             dest_vault,
             mode,
             &pair,
@@ -709,7 +710,8 @@ impl<'a> Run<'a> {
             )
             .await?;
             self.stage = "verifying the destination";
-            self.verify(&source_vault, &pair, mode).await?;
+            self.verify(&source_vault, source_history, &pair, mode)
+                .await?;
             self.reporter.status("Verified", "the destination");
             true
         } else if cleanup.obsolete.is_empty() {
@@ -717,7 +719,10 @@ impl<'a> Run<'a> {
         } else {
             // Only folders are left to delete, which can wait for the next
             // run, so a failed read fails nothing.
-            if let Err(error) = self.verify(&source_vault, &pair, mode).await {
+            if let Err(error) = self
+                .verify(&source_vault, source_history, &pair, mode)
+                .await
+            {
                 self.keep_folders(&cleanup.obsolete, &format!("{error:#}"));
                 return Ok(false);
             }
@@ -1169,12 +1174,19 @@ impl<'a> Run<'a> {
 
     /// Reads the destination again and checks that nothing is left to do.
     /// Attachments were checked as they were copied.
-    async fn verify(&mut self, source_vault: &Vault, pair: &str, mode: Mode) -> Result<()> {
+    async fn verify(
+        &mut self,
+        source_vault: &Vault,
+        source_history: &Vault,
+        pair: &str,
+        mode: Mode,
+    ) -> Result<()> {
         let dest = self.dest;
         let dest_read = dest.account.load_with_traits(&dest.scope).await?;
         let dest_vault = dest_read.vault();
         let again = plan::plan(
             source_vault,
+            source_history,
             dest_vault,
             mode,
             pair,
@@ -1590,7 +1602,14 @@ mod tests {
                     .into();
                     original.items.push(item);
                 }
-                let plan = plan::plan(&original, &Vault::default(), Mode::Personal, &pair, false);
+                let plan = plan::plan(
+                    &original,
+                    &original,
+                    &Vault::default(),
+                    Mode::Personal,
+                    &pair,
+                    false,
+                );
                 let mut copies = Vec::new();
                 for entry in &plan.entries {
                     let draft = entry
@@ -1841,6 +1860,7 @@ mod tests {
                 let foreign_pair = plan::pair("old source endpoint", "destination endpoint");
                 let planned = plan::plan(
                     source_read.vault(),
+                    source_read.vault(),
                     &Vault::default(),
                     Mode::Personal,
                     &foreign_pair,
@@ -1930,6 +1950,7 @@ mod tests {
             let (source, dest) = server.accounts().await;
             let original = source.load_with_traits(&Scope::Personal).await.unwrap();
             let foreign = plan::plan(
+                original.vault(),
                 original.vault(),
                 &Vault::default(),
                 Mode::Personal,
@@ -2533,8 +2554,14 @@ mod tests {
                     .into();
                     original.items.push(item);
                 }
-                let planned =
-                    plan::plan(&original, &Vault::default(), Mode::Personal, &pair, false);
+                let planned = plan::plan(
+                    &original,
+                    &original,
+                    &Vault::default(),
+                    Mode::Personal,
+                    &pair,
+                    false,
+                );
                 let copies: Vec<_> = planned
                     .entries
                     .iter()
