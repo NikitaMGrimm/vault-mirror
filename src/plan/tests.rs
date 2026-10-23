@@ -1750,6 +1750,65 @@ fn only_an_exact_reverse_link_supplies_a_baseline_but_all_observed_order_is_kept
 }
 
 #[test]
+fn reverse_links_keep_newer_destination_evidence_when_the_named_source_is_missing() {
+    for mode in [Mode::Personal, Mode::Organization] {
+        let mut a = vault(vec![login("a1", "One", "pw1")]);
+        a.items[0].content.insert("notes".into(), text("first"));
+        let mut b = mirrored(&a, mode);
+        let older_clone = Item {
+            id: "older-clone".into(),
+            ..b.items[0].clone()
+        };
+        b.items[0].content.insert("notes".into(), text("second"));
+        a = apply(&b, &a, mode);
+        assert_eq!(marker(&a.items[0]).unwrap().history.generation(), 2);
+
+        let mut selected = vault(vec![older_clone]);
+        selected.items[0]
+            .content
+            .insert("notes".into(), text("third"));
+        let mut edited = a.clone();
+        edited.items[0]
+            .content
+            .insert("notes".into(), text("first"));
+
+        // The named source can be deleted or remain in the unfiltered read.
+        for filtered_out in [false, true] {
+            let mut history = selected.clone();
+            if filtered_out {
+                history.items.extend(b.items.clone());
+            }
+            let next = super::plan(&selected, &history, &edited, mode, PAIR, false);
+            assert_eq!(next.reversed, 0);
+            assert_eq!(next.updates.len(), 1);
+            assert!(next.updates[0].changed_in_dest.content);
+            assert_eq!(
+                check(&next, &edited, &Safety::default()),
+                Err(SafetyViolation::Overwrites(vec!["a1".into()]))
+            );
+            assert_eq!(
+                check(
+                    &next,
+                    &edited,
+                    &Safety {
+                        allow_overwrite: true,
+                        ..Safety::default()
+                    }
+                ),
+                Ok(())
+            );
+        }
+
+        let next = plan(&selected, &a, mode);
+        assert_eq!(check(&next, &a, &Safety::default()), Ok(()));
+        assert!(!next.updates[0].changed_in_dest.any());
+        let after = apply(&selected, &a, mode);
+        assert_eq!(marker(&after.items[0]).unwrap().history.generation(), 3);
+        assert_converged(&selected, &after, mode);
+    }
+}
+
+#[test]
 fn marker_generation_exhaustion_fails_only_a_needed_write() {
     let mut a = vault(vec![login("a1", "One", "pw1")]);
     let mut b = mirrored(&a, Mode::Personal);

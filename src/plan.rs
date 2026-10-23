@@ -883,8 +883,8 @@ pub fn plan(
     };
 
     // Each destination item that claims to be a copy, by the entry it copies,
-    // with its own marker. An item that only the source item's marker names
-    // has none: it is the original that the source item was copied from.
+    // with its own marker, if any. An original named only by the source
+    // item's marker has none.
     let mut claims: BTreeMap<usize, Vec<(usize, Option<Marker>)>> = BTreeMap::new();
     for (index, item) in dest.items.iter().enumerate() {
         // The trash is left to the server, which empties it on its own
@@ -902,9 +902,9 @@ pub fn plan(
             .and_then(|marker| entry_by_source_id.get(marker.source_id.as_str()));
         match (entry, entry_by_link.get(&item.id)) {
             (Some(&entry), _) => claims.entry(entry).or_default().push((index, marker)),
-            // An original, or a copy whose source item is gone, that a source
-            // item copied from it names.
-            (None, Some(&entry)) => claims.entry(entry).or_default().push((index, None)),
+            // A reverse link pairs the item; its own marker still records
+            // destination edits and chronology even if its source is gone.
+            (None, Some(&entry)) => claims.entry(entry).or_default().push((index, marker)),
             (None, None) => match &marker {
                 Some(marker) => {
                     let known = match history_by_source_id.get(marker.source_id.as_str()) {

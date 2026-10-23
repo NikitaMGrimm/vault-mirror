@@ -52,8 +52,8 @@ collections, or folders it didn't make; delete an empty one yourself.
   it changes anything and lists the copy's id. Make lasting changes in the
   source. To put the source version back, run once with `--allow-overwrite`;
   that run's destination backup keeps your change.
-  Moving the source item to the trash or excluding it with a filter does not
-  remove this protection.
+  Moving the source item to the trash, excluding it with a filter, or switching
+  the source and destination does not remove this protection.
 - In an organization, folders are each member's own. A copy you file in one
   stays there.
 - If you delete a copy's marker, the item is no longer a copy, and the next run
