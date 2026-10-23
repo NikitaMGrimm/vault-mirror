@@ -59,6 +59,11 @@ snapshots remain available for recovery and export. A run also stops if
 visibility changes around a vault read or the destination becomes restricted
 before writing or during final verification.
 
+**Organization credential leasing isn't supported.** Disable collection access
+rules before using an organization as a source or destination. Reads stop before
+saving or pruning that vault's snapshots while any collection has an enabled
+access rule.
+
 **Organization items need a collection on Bitwarden.** When the destination is
 a Bitwarden server, a run stops while source items are in no collection.
 

@@ -161,6 +161,7 @@ On Bitwarden's servers, that means, for both organizations:
 1. Give the account the **Owner** or **Admin** role.
 2. Assign the account to every collection, with **Can manage** permission.
 3. Make sure every item is in a collection.
+4. Disable credential leasing access rules on every collection.
 
 Members, groups, permissions, favorites and folders aren't copied between
 organizations. A Vaultwarden destination keeps members' own favorites and

@@ -259,6 +259,7 @@ async fn daemon() -> Result<ExitCode> {
     let schedule = (config.schedule.as_deref())
         .ok_or_else(|| anyhow!("configuration: the daemon needs SCHEDULE, a cron expression"))?;
     let timetable = Timetable::new(schedule, config.timezone.as_deref())?;
+    timetable.next(chrono::Utc::now())?;
     let mut stop = Stop::new()?;
     loop {
         // A run in progress is finished, not interrupted. A stop request that

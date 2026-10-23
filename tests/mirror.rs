@@ -528,6 +528,110 @@ async fn switching_source_and_destination_takes_over_the_copies() -> Result<()> 
 }
 
 #[tokio::test]
+async fn stale_deletions_keep_source_history_after_trashing_or_filtering() -> Result<()> {
+    let Some(sandbox) = sandbox().await else {
+        return Ok(());
+    };
+    for selection in ["trash", "include", "exclude"] {
+        let (source, dest) = sandbox.pair().await?;
+        let drop = source.create_folder("Drop").await?;
+        let keep = source.create_folder("Keep").await?;
+        for (index, folder) in [drop.id, keep.id].into_iter().enumerate() {
+            let mut content = fixtures::samples()[0].content.clone();
+            content.insert("name".into(), Node::secret(format!("Synthetic {index}")));
+            content.insert("notes".into(), Node::Null);
+            source
+                .create_item(
+                    &PERSONAL,
+                    &Draft {
+                        content,
+                        folder_id: Some(folder),
+                        collection_ids: vec![],
+                    },
+                )
+                .await?;
+        }
+        run(&source, &dest, &options()).await?;
+        let original = source.load(&PERSONAL).await?;
+        let source_id = by_name(&original, "Synthetic 0").id.clone();
+        let initial = dest.load(&PERSONAL).await?;
+        let copy = by_name(&initial, "Synthetic 0");
+        let mut draft = Draft {
+            content: copy.content.clone(),
+            folder_id: copy.folder_id.clone(),
+            collection_ids: vec![],
+        };
+        draft.content.insert("notes".into(), Node::secret("second"));
+        let newer = dest.update_item(&PERSONAL, copy, &draft).await?;
+        let reverse = MirrorOptions {
+            safety: Safety {
+                allow_reverse: true,
+                ..Safety::default()
+            },
+            ..options()
+        };
+        run(&dest, &source, &reverse).await?;
+        let mut selected = match selection {
+            "trash" => {
+                source.trash_items(&[source_id]).await?;
+                options()
+            }
+            "include" => MirrorOptions {
+                filter: Filter {
+                    include: vec!["Keep".into()],
+                    exclude: vec![],
+                },
+                ..options()
+            },
+            "exclude" => MirrorOptions {
+                filter: Filter {
+                    include: vec![],
+                    exclude: vec!["Drop".into()],
+                },
+                ..options()
+            },
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            check(&source, &dest, &selected)
+                .await?
+                .summary
+                .items_deleted,
+            1
+        );
+        draft.content.insert("notes".into(), Node::Null);
+        dest.update_item(&PERSONAL, &newer, &draft).await?;
+        let before = dest.load(&PERSONAL).await?;
+        for result in [
+            check(&source, &dest, &selected).await,
+            run(&source, &dest, &selected).await,
+        ] {
+            let error = result.expect_err("edited stale copy must be protected");
+            assert!(
+                format!("{error:#}").contains("--allow-overwrite"),
+                "{selection}: {error:#}"
+            );
+        }
+        assert!(dest.load(&PERSONAL).await? == before);
+        selected.safety.allow_overwrite = true;
+        assert_eq!(
+            run(&source, &dest, &selected).await?.summary.items_deleted,
+            1
+        );
+        let after = dest.load(&PERSONAL).await?;
+        assert!(
+            after
+                .items
+                .iter()
+                .find(|item| item.id == copy.id)
+                .unwrap()
+                .in_trash
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn repeated_reversals_copy_content_archive_and_attachments_once() -> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
