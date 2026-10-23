@@ -100,7 +100,7 @@ Instead of `init`:
    cat > compose.yaml <<EOF
    services:
      vault-mirror:
-       image: ghcr.io/nikitamgrimm/vault-mirror:0.8
+       image: ghcr.io/nikitamgrimm/vault-mirror:0.9
        entrypoint: ["/vault-mirror", "--env-file", "/run/vault-mirror.env"]
        command: daemon
        user: "$(id -u):$(id -g)"
@@ -144,7 +144,7 @@ on the host and in the container:
 docker run --rm -it --user "$(id -u):$(id -g)" \
   -e CA_CERT_FILE=/absolute/path/ca.pem \
   --mount type=bind,source=/absolute/path/ca.pem,target=/absolute/path/ca.pem,readonly \
-  -v "$PWD:/work" -w /work ghcr.io/nikitamgrimm/vault-mirror:0.8 init
+  -v "$PWD:/work" -w /work ghcr.io/nikitamgrimm/vault-mirror:0.9 init
 ```
 
 If you write `compose.yaml` yourself, mount the certificate read-only and set
