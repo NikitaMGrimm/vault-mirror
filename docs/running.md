@@ -88,9 +88,29 @@ sudo systemctl enable --now vault-mirror.timer
 ```
 
 The container runs as user 65532, so `/var/lib/vault-mirror` belongs to that
-user. To run once now and see the result:
+user.
+
+If `CA_CERT_FILE` is set, add a read-only mount before the image name in
+`ExecStart`. Use the absolute path from `/etc/vault-mirror.env` for both paths:
+
+```text
+--mount type=bind,source=/absolute/path/ca.pem,target=/absolute/path/ca.pem,readonly
+```
+
+For each `*_FILE` setting, bind-mount its host file read-only at the configured
+path inside the container. For example, with
+`SOURCE_PASSWORD_FILE=/run/secrets/source_password`:
+
+```text
+--mount type=bind,source=/host/path/source_password,target=/run/secrets/source_password,readonly
+```
+
+The container user, UID `65532`, must be able to read every mounted file.
+
+To run once now and see the result:
 
 ```sh
+sudo systemctl daemon-reload
 sudo systemctl start vault-mirror.service
 journalctl -u vault-mirror.service -n 20
 ```

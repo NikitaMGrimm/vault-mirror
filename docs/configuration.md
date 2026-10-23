@@ -129,8 +129,9 @@ Instead of `init`:
 
 ## Custom certificate authorities
 
-Set `CA_CERT_FILE` before `init` if your server uses a private certificate
-authority. `init` saves the certificate's absolute host path in the settings
+If your server uses a private certificate authority, set `CA_CERT_FILE` in the
+environment or in a file passed with `--env-file` when running `init`.
+`init` saves the certificate's absolute host path in the settings
 file and adds a read-only mount to `compose.yaml`. Native commands use the host
 path. The Compose service uses the mounted certificate. If a run can't read
 the file, it fails and tries to send its failure notification with the
