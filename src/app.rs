@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -134,6 +134,13 @@ pub enum BackupAccess {
     Write,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "another vault-mirror run is using BACKUPS_DIR {}; try again when it has finished",
+    .0.display()
+)]
+struct BackupBusy(PathBuf);
+
 /// Keeps readers apart from a run that writes or prunes snapshots until the
 /// returned file is closed. Recovery readers can share the directory.
 pub fn lock_backups_dir(backups_dir: &Path, access: BackupAccess) -> Result<fs::File> {
@@ -170,10 +177,7 @@ pub fn lock_backups_dir(backups_dir: &Path, access: BackupAccess) -> Result<fs::
     };
     match locked {
         Ok(()) => Ok(file),
-        Err(fs::TryLockError::WouldBlock) => Err(anyhow!(
-            "another vault-mirror run is using BACKUPS_DIR {}; try again when it has finished",
-            backups_dir.display()
-        )),
+        Err(fs::TryLockError::WouldBlock) => Err(BackupBusy(backups_dir.to_path_buf()).into()),
         Err(fs::TryLockError::Error(error)) => {
             Err(error).with_context(|| format!("locking {}", path.display()))
         }
@@ -251,6 +255,7 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
         ),
         Err(error) => (None, Err(error)),
     };
+    let contended = result.as_ref().is_err_and(|error| error.is::<BackupBusy>());
 
     let finished = OffsetDateTime::now_utc();
     let mut status = progress.status;
@@ -269,16 +274,16 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
             status.error = Some(message.chars().take(1000).collect());
         }
     }
-    // A run turned away by the lock leaves the status file and the
-    // notification to the run that holds it.
-    if lock.is_none() {
-        return status;
+    if let Some(lock) = lock {
+        if let Err(error) = write_status(&config.backups_dir, &status) {
+            reporter.warn(&format!("Could not write the status file: {error:#}"));
+        }
+        drop(lock);
     }
-    if let Err(error) = write_status(&config.backups_dir, &status) {
-        reporter.warn(&format!("Could not write the status file: {error:#}"));
+    // Only contention leaves the notification to the run holding the lock.
+    if !contended {
+        notify(config, &status, reporter).await;
     }
-    drop(lock);
-    notify(config, &status, reporter).await;
     status
 }
 
@@ -497,6 +502,7 @@ pub fn health(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
     use time::macros::datetime;
 
     use super::*;
@@ -589,6 +595,44 @@ mod tests {
         write_status(dir.path(), &status).unwrap();
         assert_eq!(read_status(dir.path()).unwrap(), status);
         assert!(read_status(&dir.path().join("missing")).is_err());
+    }
+
+    #[tokio::test]
+    async fn backup_directory_failures_still_send_failure_notifications() {
+        use crate::api::tests::{http_response, http_server};
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-directory");
+        fs::write(&file, b"synthetic file").unwrap();
+        let unopenable = dir.path().join("unopenable-lock");
+        fs::create_dir(&unopenable).unwrap();
+        fs::create_dir(unopenable.join(LOCK_FILE)).unwrap();
+        fs::write(status_path(&unopenable), b"previous status").unwrap();
+        for backups in [file.join("backups"), unopenable.clone()] {
+            let (url, notification) = http_server(vec![http_response("200 OK", "", "")]);
+            let env = HashMap::from([
+                ("SOURCE_SERVER".into(), "invalid://synthetic".into()),
+                ("SOURCE_CLIENT_ID".into(), "user.synthetic".into()),
+                ("SOURCE_CLIENT_SECRET".into(), "synthetic-secret".into()),
+                ("SOURCE_PASSWORD".into(), "synthetic-password".into()),
+                ("BACKUP_PASSPHRASE".into(), "synthetic-passphrase".into()),
+                ("BACKUPS_DIR".into(), backups.display().to_string()),
+                ("NOTIFY_FAILURE_URL".into(), url),
+            ]);
+            let config = Config::from_env(&env).unwrap();
+            let status = run_once(&config, RunFlags::default(), &Quiet).await;
+            let requests = notification.join().unwrap();
+            assert!(!status.succeeded());
+            assert_eq!(status.failure_stage.as_deref(), Some("configuration"));
+            assert_eq!(requests.len(), 1, "the storage failure was not reported");
+            assert!(requests[0].ends_with(&describe(&status)));
+            assert!(!backups.join("key.age").exists());
+        }
+        assert_eq!(
+            fs::read(status_path(&unopenable)).unwrap(),
+            b"previous status",
+            "a run without the lock changed the status file"
+        );
     }
 
     #[test]

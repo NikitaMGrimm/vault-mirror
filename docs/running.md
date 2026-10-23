@@ -40,6 +40,9 @@ away. These recovery commands can share the lock with each other and block
 runs until they finish. Keep `run.lock` when copying backups for
 [read-only recovery](backups.md#restore-with-vault-mirror).
 
+A run refused by the lock sends no notification. Other backup-directory
+failures send the configured failure notification.
+
 The generated `compose.yaml` gives a run five minutes to finish when the
 container stops. Raise `stop_grace_period` for large vaults.
 
