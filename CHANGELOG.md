@@ -4,6 +4,36 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.9.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.8.1...v0.9.0) - 2026-10-23
+
+### Added
+
+- *(organization)* allow updates with accepted metadata loss ([#86](https://github.com/NikitaMGrimm/vault-mirror/pull/86))
+
+### Fixed
+
+- *(setup)* honor private CA settings across setup and scheduling ([#96](https://github.com/NikitaMGrimm/vault-mirror/pull/96))
+- send failure alerts when backup storage is unavailable ([#95](https://github.com/NikitaMGrimm/vault-mirror/pull/95))
+- *(organization)* protect copies hidden in member collections ([#94](https://github.com/NikitaMGrimm/vault-mirror/pull/94))
+- preserve overwrite protection after switching vaults ([#93](https://github.com/NikitaMGrimm/vault-mirror/pull/93))
+- protect vault data and reject unusable daemon schedules ([#92](https://github.com/NikitaMGrimm/vault-mirror/pull/92))
+- *(setup)* validate backup-only logins and setup documentation
+- *(notify)* send failure alerts when custom CA files are unavailable
+- mount custom CA files and clarify previews
+- *(visibility)* preserve backups when servers hide item types ([#85](https://github.com/NikitaMGrimm/vault-mirror/pull/85))
+- *(mirror)* refuse new copies linked by foreign vault markers ([#84](https://github.com/NikitaMGrimm/vault-mirror/pull/84))
+- *(status)* [**breaking**] distinguish planned work from unverified writes ([#83](https://github.com/NikitaMGrimm/vault-mirror/pull/83))
+- *(mirror)* retain verified attachments through archive finalization ([#81](https://github.com/NikitaMGrimm/vault-mirror/pull/81))
+- *(vault)* reject encrypted content that cannot be copied ([#80](https://github.com/NikitaMGrimm/vault-mirror/pull/80))
+- *(compose)* read settings from the mounted file ([#79](https://github.com/NikitaMGrimm/vault-mirror/pull/79))
+- *(api)* hide signed request URLs in debug output ([#78](https://github.com/NikitaMGrimm/vault-mirror/pull/78))
+- *(recovery)* [**breaking**] recover from read-only backups and export portable paths ([#75](https://github.com/NikitaMGrimm/vault-mirror/pull/75))
+- retain source visibility evidence through planning ([#76](https://github.com/NikitaMGrimm/vault-mirror/pull/76))
+- validate generated Compose settings on every command ([#74](https://github.com/NikitaMGrimm/vault-mirror/pull/74))
+- avoid duplicate backups when server lists reorder ([#73](https://github.com/NikitaMGrimm/vault-mirror/pull/73))
+- reject malformed vault metadata before backup or mirroring ([#72](https://github.com/NikitaMGrimm/vault-mirror/pull/72))
+- keep rejected server URLs out of diagnostics ([#69](https://github.com/NikitaMGrimm/vault-mirror/pull/69))
+
 ## [0.8.1](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.8.0...v0.8.1) - 2026-10-18
 
 ### Added
