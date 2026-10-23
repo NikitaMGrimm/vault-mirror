@@ -94,8 +94,15 @@ If `CA_CERT_FILE` is set, add a read-only mount before the image name in
 --mount type=bind,source=/absolute/path/ca.pem,target=/absolute/path/ca.pem,readonly
 ```
 
-Mount any files named by `*_FILE` settings read-only too, at their configured
-paths inside the container.
+For each `*_FILE` setting, bind-mount its host file read-only at the configured
+path inside the container. For example, with
+`SOURCE_PASSWORD_FILE=/run/secrets/source_password`:
+
+```text
+--mount type=bind,source=/host/path/source_password,target=/run/secrets/source_password,readonly
+```
+
+The container user, UID `65532`, must be able to read every mounted file.
 
 To run once now and see the result:
 
