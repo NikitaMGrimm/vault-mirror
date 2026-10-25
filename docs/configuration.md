@@ -90,7 +90,15 @@ their attachments. The destination backup keeps them.
 
 Instead of `init`:
 
-1. Write `vault-mirror.env` with the required variables above and
+1. Create the settings file. On Unix, make it readable only by you before
+   adding credentials:
+
+   ```sh
+   touch vault-mirror.env
+   chmod 600 vault-mirror.env
+   ```
+
+   Edit `vault-mirror.env` and add the required variables above and
    `SCHEDULE`.
 
 2. In the same directory, create `backups` and `compose.yaml`:

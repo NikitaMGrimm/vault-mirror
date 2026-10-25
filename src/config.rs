@@ -96,7 +96,7 @@ impl Env<'_> {
             None => Ok(default),
             Some(raw) => raw
                 .parse()
-                .map_err(|_| ConfigError(format!("{name} has an invalid value: {raw}"))),
+                .map_err(|_| ConfigError(format!("{name} has an invalid value"))),
         }
     }
 
@@ -518,7 +518,7 @@ mod tests {
         assert!(!config.skip_attachments);
         assert_eq!(
             error(with(&[("SKIP_ATTACHMENTS", "yes")])),
-            "SKIP_ATTACHMENTS has an invalid value: yes"
+            "SKIP_ATTACHMENTS has an invalid value"
         );
         assert!(is_setting("SKIP_ATTACHMENTS"));
         assert!(!is_setting("SKIP_ATTACHMENTS_FILE"));
