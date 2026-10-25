@@ -4,6 +4,12 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.9.1](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.9.0...v0.9.1) - 2026-10-25
+
+### Fixed
+
+- protect configuration secrets and update RSA arithmetic ([#98](https://github.com/NikitaMGrimm/vault-mirror/pull/98))
+
 ## [0.9.0](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.8.1...v0.9.0) - 2026-10-23
 
 ### Added
