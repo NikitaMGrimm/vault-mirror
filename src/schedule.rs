@@ -16,13 +16,11 @@ pub struct Timetable {
 impl Timetable {
     pub fn new(expression: &str, timezone: Option<&str>) -> Result<Self> {
         let zone = match timezone {
-            Some(name) => {
-                Tz::from_str(name).map_err(|_| anyhow!("TZ is not a known time zone: {name}"))?
-            }
+            Some(name) => Tz::from_str(name).map_err(|_| anyhow!("TZ is not a known time zone"))?,
             None => Tz::UTC,
         };
         let cron = Cron::from_str(expression)
-            .map_err(|error| anyhow!("invalid cron schedule {expression:?}: {error}"))?;
+            .map_err(|_| anyhow!("SCHEDULE is an invalid cron schedule"))?;
         Ok(Self { cron, zone })
     }
 

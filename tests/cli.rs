@@ -894,6 +894,47 @@ fn an_impossible_schedule_stops_before_the_first_run() {
 }
 
 #[test]
+fn invalid_settings_do_not_echo_their_values() {
+    let secret = "synthetic-do-not-share";
+    for setting in [
+        "RETENTION_DAYS",
+        "SKIP_ATTACHMENTS",
+        "ALLOW_ORGANIZATION_METADATA_LOSS",
+        "SCHEDULE",
+        "TZ",
+    ] {
+        for from_environment in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let extra = if from_environment {
+                "SCHEDULE=0 3 * * *\n".to_string()
+            } else {
+                format!("SCHEDULE=0 3 * * *\n{setting}={secret}\n")
+            };
+            let settings = unreachable_settings(dir.path(), &extra);
+            let mut command = vault_mirror();
+            if from_environment {
+                command.env(setting, secret);
+            }
+            let output = command
+                .arg("--env-file")
+                .arg(settings)
+                .arg("daemon")
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            for diagnostic in [&output.stdout, &output.stderr] {
+                assert!(
+                    !String::from_utf8_lossy(diagnostic).contains(secret),
+                    "a rejected setting value was exposed"
+                );
+            }
+            assert!(String::from_utf8_lossy(&output.stderr).contains(setting));
+            assert!(!dir.path().join("key.age").exists());
+        }
+    }
+}
+
+#[test]
 fn organization_metadata_loss_can_be_allowed_for_run_and_check() {
     let dir = tempfile::tempdir().unwrap();
     let settings = unreachable_settings(dir.path(), "ALLOW_ORGANIZATION_METADATA_LOSS=false\n");
@@ -927,7 +968,7 @@ fn organization_metadata_loss_can_be_allowed_for_run_and_check() {
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("configuration: ALLOW_ORGANIZATION_METADATA_LOSS has an invalid value: yes")
+            .contains("configuration: ALLOW_ORGANIZATION_METADATA_LOSS has an invalid value")
     );
 }
 
@@ -949,7 +990,7 @@ fn attachments_can_be_skipped_from_the_settings_file_or_the_environment() {
         assert!(!output.status.success());
         String::from_utf8_lossy(&output.stderr).into_owned()
     };
-    let invalid = "configuration: SKIP_ATTACHMENTS has an invalid value: maybe";
+    let invalid = "configuration: SKIP_ATTACHMENTS has an invalid value";
 
     let past_settings = "expected an http or https URL";
 
