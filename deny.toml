@@ -17,6 +17,9 @@ ignore = [
   # age's localization macros use basic-toml only at build time to read
   # dependency-owned manifests. No maintained upstream release replaces it.
   { id = "RUSTSEC-2026-0374", reason = "build-time localization parser; no vault input" },
+  # age pulls in P-256 support, but backups use only typed X25519 and scrypt
+  # identities. Keep this exception out of the RSA dependency path.
+  { id = "RUSTSEC-2026-0387", reason = "age's P-256 code is unused; bans below keep vulnerable versions out of other dependency paths" },
 ]
 
 [licenses]
@@ -36,6 +39,9 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "allow"
 wildcards = "deny"
+deny = [
+  { name = "crypto-bigint", version = "<0.7.6", wrappers = ["elliptic-curve"], reason = "RUSTSEC-2026-0387: only age's unused P-256 path may use an unpatched version" },
+]
 
 [sources]
 unknown-registry = "deny"
