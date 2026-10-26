@@ -19,6 +19,8 @@ const DEVICE_TYPE: &str = "25";
 
 const MAX_ATTEMPTS: u32 = 5;
 
+const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 /// The longest a server's `Retry-After` is honoured for, per attempt.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
@@ -95,7 +97,11 @@ impl ApiError {
                     | StatusCode::GATEWAY_TIMEOUT
             ),
             Self::Transport { cause, .. } => {
-                (cause.is_connect() || cause.is_timeout() || cause.is_request())
+                (cause.is_connect()
+                    || cause.is_timeout()
+                    || cause.is_request()
+                    || cause.is_body()
+                    || cause.is_decode())
                     && !is_certificate_error(cause)
             }
             _ => false,
@@ -381,7 +387,13 @@ impl Session {
             context: context.to_string(),
             cause: source,
         };
-        let response = self.http.get(url).send().await.map_err(transport)?;
+        let response = self
+            .http
+            .get(url)
+            .timeout(ATTACHMENT_TIMEOUT)
+            .send()
+            .await
+            .map_err(transport)?;
         if !response.status().is_success() {
             return Err(storage_error(context, response));
         }
@@ -401,6 +413,7 @@ impl Session {
             .http
             .post(format!("{}{}", self.urls.api, path))
             .bearer_auth(&token)
+            .timeout(ATTACHMENT_TIMEOUT)
             .multipart(form);
         let secrets = [self.credentials.client_secret.as_str(), token.as_str()];
         expect_success(request, context, &secrets).await
@@ -413,6 +426,7 @@ impl Session {
         let mut request = self
             .http
             .put(url)
+            .timeout(ATTACHMENT_TIMEOUT)
             .header("x-ms-blob-type", "BlockBlob")
             .header(
                 "x-ms-date",
@@ -749,6 +763,14 @@ pub(crate) mod tests {
     pub(crate) fn http_server(
         responses: Vec<String>,
     ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        http_server_with_delays(responses, Duration::ZERO, Duration::ZERO)
+    }
+
+    fn http_server_with_delays(
+        responses: Vec<String>,
+        header_delay: Duration,
+        body_delay: Duration,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -796,7 +818,13 @@ pub(crate) mod tests {
                     }
                 }
                 requests.push(String::from_utf8(request).unwrap());
-                stream.write_all(response.as_bytes()).unwrap();
+                let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+                std::thread::sleep(header_delay);
+                if write!(stream, "{headers}\r\n\r\n").is_err() {
+                    continue;
+                }
+                std::thread::sleep(body_delay);
+                let _ = stream.write_all(body.as_bytes());
             }
             requests
         });
@@ -816,6 +844,125 @@ pub(crate) mod tests {
             client_secret: "synthetic-api-secret".into(),
             device_id: "test-device".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn attachment_requests_allow_more_time_than_api_requests() {
+        let delay = Duration::from_millis(400);
+        for (kind, header_delay, body_delay) in [
+            ("download", Duration::ZERO, delay),
+            ("direct upload", delay, Duration::ZERO),
+            ("Azure upload", delay, Duration::ZERO),
+            ("API request", delay, Duration::ZERO),
+        ] {
+            let (origin, received) = http_server_with_delays(
+                vec![http_response("200 OK", "", "synthetic attachment")],
+                header_delay,
+                body_delay,
+            );
+            let session = Session {
+                http: build_http_client(&ClientOptions {
+                    timeout: Duration::from_millis(100),
+                    ..ClientOptions::default()
+                })
+                .unwrap(),
+                urls: ServerUrls::from_server(&origin).unwrap(),
+                credentials: test_credentials(),
+                token: RwLock::new("synthetic-token".into()),
+                login_kdf: None,
+            };
+            let result = match kind {
+                "download" => session
+                    .download_once(&format!("{origin}/file"), "downloading attachment")
+                    .await
+                    .map(|bytes| assert_eq!(bytes, b"synthetic attachment")),
+                "direct upload" => {
+                    session
+                        .upload_direct("/file", "synthetic.txt", vec![1])
+                        .await
+                }
+                "Azure upload" => {
+                    session
+                        .upload_azure(&format!("{origin}/file"), vec![1])
+                        .await
+                }
+                _ => session
+                    .send_once(Method::POST, "/items", Some(&json!({"type": 2})))
+                    .await
+                    .map(|_| ()),
+            };
+            if kind == "API request" {
+                assert!(matches!(
+                    result,
+                    Err(ApiError::Transport { cause, .. }) if cause.is_timeout()
+                ));
+            } else {
+                result.unwrap_or_else(|error| panic!("{kind}: {error}"));
+            }
+            assert_eq!(received.join().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_response_bodies_are_retried_for_safe_requests() {
+        let token = http_response("200 OK", "", r#"{"access_token":"synthetic-token"}"#);
+        let item = http_response("200 OK", "", r#"{"id":"synthetic-item"}"#);
+        let file = http_response("200 OK", "", "synthetic attachment");
+        let interrupted = |response: &str| response[..response.len() - 1].to_string();
+        let (origin, received) = http_server(vec![
+            interrupted(&token),
+            token,
+            interrupted(&item),
+            item.clone(),
+            interrupted(&item),
+            item,
+            interrupted(&file),
+            file,
+        ]);
+        let session = Session::login(
+            build_http_client(&ClientOptions::default()).unwrap(),
+            ServerUrls::from_server(&origin).unwrap(),
+            test_credentials(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.get("/item").await.unwrap()["id"], "synthetic-item");
+        assert_eq!(
+            session
+                .send_idempotent(Method::PUT, "/item", Some(&json!({"type": 2})))
+                .await
+                .unwrap()["id"],
+            "synthetic-item"
+        );
+        assert_eq!(
+            session.download(&format!("{origin}/file")).await.unwrap(),
+            b"synthetic attachment"
+        );
+        let requests = received.join().unwrap();
+        assert_eq!(requests.len(), 8);
+        for pair in requests.chunks_exact(2) {
+            assert_eq!(pair[0], pair[1]);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_creation_response_does_not_repeat_the_write() {
+        let response = http_response("200 OK", "", r#"{"id":"synthetic-item"}"#);
+        let (origin, received) =
+            http_server(vec![response[..response.len() - 1].to_string(), response]);
+        let session = Session {
+            http: build_http_client(&ClientOptions::default()).unwrap(),
+            urls: ServerUrls::from_server(&origin).unwrap(),
+            credentials: test_credentials(),
+            token: RwLock::new("synthetic-token".into()),
+            login_kdf: None,
+        };
+        let error = session
+            .send_once(Method::POST, "/items", Some(&json!({"type": 2})))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ApiError::Transport { .. }));
+        assert_eq!(received.join().unwrap().len(), 1);
     }
 
     #[tokio::test]
