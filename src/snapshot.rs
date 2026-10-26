@@ -262,7 +262,11 @@ pub fn parse(document: &Value) -> Result<Restorable> {
     let known_folders = unique(folders.iter().map(|f: &Folder| &f.id), "folder")?;
     let known_collections = unique(collections.iter().map(|c: &Collection| &c.id), "collection")?;
 
-    let values: Vec<Value> = list(document, "items")?;
+    let values = document
+        .get("items")
+        .ok_or_else(|| anyhow!("the backup has no items"))?
+        .as_array()
+        .ok_or_else(|| anyhow!("the backup's items are malformed"))?;
     let mut items = Vec::new();
     for (index, value) in values.iter().enumerate() {
         let read = || -> Result<RestorableItem> {
