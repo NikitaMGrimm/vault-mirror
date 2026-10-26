@@ -7,6 +7,7 @@ use std::{
 
 use anstyle::{AnsiColor, Style};
 use time::OffsetDateTime;
+use unicode_width::UnicodeWidthStr;
 use vault_mirror::mirror::Reporter;
 
 /// Writes progress for people at a terminal, in the style of Cargo: a
@@ -20,7 +21,7 @@ pub struct Console {
 const VERB: Style = AnsiColor::Green.on_default().bold();
 const PROGRESS: Style = AnsiColor::Cyan.on_default().bold();
 const WARNING: Style = AnsiColor::Yellow.on_default().bold();
-pub const ERROR: Style = AnsiColor::Red.on_default().bold();
+const ERROR: Style = AnsiColor::Red.on_default().bold();
 const NOTE: Style = AnsiColor::Cyan.on_default().bold();
 
 /// Whether a progress bar occupies the terminal's last line.
@@ -49,7 +50,9 @@ impl Console {
             return Self::log("INFO", &format!("{verb} {detail}"));
         }
         Self::clear_progress();
-        anstream::println!("{VERB}{verb:>12}{VERB:#} {detail}");
+        let style = status_style(verb);
+        let detail = prose(detail, 13);
+        anstream::println!("{style}{verb:>12}{style:#} {detail}");
     }
 
     pub fn warning(message: &str) {
@@ -57,6 +60,7 @@ impl Console {
             return Self::log("WARN", message);
         }
         Self::clear_progress();
+        let message = prose(message, 9);
         anstream::eprintln!("{WARNING}warning:{WARNING:#} {message}");
     }
 
@@ -68,6 +72,7 @@ impl Console {
         }
         Self::clear_progress();
         let style = if warned { WARNING } else { VERB };
+        let detail = prose(detail, 13);
         anstream::println!("{style}{:>12}{style:#} {detail}", "Finished");
     }
 
@@ -76,6 +81,7 @@ impl Console {
             return Self::log("INFO", message);
         }
         Self::clear_progress();
+        let message = prose(message, 6);
         anstream::println!("{NOTE}note:{NOTE:#} {message}");
     }
 
@@ -83,7 +89,17 @@ impl Console {
         if !Self::terminal() {
             return Self::log("ERROR", message);
         }
+        Self::command_error(message);
+    }
+
+    /// Top-level command errors stay plain in redirected output.
+    pub fn command_error(message: &str) {
         Self::clear_progress();
+        let message = if std::io::stderr().is_terminal() {
+            prose(message, 7)
+        } else {
+            message.to_owned()
+        };
         anstream::eprintln!("{ERROR}error:{ERROR:#} {message}");
     }
 
@@ -114,24 +130,79 @@ impl Reporter for Console {
         Self::warning(message);
     }
     fn progress(&self, verb: &str, done: usize, total: usize, unit: &str) {
-        const WIDTH: usize = 25;
         if !Self::terminal() || !std::io::stderr().is_terminal() {
             return;
         }
         if done >= total {
             return Self::clear_progress();
         }
-        let filled = WIDTH * done / total;
-        let bar = format!("{}>{}", "=".repeat(filled), " ".repeat(WIDTH - filled - 1));
         eprint!("\r\x1b[K");
-        anstream::eprint!("{PROGRESS}{verb:>12}{PROGRESS:#} [{bar}] {done}/{total} {unit}");
+        anstream::eprint!(
+            "{PROGRESS}{verb:>12}{PROGRESS:#} {}",
+            progress_bar(done, total, unit)
+        );
         PROGRESS_SHOWN.store(true, Ordering::Relaxed);
     }
+}
+
+fn progress_bar(done: usize, total: usize, unit: &str) -> String {
+    const WIDTH: usize = 25;
+    let filled = WIDTH * done / total;
+    let bar = format!("{}>{}", "=".repeat(filled), " ".repeat(WIDTH - filled - 1));
+    let digits = total.to_string().len();
+    format!("[{bar}] {done:>digits$}/{total} {unit}")
+}
+
+fn status_style(verb: &str) -> Style {
+    match verb {
+        "Backing up" | "Waiting" | "Stopping" => PROGRESS,
+        _ => VERB,
+    }
+}
+
+fn prose(message: &str, indent: usize) -> String {
+    let width = terminal_size::terminal_size()
+        .map_or(80, |(terminal_size::Width(width), _)| usize::from(width));
+    terminal_text(message, indent, width)
+}
+
+fn terminal_text(message: &str, indent: usize, width: usize) -> String {
+    let padding = " ".repeat(indent);
+    let mut text = String::new();
+    let mut column = indent;
+    for (index, line) in message.split('\n').enumerate() {
+        if index > 0 {
+            text.push('\n');
+            text.push_str(&padding);
+            column = indent;
+        }
+        for word in line.split_inclusive(' ') {
+            if column > indent && column + word.trim_end_matches(' ').width() > width {
+                text.truncate(text.trim_end_matches(' ').len());
+                text.push('\n');
+                text.push_str(&padding);
+                column = indent;
+            }
+            text.push_str(word);
+            column += word.width();
+        }
+    }
+    text
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_counts_keep_the_total_and_unit_in_place() {
+        let first = progress_bar(0, 1250, "attachments");
+        for done in [9, 10, 99, 100, 999, 1000, 1249] {
+            let line = progress_bar(done, 1250, "attachments");
+            assert_eq!(line.find('/'), first.find('/'), "{line}");
+            assert_eq!(line.find("attachments"), first.find("attachments"));
+        }
+    }
 
     #[test]
     fn reporting_warnings_belong_to_one_run() {
@@ -141,5 +212,35 @@ mod tests {
         reporter.warn("a notification could not be sent");
         assert!(reporter.has_warnings());
         assert!(!next_run.has_warnings());
+    }
+
+    #[test]
+    fn terminal_prose_wraps_without_breaking_words() {
+        let message =
+            "Could not send the notification: the server answered 503 Service Unavailable";
+        let text = terminal_text(message, 9, 80);
+        assert_eq!(
+            text,
+            "Could not send the notification: the server answered 503 Service\n         Unavailable"
+        );
+        assert_eq!(
+            terminal_text("export to /two  spaces/秘密", 9, 80),
+            "export to /two  spaces/秘密"
+        );
+        assert_eq!(terminal_text("秘密 data", 9, 16), "秘密\n         data");
+        assert_eq!(
+            terminal_text("an-indivisible-long-path", 9, 16),
+            "an-indivisible-long-path"
+        );
+    }
+
+    #[test]
+    fn active_steps_use_the_progress_colour() {
+        for verb in ["Backing up", "Waiting", "Stopping"] {
+            assert_eq!(status_style(verb), PROGRESS);
+        }
+        for verb in ["Backed up", "Saved", "Verified", "Created"] {
+            assert_eq!(status_style(verb), VERB);
+        }
     }
 }

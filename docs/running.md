@@ -26,6 +26,9 @@ and run-failure messages start with a UTC timestamp and a level. Snapshot ids,
 health-check output, and top-level command errors stay plain. Set `NO_COLOR`
 to turn colours off.
 
+At a terminal, long messages wrap at word boundaries and progress counts stay
+aligned. In logs, each message stays on one line.
+
 ### Exit codes and output
 
 - `0`: the command succeeded. Warnings can still be printed.

@@ -149,10 +149,8 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
         false,
     )?;
     Console::status("Created", COMPOSE_FILE);
-    Console::note(
-        "keep BACKUP_PASSPHRASE outside the backups and vault. After the first run, \
-         copy backups/key.age there too. Recovery needs both.",
-    );
+    Console::note("save BACKUP_PASSPHRASE separately from your vault and backups.");
+    Console::note("after the first run, save backups/key.age there too. Recovery needs both.");
 
     if mirror {
         let mut settings = env.clone();

@@ -12,7 +12,7 @@ mod wizard;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use console::{Console, ERROR};
+use console::Console;
 use time::OffsetDateTime;
 use vault_mirror::{
     app::{self, RunFlags},
@@ -126,15 +126,14 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            anstream::eprintln!("{ERROR}error:{ERROR:#} could not start the runtime: {error}");
+            Console::command_error(&format!("could not start the runtime: {error}"));
             return ExitCode::FAILURE;
         }
     };
     match runtime.block_on(dispatch(cli)) {
         Ok(code) => code,
         Err(error) => {
-            Console::clear_progress();
-            anstream::eprintln!("{ERROR}error:{ERROR:#} {error:#}");
+            Console::command_error(&format!("{error:#}"));
             ExitCode::FAILURE
         }
     }
@@ -550,6 +549,31 @@ fn healthcheck(max_age_hours: u64) -> Result<ExitCode> {
         Err(reason) => {
             println!("unhealthy: {reason}");
             Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn help_wraps_to_the_terminal_width() {
+        for width in [80, 100] {
+            let mut root = Cli::command().term_width(width);
+            root.build();
+            let commands = std::iter::once(root.clone()).chain(root.get_subcommands().cloned());
+            for mut command in commands {
+                let help = command.render_long_help().to_string();
+                for line in help.lines() {
+                    assert!(
+                        line.chars().count() <= width,
+                        "{} help exceeds {width} columns: {line}",
+                        command.get_name()
+                    );
+                }
+            }
         }
     }
 }
