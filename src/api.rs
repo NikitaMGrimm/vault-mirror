@@ -940,8 +940,8 @@ pub(crate) mod tests {
         );
         let requests = received.join().unwrap();
         assert_eq!(requests.len(), 8);
-        for pair in requests.chunks_exact(2) {
-            assert_eq!(pair[0], pair[1]);
+        for [first, second] in requests.as_chunks::<2>().0 {
+            assert_eq!(first, second);
         }
     }
 
