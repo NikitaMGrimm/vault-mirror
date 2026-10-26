@@ -4,6 +4,16 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.9.2](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.9.1...v0.9.2) - 2026-10-26
+
+### Fixed
+
+- *(api)* recover interrupted reads and allow slower attachments ([#100](https://github.com/NikitaMGrimm/vault-mirror/pull/100))
+
+### Performance
+
+- reduce snapshot validation allocations ([#101](https://github.com/NikitaMGrimm/vault-mirror/pull/101))
+
 ## [0.9.1](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.9.0...v0.9.1) - 2026-10-25
 
 ### Fixed
