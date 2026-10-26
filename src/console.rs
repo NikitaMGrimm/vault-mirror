@@ -60,7 +60,7 @@ impl Console {
             return Self::log("WARN", message);
         }
         Self::clear_progress();
-        let message = prose(message, 9);
+        let message = diagnostic(message, 9, std::io::stderr().is_terminal());
         anstream::eprintln!("{WARNING}warning:{WARNING:#} {message}");
     }
 
@@ -95,11 +95,7 @@ impl Console {
     /// Top-level command errors stay plain in redirected output.
     pub fn command_error(message: &str) {
         Self::clear_progress();
-        let message = if std::io::stderr().is_terminal() {
-            prose(message, 7)
-        } else {
-            message.to_owned()
-        };
+        let message = diagnostic(message, 7, std::io::stderr().is_terminal());
         anstream::eprintln!("{ERROR}error:{ERROR:#} {message}");
     }
 
@@ -164,6 +160,16 @@ fn prose(message: &str, indent: usize) -> String {
     let width = terminal_size::terminal_size()
         .map_or(80, |(terminal_size::Width(width), _)| usize::from(width));
     terminal_text(message, indent, width)
+}
+
+fn diagnostic(message: &str, indent: usize, terminal: bool) -> String {
+    if terminal {
+        let width = terminal_size::terminal_size_of(std::io::stderr())
+            .map_or(80, |(terminal_size::Width(width), _)| usize::from(width));
+        terminal_text(message, indent, width)
+    } else {
+        message.to_owned()
+    }
 }
 
 fn terminal_text(message: &str, indent: usize, width: usize) -> String {
@@ -242,5 +248,11 @@ mod tests {
         for verb in ["Backed up", "Saved", "Verified", "Created"] {
             assert_eq!(status_style(verb), VERB);
         }
+    }
+
+    #[test]
+    fn redirected_diagnostics_stay_on_one_line() {
+        let message = "Could not send the notification: the server answered 503 Service Unavailable. Check NOTIFY_SUCCESS_URL and the notification service.";
+        assert_eq!(diagnostic(message, 9, false), message);
     }
 }
