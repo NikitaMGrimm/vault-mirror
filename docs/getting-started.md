@@ -62,6 +62,15 @@ It then writes two files and shows what the first run would do:
 note: keep BACKUP_PASSPHRASE outside the backups and vault. After the first run, copy backups/key.age there too. Recovery needs both.
        Would create 152 items, create 6 folders, copy 3 attachments; 0 items unchanged
     Finished check in 4.1s; neither vault was changed
+
+Setup directory: /work
+If you ran init in Docker, use the host directory mounted at this path.
+
+In that directory, start it with:
+  docker compose up -d
+
+Or without Docker:
+  vault-mirror --env-file vault-mirror.env daemon
 ```
 
 Nothing has been changed yet. The "Would" line is the plan.
@@ -72,7 +81,8 @@ Nothing has been changed yet. The "Would" line is the plan.
   `./backups`.
 
 > [!IMPORTANT]
-> Keep `BACKUP_PASSPHRASE` somewhere you can reach without either vault.
+> Find the generated `BACKUP_PASSPHRASE` in `vault-mirror.env` and keep it
+> somewhere you can reach without either vault.
 > Without it, the backups can't be read.
 
 ## Step 3: Start it
@@ -144,6 +154,24 @@ vault-mirror stops before it changes anything when the plan looks like a
 mistake, such as swapped vaults, an empty source or copies changed in the
 destination. The error names the reason and the flag that allows the run. See
 [safety checks](how-it-works.md#safety-checks).
+
+For example, if you intend to replace a changed destination copy with the
+source version, stop the daemon and preview the replacement:
+
+```sh
+docker compose stop vault-mirror
+docker compose run --rm vault-mirror check --allow-overwrite
+```
+
+If the plan is what you want, apply it once, then restart the daemon:
+
+```sh
+docker compose run --rm vault-mirror run --allow-overwrite
+docker compose up -d
+```
+
+The run backs up the destination changes before replacing them. The flag
+applies to that one command; the daemon takes no safety flags.
 
 ## Next steps
 

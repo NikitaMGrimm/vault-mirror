@@ -36,7 +36,8 @@ fn snapshots_need_only_the_backup_directory() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("No snapshots"));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("No snapshots"));
     assert!(dir.path().join("run.lock").is_file());
     assert!(!dir.path().join("key.age").exists());
 }
@@ -261,6 +262,69 @@ fn attachment_exports_use_fixed_paths_and_preserve_original_names() {
     assert!(!printed.contains("synthetic bytes"), "{printed}");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_export_warns_about_plaintext_left_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let backups = dir.path().join("backups");
+    recovery_backup(&backups, &["original.txt".into()]);
+
+    // export.json fits Linux's path limit, but the attachment directory does
+    // not, so the failure happens after the plaintext vault has been written.
+    let mut recovered = dir.path().to_path_buf();
+    while recovered.as_os_str().len() < 4075 {
+        let length = (4075 - recovered.as_os_str().len() - 1).min(100);
+        if length == 0 {
+            recovered.as_mut_os_string().push("x");
+        } else {
+            recovered.push("x".repeat(length));
+        }
+    }
+    let output = export_backup(&backups, &recovered);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(recovered.join("export.json").is_file());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unencrypted vault data"),
+        "missing plaintext warning"
+    );
+    assert!(
+        stderr.contains("unencrypted files may remain"),
+        "missing partial-export guidance"
+    );
+    assert!(
+        stderr.contains("new --output directory"),
+        "missing retry guidance"
+    );
+    assert!(
+        !stderr.contains("synthetic note"),
+        "export leaked vault content"
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn an_export_parent_error_names_the_path_without_writing_plaintext() {
+    let dir = tempfile::tempdir().unwrap();
+    let backups = dir.path().join("backups");
+    recovery_backup(&backups, &[]);
+    let parent = dir.path().join("not-a-directory");
+    fs::write(&parent, b"keep this file").unwrap();
+    let recovered = parent.join("recovered");
+    let output = export_backup(&backups, &recovered);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains(&format!("creating {}", parent.display())),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--output"), "{stderr}");
+    assert!(!stderr.contains("unencrypted vault data"), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(!recovered.exists());
+    assert_eq!(fs::read(parent).unwrap(), b"keep this file");
+}
+
 #[test]
 fn recovery_readers_share_the_lock_and_exclude_runs() {
     let dir = tempfile::tempdir().unwrap();
@@ -323,6 +387,33 @@ fn snapshots_refuse_an_active_writer() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("another vault-mirror run"));
     drop(writer);
+}
+
+#[test]
+fn recovery_commands_explain_a_missing_backup_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let backups = dir.path().join("missing-backups");
+    let recovered = dir.path().join("recovered");
+    for command in ["snapshots", "export"] {
+        let mut process = vault_mirror();
+        process.env("BACKUPS_DIR", &backups).arg(command);
+        if command == "export" {
+            process.arg("--output").arg(&recovered);
+        }
+        let output = process.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("no backup directory"), "{stderr}");
+        assert!(stderr.contains(&backups.display().to_string()), "{stderr}");
+        assert!(
+            stderr.contains("BACKUPS_DIR") && stderr.contains("--env-file"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("retain run.lock"), "{stderr}");
+        assert!(output.stdout.is_empty());
+    }
+    assert!(!backups.exists());
+    assert!(!recovered.exists());
 }
 
 #[cfg(unix)]
@@ -473,6 +564,26 @@ fn a_command_is_required() {
 }
 
 #[test]
+fn missing_source_settings_point_to_setup_and_the_settings_file() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("vault-mirror.env"), "# existing settings\n").unwrap();
+    for command in ["run", "check", "daemon"] {
+        let output = vault_mirror()
+            .current_dir(dir.path())
+            .arg(command)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("no source vault configured"), "{stderr}");
+        assert!(stderr.contains("vault-mirror init"), "{stderr}");
+        assert!(stderr.contains("--env-file vault-mirror.env"), "{stderr}");
+        assert!(output.stdout.is_empty());
+    }
+    assert!(!dir.path().join("backups").exists());
+}
+
+#[test]
 fn rejected_server_urls_do_not_expose_secrets_in_run_diagnostics() {
     let secret = "synthetic-url-secret";
     for (server, reason) in [
@@ -518,7 +629,8 @@ fn rejected_server_urls_do_not_expose_secrets_in_run_diagnostics() {
         let error = format!("invalid server URL: {reason}");
         // Do not print diagnostics on failure: they may contain the secret.
         assert!(status.error.as_deref() == Some(error.as_str()));
-        assert!(stdout.contains(&format!("during source login: {error}")));
+        assert!(stderr.contains(&format!("during source login: {error}")));
+        assert!(!stdout.contains("ERROR"));
         assert!(notification == format!("vault-mirror FAILED; during source login: {error}"));
     }
 }
@@ -607,7 +719,49 @@ fn a_missing_ca_file_does_not_suppress_the_failure_notification() {
     assert!(request_line.starts_with("POST /notify?token="));
     assert_eq!(body, app::describe(&status));
     assert!(body.starts_with("vault-mirror FAILED; during configuration: "));
-    assert!(stdout.contains("standard certificate authorities"));
+    assert!(stderr.contains("standard certificate authorities"));
+}
+
+#[test]
+fn healthcheck_reports_an_unrecorded_run_without_creating_files() {
+    let dir = tempfile::tempdir().unwrap();
+    for backups in [dir.path().to_path_buf(), dir.path().join("missing")] {
+        let output = vault_mirror()
+            .env("BACKUPS_DIR", &backups)
+            .arg("healthcheck")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{stdout}");
+        assert!(stdout.starts_with("unhealthy: no run recorded"), "{stdout}");
+        assert!(
+            stdout.contains("BACKUPS_DIR") && stdout.contains("--env-file"),
+            "{stdout}"
+        );
+        assert!(output.stderr.is_empty());
+        assert!(!backups.join("last-run.json").exists());
+        assert!(!backups.join("run.lock").exists());
+    }
+    assert!(!dir.path().join("missing").exists());
+}
+
+#[test]
+fn healthcheck_keeps_a_damaged_status_file_as_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("last-run.json"), "not JSON").unwrap();
+    let output = vault_mirror()
+        .env("BACKUPS_DIR", dir.path())
+        .arg("healthcheck")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("is not a status file"), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        fs::read(dir.path().join("last-run.json")).unwrap(),
+        b"not JSON"
+    );
 }
 
 #[test]

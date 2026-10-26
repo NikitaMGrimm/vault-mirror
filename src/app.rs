@@ -165,10 +165,17 @@ pub fn lock_backups_dir(backups_dir: &Path, access: BackupAccess) -> Result<fs::
                 }
             })
             .with_context(|| {
-                format!(
-                    "opening {} for recovery; copy BACKUPS_DIR to a writable directory or retain run.lock when copying backups",
-                    path.display()
-                )
+                if backups_dir.try_exists().is_ok_and(|exists| !exists) {
+                    format!(
+                        "no backup directory at {}; check BACKUPS_DIR or pass --env-file vault-mirror.env",
+                        backups_dir.display()
+                    )
+                } else {
+                    format!(
+                        "opening {} for recovery; copy BACKUPS_DIR to a writable directory or retain run.lock when copying backups",
+                        path.display()
+                    )
+                }
             })?,
     };
     let locked = match access {

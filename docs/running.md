@@ -6,7 +6,7 @@
 
 | Command | What it does |
 | --- | --- |
-| `vault-mirror init [--dir DIR]` | Asks for the accounts, checks the logins, writes `vault-mirror.env` and `compose.yaml`, and shows what the first run would do. |
+| `vault-mirror init [--dir DIR]` | Asks for the accounts, checks the logins, writes `vault-mirror.env` and `compose.yaml` in an existing directory, and shows what the first run would do. |
 | `vault-mirror run` | Does one run. `--allow-overwrite`, `--allow-mass-delete` and `--reverse` get past a [safety check](how-it-works.md#safety-checks) for this run. |
 | `vault-mirror daemon` | Runs once when it starts, then on `SCHEDULE`. On Ctrl-C, or `SIGTERM` on Unix, it lets a run in progress finish, then stops. |
 | `vault-mirror check` | Logs in, counts what's in each vault, and shows what a run would do. It never changes either vault. It takes the same flags as `run`. |
@@ -25,6 +25,21 @@ Outside a terminal, such as in container logs or under systemd, run progress
 and run-failure messages start with a UTC timestamp and a level. Snapshot ids,
 health-check output, and top-level command errors stay plain. Set `NO_COLOR`
 to turn colours off.
+
+### Exit codes and output
+
+- `0`: the command succeeded. Warnings can still be printed.
+- `1`: a run failed, a command could not finish, or `healthcheck` is unhealthy.
+- `2`: the command or its arguments are invalid; check `--help`.
+
+Progress and results go to stdout. Warnings and errors go to stderr.
+`snapshots` writes one snapshot id per line to stdout, oldest first. With no
+snapshots, stdout is empty and a message goes to stderr. `healthcheck` prints
+`healthy:` or `unhealthy:`; before a run has been recorded it is unhealthy.
+A damaged or unreadable status file is an error.
+
+The daemon keeps running after a failed run and exits `0` when stopped
+cleanly. Use `healthcheck` or `last-run.json` to check the last run's outcome.
 
 ## Scheduling
 

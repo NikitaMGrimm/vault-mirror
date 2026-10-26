@@ -162,17 +162,32 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
         // vaults' contents, not the settings.
         if let Err(error) = check_config(&config, RunFlags::default(), false).await {
             Console::error(&format!("{error:#}"));
-            println!(
-                "\nOnce that is resolved, check again with `docker compose run --rm vault-mirror check`."
-            );
+            println!("{}", next_steps(dir, true));
             return Ok(ExitCode::FAILURE);
         }
     }
-    println!(
-        "\nStart it with `docker compose up -d`, or without Docker with\n\
-         `vault-mirror --env-file {ENV_FILE} daemon`."
-    );
+    println!("{}", next_steps(dir, false));
     Ok(ExitCode::SUCCESS)
+}
+
+fn next_steps(dir: &Path, check_failed: bool) -> String {
+    let (action, compose, command) = if check_failed {
+        (
+            "once the error is resolved, check again with",
+            "docker compose run --rm vault-mirror check",
+            "check",
+        )
+    } else {
+        ("start it with", "docker compose up -d", "daemon")
+    };
+    format!(
+        "\nSetup directory: {}\n\
+         If you ran init in Docker, use the host directory mounted at this path.\n\n\
+         In that directory, {action}:\n  \
+         {compose}\n\nOr without Docker:\n  \
+         vault-mirror --env-file {ENV_FILE} {command}",
+        dir.display()
+    )
 }
 
 /// Asks for one account until its login works, and returns its settings.
@@ -449,6 +464,22 @@ fn local_timezone() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_handoff_names_the_directory_for_both_installations() {
+        let dir = tempfile::tempdir().unwrap();
+        let setup = dir.path().join("setup with spaces");
+        for (check_failed, command, compose) in [
+            (false, "daemon", "docker compose up -d"),
+            (true, "check", "docker compose run --rm vault-mirror check"),
+        ] {
+            let text = next_steps(&setup, check_failed);
+            assert!(text.contains(&format!("Setup directory: {}", setup.display())));
+            assert!(text.contains("host directory mounted at this path"));
+            assert!(text.contains(compose));
+            assert!(text.contains(&format!("vault-mirror --env-file {ENV_FILE} {command}")));
+        }
+    }
 
     #[tokio::test]
     async fn backup_only_setup_requires_complete_item_visibility() {

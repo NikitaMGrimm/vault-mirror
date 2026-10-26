@@ -93,14 +93,18 @@ here in the same pull request.
 - Show each step as one line: a verb right-aligned in 12 columns, then the
   rest of the sentence. Use `Reporter::status`. Outside a terminal, the same
   line gets a UTC timestamp and a level.
-- End every command with one `Finished` line. Give each kind of run one fixed
-  shape that never gains or loses parts. Put changing details, such as a
-  snapshot name or a warning, on the lines above it.
+- End each successful `run`, `check` and `export` with one `Finished` line.
+  Give each kind of run one fixed shape that never gains or loses parts. Put
+  changing details, such as a snapshot name or a warning, on the lines above it.
+  `init` ends with next-step instructions; `daemon` ends with `Stopping`.
+  Keep `snapshots` stdout for ids and `healthcheck` stdout for its health result.
+  Failed commands end with their error instead.
 - Give each colour one meaning. Green: a step that happened. Cyan: progress
   and notes. Yellow: a warning, or a `Finished` line after warnings. Red: an
   error. Never let colour carry the only signal, because `NO_COLOR` removes it.
 - Send progress bars to stderr, only at a terminal. Clear a bar before the
   next line.
+- Send warnings and errors to stderr. Send progress lines and results to stdout.
 - Write counts with `text::count`: "1 item", "2 items". Never write
   `item(s)`.
 - Put counts, file names and server-side ids in messages. Never put item

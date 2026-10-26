@@ -61,7 +61,7 @@ struct RunArgs {
 enum Command {
     /// Ask for the accounts, check the logins, and write vault-mirror.env and compose.yaml.
     Init {
-        /// Directory to write the files to.
+        /// Existing directory to write the files to.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
@@ -215,9 +215,13 @@ fn flags(args: RunArgs) -> RunFlags {
 }
 
 async fn run_and_report(config: &Config, flags: RunFlags) -> bool {
-    let status = app::run_once(config, flags, &Console).await;
+    let console = Console::default();
+    let status = app::run_once(config, flags, &console).await;
     if status.succeeded() {
-        Console::finished(&finished(&status), !status.warnings.is_empty());
+        Console::finished(
+            &finished(&status),
+            console.has_warnings() || !status.warnings.is_empty(),
+        );
     } else {
         Console::error(&app::describe(&status));
     }
@@ -388,6 +392,7 @@ async fn check_config(config: &Config, flags: RunFlags, report_logins: bool) -> 
     }
 
     let options = app::mirror_options(config, flags);
+    let console = Console::default();
     let outcome = mirror::check(
         &source,
         &dest,
@@ -395,7 +400,7 @@ async fn check_config(config: &Config, flags: RunFlags, report_logins: bool) -> 
         &dest_read,
         &options,
         &FolderReceipts::new(&config.backups_dir),
-        &Console,
+        &console,
     )
     .await?;
     Console::finished(&checked(started), !outcome.warnings.is_empty());
@@ -420,7 +425,7 @@ fn snapshots(vault: Role) -> Result<ExitCode> {
     let _lock = app::lock_backups_dir(&backups, app::BackupAccess::Read)?;
     let ids = store::list(&backups, vault.name())?;
     if ids.is_empty() {
-        println!(
+        eprintln!(
             "No snapshots of the {} vault in {}.",
             vault.name(),
             backups.display()
@@ -453,7 +458,10 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
     let document = backup.document()?;
     let restorable = snapshot::parse(&document)?;
     if output.exists() {
-        bail!("{} already exists", output.display());
+        bail!(
+            "{} already exists; choose a new --output directory",
+            output.display()
+        );
     }
     // A damaged backup exports nothing.
     for attachment in restorable.attachments() {
@@ -461,7 +469,12 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
     }
 
     if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "creating {}; choose --output in a writable directory",
+                parent.display()
+            )
+        })?;
     }
     let mut directory = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -469,24 +482,32 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
     directory
         .create(output)
         .with_context(|| format!("creating {}", output.display()))?;
-    fs::write(
-        output.join("export.json"),
-        serde_json::to_vec_pretty(&document)?,
-    )?;
-    let mut written = 0;
-    for attachment in restorable.attachments() {
-        let directory = output.join("attachments").join(&attachment.attachment_id);
-        fs::create_dir_all(&directory)?;
-        fs::write(
-            directory.join("attachment"),
-            backup.attachment(&attachment.attachment_id)?,
-        )?;
-        written += 1;
-    }
     Console::warning(&format!(
-        "{} is not encrypted. Any Bitwarden client can import its export.json. Delete it when you are done.",
+        "{} will contain unencrypted vault data. Import export.json with a Bitwarden client after the export succeeds. Delete the output when you are done.",
         output.display()
     ));
+    let written = (|| -> Result<usize> {
+        let path = output.join("export.json");
+        fs::write(&path, serde_json::to_vec_pretty(&document)?)
+            .with_context(|| format!("writing {}", path.display()))?;
+        let mut written = 0;
+        for attachment in restorable.attachments() {
+            let directory = output.join("attachments").join(&attachment.attachment_id);
+            fs::create_dir_all(&directory)
+                .with_context(|| format!("creating {}", directory.display()))?;
+            let path = directory.join("attachment");
+            fs::write(&path, backup.attachment(&attachment.attachment_id)?)
+                .with_context(|| format!("writing {}", path.display()))?;
+            written += 1;
+        }
+        Ok(written)
+    })()
+    .with_context(|| {
+        format!(
+            "export to {} failed; unencrypted files may remain. Inspect the output and choose a new --output directory to retry",
+            output.display()
+        )
+    })?;
     Console::finished(
         &format!(
             "export of {} and {} to {}",
@@ -505,7 +526,22 @@ fn healthcheck(max_age_hours: u64) -> Result<ExitCode> {
             .checked_mul(3600)
             .ok_or_else(|| anyhow!("--max-age-hours is too large"))?,
     );
-    let status = app::read_status(&config::backups_dir(&settings()))?;
+    let backups = config::backups_dir(&settings());
+    let status = match app::read_status(&backups) {
+        Ok(status) => status,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            println!(
+                "unhealthy: no run recorded in {}; check BACKUPS_DIR or --env-file and complete a run",
+                backups.display()
+            );
+            return Ok(ExitCode::FAILURE);
+        }
+        Err(error) => return Err(error),
+    };
     match app::health(&status, max_age, OffsetDateTime::now_utc()) {
         Ok(()) => {
             println!("healthy: {}", app::describe(&status));

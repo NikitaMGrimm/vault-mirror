@@ -12,7 +12,10 @@ use vault_mirror::mirror::Reporter;
 /// Writes progress for people at a terminal, in the style of Cargo: a
 /// right-aligned verb, then the rest of the sentence. Elsewhere, such as in
 /// container logs, each line is a timestamped log line instead.
-pub struct Console;
+#[derive(Default)]
+pub struct Console {
+    warned: AtomicBool,
+}
 
 const VERB: Style = AnsiColor::Green.on_default().bold();
 const PROGRESS: Style = AnsiColor::Cyan.on_default().bold();
@@ -24,6 +27,10 @@ const NOTE: Style = AnsiColor::Cyan.on_default().bold();
 static PROGRESS_SHOWN: AtomicBool = AtomicBool::new(false);
 
 impl Console {
+    pub fn has_warnings(&self) -> bool {
+        self.warned.load(Ordering::Relaxed)
+    }
+
     fn terminal() -> bool {
         std::io::stdout().is_terminal()
     }
@@ -50,7 +57,7 @@ impl Console {
             return Self::log("WARN", message);
         }
         Self::clear_progress();
-        anstream::println!("{WARNING}warning:{WARNING:#} {message}");
+        anstream::eprintln!("{WARNING}warning:{WARNING:#} {message}");
     }
 
     /// The last line of a command. Its verb turns yellow when the command
@@ -77,12 +84,12 @@ impl Console {
             return Self::log("ERROR", message);
         }
         Self::clear_progress();
-        anstream::println!("{ERROR}error:{ERROR:#} {message}");
+        anstream::eprintln!("{ERROR}error:{ERROR:#} {message}");
     }
 
     fn log(level: &str, message: &str) {
         let now = OffsetDateTime::now_utc();
-        println!(
+        let line = format!(
             "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z {level} {message}",
             now.year(),
             u8::from(now.month()),
@@ -91,6 +98,10 @@ impl Console {
             now.minute(),
             now.second()
         );
+        match level {
+            "WARN" | "ERROR" => eprintln!("{line}"),
+            _ => println!("{line}"),
+        }
     }
 }
 
@@ -99,6 +110,7 @@ impl Reporter for Console {
         Self::status(verb, detail);
     }
     fn warn(&self, message: &str) {
+        self.warned.store(true, Ordering::Relaxed);
         Self::warning(message);
     }
     fn progress(&self, verb: &str, done: usize, total: usize, unit: &str) {
@@ -114,5 +126,20 @@ impl Reporter for Console {
         eprint!("\r\x1b[K");
         anstream::eprint!("{PROGRESS}{verb:>12}{PROGRESS:#} [{bar}] {done}/{total} {unit}");
         PROGRESS_SHOWN.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reporting_warnings_belong_to_one_run() {
+        let reporter = Console::default();
+        let next_run = Console::default();
+        assert!(!reporter.has_warnings());
+        reporter.warn("a notification could not be sent");
+        assert!(reporter.has_warnings());
+        assert!(!next_run.has_warnings());
     }
 }
