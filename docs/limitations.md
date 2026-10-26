@@ -111,3 +111,7 @@ the copy.
 Bitwarden's cloud rate-limits new items, so a large first run can take a while,
 especially into an organization. Attachments are held in memory while they're
 copied, so a large one needs a few times its size in free memory.
+
+Each attachment transfer has a 30-minute deadline. Interrupted downloads are
+retried, up to five attempts per file. A stalled download can use the deadline
+on each attempt. Uploads aren't retried automatically.
