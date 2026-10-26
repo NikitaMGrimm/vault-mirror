@@ -151,7 +151,7 @@ impl Config {
     pub fn from_env(env: &HashMap<String, String>) -> Result<Self> {
         let env = Env(env);
         let source = env.vault("SOURCE")?.ok_or_else(|| {
-            ConfigError("no source vault configured: set SOURCE_SERVER, SOURCE_CLIENT_ID, SOURCE_CLIENT_SECRET and SOURCE_PASSWORD".into())
+            ConfigError("no source vault configured; run vault-mirror init, pass --env-file vault-mirror.env, or set SOURCE_SERVER, SOURCE_CLIENT_ID, SOURCE_CLIENT_SECRET and SOURCE_PASSWORD".into())
         })?;
         let dest = env.vault("DEST")?;
         if let Some(dest) = &dest

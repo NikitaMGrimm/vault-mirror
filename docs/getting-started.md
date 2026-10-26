@@ -6,11 +6,12 @@ This guide sets up vault-mirror with Docker, from nothing to scheduled runs.
 Your main vault is the **source**. The second vault, which vault-mirror keeps in
 sync with it, is the **destination**.
 
+Using a native binary? Follow [Without Docker](#without-docker).
+
 ## What you need
 
-- **Docker.** Without Docker, use a binary from the
-  [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases): run
-  `vault-mirror init`, then `vault-mirror --env-file vault-mirror.env daemon`.
+- **Docker**, or a native binary from the
+  [releases page](https://github.com/NikitaMGrimm/vault-mirror/releases).
 - **Your source account**, on Bitwarden's cloud, a self-hosted Bitwarden server,
   or Vaultwarden.
 - **A second account for the destination**, on the same server or another one.
@@ -54,12 +55,13 @@ docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
 3. How often to run, and in which time zone.
 4. A backup passphrase. Let `init` generate one.
 
-It then writes two files and shows what the first run would do:
+It then writes two files and shows what the first run would do. An excerpt:
 
 ```text
      Created vault-mirror.env, readable only by you
      Created compose.yaml
-note: keep BACKUP_PASSPHRASE outside the backups and vault. After the first run, copy backups/key.age there too. Recovery needs both.
+note: save BACKUP_PASSPHRASE separately from your vault and backups.
+note: after the first run, save backups/key.age there too. Recovery needs both.
        Would create 152 items, create 6 folders, copy 3 attachments; 0 items unchanged
     Finished check in 4.1s; neither vault was changed
 ```
@@ -72,8 +74,10 @@ Nothing has been changed yet. The "Would" line is the plan.
   `./backups`.
 
 > [!IMPORTANT]
-> Keep `BACKUP_PASSPHRASE` somewhere you can reach without either vault.
-> Without it, the backups can't be read.
+> Find the generated `BACKUP_PASSPHRASE` in `vault-mirror.env` and keep it
+> somewhere you can reach without either vault.
+> After the first run, copy `backups/key.age` there too.
+> Recovery needs both; keep them separately from the backup disk.
 
 ## Step 3: Start it
 
@@ -88,19 +92,19 @@ To see what it does:
 docker compose logs -f
 ```
 
-A first run prints this, with a timestamp and a level before each line:
+A first run's log messages look like this (Compose adds its container prefix):
 
 ```text
-  Backing up the source vault
-   Backed up 3 attachments
-       Saved snapshot 20261014T030000Z with 152 items
-  Backing up the destination vault
-       Saved snapshot 20261014T030000Z with 0 items
-     Planned to create 152 items, create 6 folders, copy 3 attachments; 0 items unchanged
-     Created 152 items
-      Copied 3 attachments
-    Verified the destination
-    Finished 152 created, 0 updated, 0 deleted, 0 unchanged, 0 folders deleted in 41.3s
+2026-10-14T03:00:00Z INFO Backing up the source vault
+2026-10-14T03:00:05Z INFO Backed up 3 attachments
+2026-10-14T03:00:05Z INFO Saved snapshot 20261014T030000Z with 152 items
+2026-10-14T03:00:06Z INFO Backing up the destination vault
+2026-10-14T03:00:06Z INFO Saved snapshot 20261014T030000Z with 0 items
+2026-10-14T03:00:06Z INFO Planned to create 152 items, create 6 folders, copy 3 attachments; 0 items unchanged
+2026-10-14T03:00:36Z INFO Created 152 items
+2026-10-14T03:00:40Z INFO Copied 3 attachments
+2026-10-14T03:00:41Z INFO Verified the destination
+2026-10-14T03:00:41Z INFO Finished 152 created, 0 updated, 0 deleted, 0 unchanged, 0 folders deleted in 41.3s
 ```
 
 Your items are now in the destination. Each copy has a hidden field called
@@ -144,6 +148,69 @@ vault-mirror stops before it changes anything when the plan looks like a
 mistake, such as swapped vaults, an empty source or copies changed in the
 destination. The error names the reason and the flag that allows the run. See
 [safety checks](how-it-works.md#safety-checks).
+
+For example, if you intend to replace a changed destination copy with the
+source version, stop the daemon and preview the replacement:
+
+```sh
+docker compose stop vault-mirror
+docker compose run --rm vault-mirror check --allow-overwrite
+```
+
+If the plan is what you want, apply it once, then restart the daemon:
+
+```sh
+docker compose run --rm vault-mirror run --allow-overwrite
+docker compose up -d
+```
+
+The run backs up the destination changes before replacing them. The flag
+applies to that one command; the daemon takes no safety flags.
+
+## Without Docker
+
+Put the [release binary](https://github.com/NikitaMGrimm/vault-mirror/releases)
+on your `PATH`. Check [what you need](#what-you-need) and get both accounts'
+[API keys](#step-1-get-the-api-keys), then create a working directory:
+
+```sh
+mkdir vault-mirror && cd vault-mirror
+vault-mirror init
+```
+
+`init` asks for the accounts and previews the first run. Use this directory for
+all commands below: it holds `vault-mirror.env` and will hold `backups/`.
+Save `BACKUP_PASSPHRASE` from the settings file somewhere separate from your
+vault and backup disk before continuing.
+
+Review the plan, then run once:
+
+```sh
+vault-mirror --env-file vault-mirror.env check
+vault-mirror --env-file vault-mirror.env run
+```
+
+Copy `backups/key.age` to the same recovery location as the passphrase; you need
+both. Try an [export](backups.md#restore-with-vault-mirror) before relying on them.
+
+To keep running on the schedule chosen during setup:
+
+```sh
+vault-mirror --env-file vault-mirror.env daemon
+```
+
+The daemon stays in the foreground and runs once immediately. Leave the terminal
+open; Ctrl-C lets the current run finish, then stops it. From another terminal
+in the same directory, check the last run with
+`vault-mirror --env-file vault-mirror.env healthcheck`.
+For unattended use, have your [scheduler](running.md#scheduling) start
+`vault-mirror --env-file vault-mirror.env run` in this directory.
+
+If a [safety check stops a run](#if-a-run-stops), stop the daemon with Ctrl-C.
+Use `vault-mirror --env-file vault-mirror.env` in place of
+`docker compose run --rm vault-mirror` in the preview and run examples above,
+then start `daemon` again. The [restore guide](backups.md#restore-with-vault-mirror)
+includes native export commands and output paths.
 
 ## Next steps
 

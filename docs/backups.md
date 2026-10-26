@@ -56,18 +56,24 @@ List the snapshots of the source, or of the destination with `--from dest`:
 docker compose run --rm vault-mirror snapshots
 ```
 
-Export the newest snapshot and its attachments, unencrypted:
+Export the newest snapshot and its attachments, unencrypted. With the generated
+Compose file, this writes to `backups/recovered` on the host. Pause anything
+that copies or syncs the backup directory before exporting:
 
 ```sh
 docker compose run --rm vault-mirror export --output /data/recovered
 ```
 
-Import `export.json` into an empty vault with any Bitwarden client, then attach
-the files from `attachments/<attachment id>/attachment` to their items. Each
-entry in `vaultMirror.attachments` in `export.json` gives the attachment id,
-item id and original file name. Use that name when you attach the file again.
-Delete the output when done. Bitwarden imports do not restore the time a
-password last changed.
+Import `backups/recovered/export.json` into an empty vault with any Bitwarden
+client, then attach the files from `attachments/<attachment id>/attachment`
+to their items. Each entry in `vaultMirror.attachments` in `export.json` gives
+the attachment id, item id and original file name. Use that name when you
+attach the file again.
+Delete `backups/recovered` when done, before resuming backup copies or syncs.
+Bitwarden imports do not restore the time a password last changed.
+
+If the export fails, unencrypted files may remain in the output directory.
+Inspect them and choose a new `--output` directory to retry.
 
 The export leaves out the hidden `vault-mirror` fields, so imported items are
 not copies. To rebuild a lost destination, mirror into an empty one instead.
@@ -81,9 +87,17 @@ recover before importing it.
 | `--from dest` | Read the destination's snapshots. |
 | `--snapshot ID` | Use this snapshot instead of the newest. |
 
-These commands need only `BACKUPS_DIR` and `BACKUP_PASSPHRASE`. Without Docker,
-replace `docker compose run --rm vault-mirror` with
-`vault-mirror --env-file vault-mirror.env`.
+Listing snapshots needs only `BACKUPS_DIR`. Exporting also needs
+`BACKUP_PASSPHRASE` or `BACKUP_PASSPHRASE_FILE`; neither command needs access to
+the servers. Without Docker, use a path on your own machine for the output:
+
+```sh
+vault-mirror --env-file vault-mirror.env snapshots
+vault-mirror --env-file vault-mirror.env export --output ./recovered
+```
+
+The native export writes to `recovered` in your working directory. This output
+also contains unencrypted vault data; delete it when done.
 
 You can list and export backups from a read-only directory if it contains a
 readable `run.lock`. Keep that file when copying backups. If it is missing,

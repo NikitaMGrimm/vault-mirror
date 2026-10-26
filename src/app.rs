@@ -165,10 +165,17 @@ pub fn lock_backups_dir(backups_dir: &Path, access: BackupAccess) -> Result<fs::
                 }
             })
             .with_context(|| {
-                format!(
-                    "opening {} for recovery; copy BACKUPS_DIR to a writable directory or retain run.lock when copying backups",
-                    path.display()
-                )
+                if backups_dir.try_exists().is_ok_and(|exists| !exists) {
+                    format!(
+                        "no backup directory at {}; check BACKUPS_DIR or pass --env-file vault-mirror.env",
+                        backups_dir.display()
+                    )
+                } else {
+                    format!(
+                        "opening {} for recovery; copy BACKUPS_DIR to a writable directory or retain run.lock when copying backups",
+                        path.display()
+                    )
+                }
             })?,
     };
     let locked = match access {
@@ -276,7 +283,9 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
     }
     if let Some(lock) = lock {
         if let Err(error) = write_status(&config.backups_dir, &status) {
-            reporter.warn(&format!("Could not write the status file: {error:#}"));
+            reporter.warn(&format!(
+                "Could not write the status file: {error:#}. Check write access and free space in BACKUPS_DIR."
+            ));
         }
         drop(lock);
     }
@@ -432,23 +441,25 @@ pub fn describe(status: &Status) -> String {
 }
 
 async fn notify(config: &Config, status: &Status, reporter: &dyn Reporter) {
-    let url = if status.succeeded() {
-        &config.notify_success_url
+    let (setting, url) = if status.succeeded() {
+        ("NOTIFY_SUCCESS_URL", &config.notify_success_url)
     } else {
-        &config.notify_failure_url
+        ("NOTIFY_FAILURE_URL", &config.notify_failure_url)
     };
     let Some(url) = url else { return };
     // The notification endpoint may not need the vault server's private CA.
     let http = http_client(config).or_else(|error| {
         reporter.warn(&format!(
-            "Sending the notification with the standard certificate authorities: {error:#}"
+            "Sending the notification with the standard certificate authorities: {error:#}. Check CA_CERT_FILE before the next run."
         ));
         build_http_client(&ClientOptions::default()).map_err(anyhow::Error::from)
     });
     let http = match http {
         Ok(http) => http,
         Err(error) => {
-            return reporter.warn(&format!("Could not send the notification: {error:#}"));
+            return reporter.warn(&format!(
+                "Could not send the notification: {error:#}. Check CA_CERT_FILE and the notification service."
+            ));
         }
     };
     let sent = http
@@ -461,12 +472,12 @@ async fn notify(config: &Config, status: &Status, reporter: &dyn Reporter) {
     match sent {
         Ok(response) if response.status().is_success() => {}
         Ok(response) => reporter.warn(&format!(
-            "Could not send the notification: the server answered {}",
+            "Could not send the notification: the server answered {}. Check {setting} and the notification service.",
             response.status()
         )),
         // The URL can embed a token, so it is not repeated here.
         Err(error) => reporter.warn(&format!(
-            "Could not send the notification: {}",
+            "Could not send the notification: {}. Check {setting} and the notification service.",
             error.without_url()
         )),
     }
@@ -595,6 +606,63 @@ mod tests {
         write_status(dir.path(), &status).unwrap();
         assert_eq!(read_status(dir.path()).unwrap(), status);
         assert!(read_status(&dir.path().join("missing")).is_err());
+    }
+
+    #[tokio::test]
+    async fn operational_warnings_give_next_steps_without_notification_urls() {
+        use crate::api::tests::{http_response, http_server};
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Warnings(Mutex<Vec<String>>);
+        impl Reporter for Warnings {
+            fn status(&self, _: &str, _: &str) {}
+            fn warn(&self, message: &str) {
+                self.0.lock().unwrap().push(message.to_owned());
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(status_path(dir.path())).unwrap();
+        let (url, server) = http_server(vec![http_response("503 Service Unavailable", "", "")]);
+        let env = HashMap::from([
+            ("SOURCE_SERVER".into(), "invalid://synthetic".into()),
+            ("SOURCE_CLIENT_ID".into(), "user.synthetic".into()),
+            ("SOURCE_CLIENT_SECRET".into(), "synthetic-secret".into()),
+            ("SOURCE_PASSWORD".into(), "synthetic-password".into()),
+            ("BACKUP_PASSPHRASE".into(), "synthetic-passphrase".into()),
+            ("BACKUPS_DIR".into(), dir.path().display().to_string()),
+            (
+                "CA_CERT_FILE".into(),
+                dir.path().join("missing.pem").display().to_string(),
+            ),
+            (
+                "NOTIFY_FAILURE_URL".into(),
+                format!("{url}/synthetic-notify-token"),
+            ),
+        ]);
+        let config = Config::from_env(&env).unwrap();
+        let reporter = Warnings::default();
+        let status = run_once(&config, RunFlags::default(), &reporter).await;
+        server.join().unwrap();
+        assert!(!status.succeeded());
+        let warnings = reporter.0.lock().unwrap().join("\n");
+        for secret in [
+            "synthetic-secret",
+            "synthetic-password",
+            "synthetic-passphrase",
+            "synthetic-notify-token",
+            &url,
+        ] {
+            assert!(
+                !warnings.contains(secret),
+                "a warning exposed a secret or URL"
+            );
+        }
+        assert!(warnings.contains("Check write access and free space in BACKUPS_DIR"));
+        assert!(warnings.contains("Check CA_CERT_FILE"));
+        assert!(warnings.contains("Check NOTIFY_FAILURE_URL and the notification service"));
+        assert!(!warnings.contains("NOTIFY_SUCCESS_URL"));
     }
 
     #[tokio::test]
