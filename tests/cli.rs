@@ -300,6 +300,8 @@ fn recovery_readers_share_the_lock_and_exclude_runs() {
     );
     assert!(printed.contains("another vault-mirror run"), "{printed}");
     assert!(!dir.path().join("last-run.json").exists());
+    // Another test's child can inherit this descriptor until exec.
+    reader.unlock().unwrap();
     drop(reader);
     let writer = app::lock_backups_dir(dir.path(), BackupAccess::Write).unwrap();
     drop(writer);
