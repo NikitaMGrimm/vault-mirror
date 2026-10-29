@@ -4,6 +4,12 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.9.3](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.9.2...v0.9.3) - 2026-10-29
+
+### Fixed
+
+- *(cli)* improve terminal output and recovery guidance
+
 ## [0.9.2](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.9.1...v0.9.2) - 2026-10-26
 
 ### Fixed
