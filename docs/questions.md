@@ -8,8 +8,9 @@ No. vault-mirror only reads the source.
 
 ## What happens to items I add or change in the destination?
 
-Items you add there stay. vault-mirror changes and deletes only its copies, which
-it recognizes by their [marker](how-it-works.md#how-copies-are-recognized).
+Items you add there stay. vault-mirror changes only items linked by this pair's
+[markers](how-it-works.md#how-copies-are-recognized), and deletes only copies
+with their own marker.
 
 If you change a copy, runs stop before changing anything and list it. To change
 an item for good, change it in the source. To put the source version back, run
