@@ -43,9 +43,11 @@ run left the copy in. It holds no secrets. A marker that names another pair of
 vaults, such as on an item mirrored on from a third vault, doesn't make an item
 a copy here.
 
-Items without a marker aren't copies. vault-mirror never changes or deletes
-them, so you can keep your own items in the destination. It never deletes
-collections, or folders it didn't make; delete an empty one yourself.
+vault-mirror changes only items linked by this pair's markers. A marker in
+either vault can link the items, so switching the source and destination can
+update the originals. Items with neither link stay untouched. Runs delete only
+copies with their own marker. They never delete collections, or folders they
+didn't make; delete an empty one yourself.
 
 - If you change a copy's content, attachments, archive state, folder in a
   personal vault or collections in an organization, the next run stops before
@@ -56,8 +58,9 @@ collections, or folders it didn't make; delete an empty one yourself.
   the source and destination does not remove this protection.
 - In an organization, folders are each member's own. A copy you file in one
   stays there.
-- If you delete a copy's marker, the item is no longer a copy, and the next run
-  makes a new one next to it.
+- To keep an item independent, remove its `vault-mirror` field. If you have
+  switched the source and destination, remove the field from its linked item
+  in the other vault too. The next run makes a new copy beside it.
 - A clone keeps the copy's marker. Remove its `vault-mirror` field to keep
   it independent. Runs delete duplicates only when both copies are complete,
   unchanged, and record the same source version.

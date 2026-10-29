@@ -20,9 +20,10 @@ decrypt items to compare and copy them.
 Environment variables can be visible to other processes on the same host. To
 keep secrets out of them, use [secret files](docs/configuration.md#secrets-in-files).
 
-vault-mirror never writes to the source. A run changes and deletes only the
-copies it made in the destination, and stops rather than overwrite a copy
-someone changed there before the run.
+vault-mirror never writes to the source. A run changes only destination items
+linked by this pair's [markers](docs/how-it-works.md#how-copies-are-recognized),
+and deletes only copies with their own marker. It stops rather than overwrite
+a linked item someone changed there before the run.
 [Changes during a run](docs/limitations.md#changes-during-a-run) can still be lost.
 
 ## What it stores
