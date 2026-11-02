@@ -203,7 +203,7 @@ pub async fn mirror(
         .execute(
             &source_read.read,
             &dest_read.read,
-            Some(&source_read.snapshot),
+            Execution::Mirror(&source_read.snapshot),
         )
         .await;
     run.finish(result)
@@ -221,7 +221,7 @@ pub async fn check(
     reporter: &dyn Reporter,
 ) -> Result<Outcome, MirrorError> {
     let mut run = Run::new(source, dest, options, folders, reporter);
-    let result = run.execute(source_read, dest_read, None).await;
+    let result = run.execute(source_read, dest_read, Execution::Check).await;
     run.finish(result)
 }
 
@@ -462,13 +462,50 @@ fn check_dest_holds(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum Execution<'s, 'k> {
+    Check,
+    Mirror(&'s Snapshot<'k>),
+}
+
+impl Execution<'_, '_> {
+    fn is_check(self) -> bool {
+        matches!(self, Self::Check)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Stage {
+    Planning,
+    CreatingContainers,
+    WritingItems,
+    CopyingAttachments,
+    SettingArchiveState,
+    DeletingItems,
+    Verifying,
+}
+
+impl Stage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Planning => "planning",
+            Self::CreatingContainers => "creating folders and collections",
+            Self::WritingItems => "writing items",
+            Self::CopyingAttachments => "copying attachments",
+            Self::SettingArchiveState => "setting archive state",
+            Self::DeletingItems => "deleting obsolete items",
+            Self::Verifying => "verifying the destination",
+        }
+    }
+}
+
 struct Run<'a> {
     source: &'a Endpoint<'a>,
     dest: &'a Endpoint<'a>,
     options: &'a MirrorOptions,
     folders: &'a FolderReceipts,
     reporter: &'a dyn Reporter,
-    stage: &'static str,
+    stage: Stage,
     summary: Option<Summary>,
     planned: Option<Summary>,
     writes: DestinationWrites,
@@ -490,7 +527,7 @@ impl<'a> Run<'a> {
             options,
             folders,
             reporter,
-            stage: "planning",
+            stage: Stage::Planning,
             summary: None,
             planned: None,
             writes: DestinationWrites::NotStarted,
@@ -508,7 +545,7 @@ impl<'a> Run<'a> {
                 warnings: self.warnings,
             }),
             Err(error) => Err(MirrorError {
-                stage: self.stage,
+                stage: self.stage.as_str(),
                 planned: self.planned,
                 writes: self.writes,
                 source: error,
@@ -567,7 +604,7 @@ impl<'a> Run<'a> {
         &mut self,
         source_read: &VaultRead,
         dest_read: &VaultRead,
-        source_files: Option<&Snapshot<'_>>,
+        execution: Execution<'_, '_>,
     ) -> Result<bool> {
         let mode = mode(&self.source.scope, &self.dest.scope)?;
         let source_history = source_read.vault();
@@ -646,10 +683,10 @@ impl<'a> Run<'a> {
         let mut summary = plan.summary(&source_vault);
         summary.folders_deleted = cleanup.obsolete.len();
         self.planned = Some(summary);
-        let (verb, plan_text) = describe_plan(&summary, source_files.is_none());
+        let (verb, plan_text) = describe_plan(&summary, execution.is_check());
         self.reporter.status(verb, &plan_text);
         // A run reports the folders it deleted, not the ones it planned to.
-        if source_files.is_some() {
+        if !execution.is_check() {
             summary.folders_deleted = 0;
         }
         self.summary = Some(summary);
@@ -679,19 +716,20 @@ impl<'a> Run<'a> {
         let overwritten = plan.overwritten().count();
         if overwritten > 0 {
             let copies = count(overwritten, "copy");
-            self.warn(match source_files {
-                Some(_) => format!(
+            self.warn(match execution {
+                Execution::Mirror(_) => format!(
                     "Replacing {copies} changed in the destination with the source version. The \
                      destination backup from the start of this run keeps the changes."
                 ),
-                None => format!(
+                Execution::Check => format!(
                     "A run would replace {copies} changed in the destination with the source \
                      version. Its destination backup would keep the changes."
                 ),
             });
         }
-        let Some(source_files) = source_files else {
-            return Ok(false);
+        let source_files = match execution {
+            Execution::Check => return Ok(false),
+            Execution::Mirror(files) => files,
         };
         if let Some(receipts) = &receipts
             && let Err(error) = cleanup.stale.iter().try_for_each(|r| receipts.forget(r))
@@ -709,7 +747,7 @@ impl<'a> Run<'a> {
                 mode,
             )
             .await?;
-            self.stage = "verifying the destination";
+            self.stage = Stage::Verifying;
             self.verify(&source_vault, source_history, &pair, mode)
                 .await?;
             self.reporter.status("Verified", "the destination");
@@ -854,7 +892,7 @@ impl<'a> Run<'a> {
     ) -> Result<()> {
         let dest = self.dest;
 
-        self.stage = "creating folders and collections";
+        self.stage = Stage::CreatingContainers;
         let mut folder_ids = plan.folder_ids.clone();
         let mut unrecorded = Vec::new();
         if !plan.folders_to_create.is_empty() || !plan.collections_to_create.is_empty() {
@@ -925,7 +963,7 @@ impl<'a> Run<'a> {
         };
         let copies_files = |entry_index: usize| plan.entries[entry_index].copies_files();
 
-        self.stage = "writing items";
+        self.stage = Stage::WritingItems;
         // Each write yields the entry it was for and the destination item as
         // the server now holds it. New items carry their marker from the
         // start, so a run that stops after creating one does not create it
@@ -1006,7 +1044,7 @@ impl<'a> Run<'a> {
             self.reporter.status("Updated", &count(rewritten, "item"));
         }
 
-        self.stage = "copying attachments";
+        self.stage = Stage::CopyingAttachments;
         let old_files: HashMap<usize, Vec<String>> = (plan.updates.iter())
             .filter(|update| update.sync_attachments)
             .map(|update| {
@@ -1071,7 +1109,7 @@ impl<'a> Run<'a> {
             self.reporter.status("Copied", &count(total, "attachment"));
         }
 
-        self.stage = "setting archive state";
+        self.stage = Stage::SettingArchiveState;
         // Decided from what the server reports after the writes, not from the
         // plan: servers differ in what a write, or an attachment upload, does
         // to an item's archive state.
@@ -1135,7 +1173,7 @@ impl<'a> Run<'a> {
 
         // Deleting items comes last, so a run that fails before has removed
         // no item.
-        self.stage = "deleting obsolete items";
+        self.stage = Stage::DeletingItems;
         if !plan.deletes.is_empty() {
             // The plan comes from the backup at the start of the run. An item
             // that changed in any way since holds what no backup does. The

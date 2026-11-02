@@ -274,12 +274,8 @@ fn the_marker_is_the_last_field_and_names_the_vaults_and_the_source_item() {
         (PAIR, "s1")
     );
     assert_eq!(
-        (
-            marker.archived,
-            marker.source_files.as_str(),
-            marker.dest_files.as_str()
-        ),
-        (false, "-", "-")
+        (marker.archived, marker.source_files, marker.dest_files),
+        (false, FileHash::Empty, FileHash::Empty)
     );
 }
 
@@ -672,9 +668,26 @@ fn attachment_sizes_on_the_destination_do_not_matter() {
     assert_converged(&source, &dest, Mode::Personal);
 }
 
+#[test]
+fn attachment_fingerprints_keep_the_existing_marker_encoding() {
+    let mut source = login("s1", "One", "pw1");
+    source.attachments = vec![attachment("a1", "scan.pdf", 100)];
+    assert_eq!(
+        source_files(&source).to_string(),
+        "30e391b509659932435e26d5b160a03071ccaac8bb28d2eb9590d8c9ddd6e94a"
+    );
+    assert_eq!(
+        dest_files(&[attachment("d1", "scan.pdf", 164)]).to_string(),
+        "cc6785cd53aea0c78c03afe6755bfb5aeeee1961d98f8158f77814882ff53017"
+    );
+}
+
 fn receipt(item: &Item) -> [String; 2] {
     let marker = marker(item).unwrap();
-    [marker.source_files, marker.dest_files]
+    [
+        marker.source_files.to_string(),
+        marker.dest_files.to_string(),
+    ]
 }
 
 fn edit_notes(vault: &mut Vault, notes: &str) {
@@ -2240,9 +2253,14 @@ fn deleting_more_than_half_of_the_copies_is_refused() {
 #[test]
 fn markers_accept_exactly_the_legacy_or_ordered_format() {
     let legacy = format!("{PAIR} s1 {} 0 - -", "ab".repeat(32));
-    let ordered = format!("{legacy} 42 1");
-    for value in [&legacy, &ordered] {
-        assert_eq!(Marker::parse(value).unwrap().render(), *value);
+    let digest = "0123456789abcdef".repeat(4);
+    for source in ["?", "-", &digest] {
+        for dest in ["?", "-", &digest] {
+            for history in ["", " 42 1"] {
+                let value = format!("{PAIR} s1 {} 0 {source} {dest}{history}", "ab".repeat(32));
+                assert_eq!(Marker::parse(&value).unwrap().render(), value);
+            }
+        }
     }
     for suffix in [
         " 1",
@@ -2255,6 +2273,20 @@ fn markers_accept_exactly_the_legacy_or_ordered_format() {
         " 1 1 extra",
     ] {
         assert!(Marker::parse(&format!("{legacy}{suffix}")).is_none());
+    }
+    for invalid in [
+        "".to_string(),
+        "unknown".to_string(),
+        "a".repeat(63),
+        "a".repeat(65),
+        "AB".repeat(32),
+        "zz".repeat(32),
+        format!("{}é", "a".repeat(62)),
+    ] {
+        for (source, dest) in [(&invalid[..], "-"), ("-", &invalid[..])] {
+            let value = format!("{PAIR} s1 {} 0 {source} {dest}", "ab".repeat(32));
+            assert!(Marker::parse(&value).is_none());
+        }
     }
 }
 
