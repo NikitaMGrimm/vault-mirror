@@ -22,11 +22,44 @@ use crate::{
 pub const MARKER_FIELD: &str = "vault-mirror";
 /// Custom field type "hidden".
 const MARKER_FIELD_TYPE: u64 = 1;
-/// Files hash of an item without attachments.
-const NO_FILES: &str = "-";
-/// Files hash before the attachments are copied and checked. Nothing then
-/// vouches for the attachments the copy holds.
-const UNKNOWN: &str = "?";
+
+/// What a marker records about one side's attachments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileHash {
+    /// Nothing vouches for the attachments this side holds.
+    Unknown,
+    Empty,
+    Hash([u8; 32]),
+}
+
+impl FileHash {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "?" => Some(Self::Unknown),
+            "-" => Some(Self::Empty),
+            value if is_hash(value) => {
+                let mut digest = [0; 32];
+                hex::decode_to_slice(value, &mut digest).ok()?;
+                Some(Self::Hash(digest))
+            }
+            _ => None,
+        }
+    }
+
+    fn of(value: &Value) -> Self {
+        Self::Hash(Sha256::digest(value.to_string().as_bytes()).into())
+    }
+}
+
+impl std::fmt::Display for FileHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown => f.write_str("?"),
+            Self::Empty => f.write_str("-"),
+            Self::Hash(digest) => f.write_str(&hex::encode(digest)),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Marker {
@@ -39,10 +72,10 @@ pub struct Marker {
     /// Whether the copy was archived when vault-mirror last wrote this.
     pub archived: bool,
     /// The source item's attachments when they were last copied.
-    pub source_files: String,
+    pub source_files: FileHash,
     /// The copy's attachments as vault-mirror left them. Attachment ids
     /// differ between the two items, so each side gets its own hash.
-    pub dest_files: String,
+    pub dest_files: FileHash,
     history: History,
 }
 
@@ -81,7 +114,6 @@ impl Marker {
     /// Accepts only what this tool writes. Anything else is a field someone
     /// else named `vault-mirror`, and must not make an item look like a copy.
     fn parse(value: &str) -> Option<Self> {
-        let is_files = |part: &str| part == NO_FILES || part == UNKNOWN || is_hash(part);
         let mut parts = value.split_whitespace();
         let marker = Self {
             pair: parts.next()?.to_string(),
@@ -92,8 +124,8 @@ impl Marker {
                 "1" => true,
                 _ => return None,
             },
-            source_files: parts.next()?.to_string(),
-            dest_files: parts.next()?.to_string(),
+            source_files: FileHash::parse(parts.next()?)?,
+            dest_files: FileHash::parse(parts.next()?)?,
             history: match parts.next() {
                 None => History::Unordered,
                 Some(generation) => {
@@ -111,11 +143,7 @@ impl Marker {
                 }
             },
         };
-        let valid = parts.next().is_none()
-            && is_hash(&marker.pair)
-            && is_hash(&marker.content)
-            && is_files(&marker.source_files)
-            && is_files(&marker.dest_files);
+        let valid = parts.next().is_none() && is_hash(&marker.pair) && is_hash(&marker.content);
         valid.then_some(marker)
     }
 
@@ -149,7 +177,7 @@ impl Marker {
     }
 
     fn files_pending(&self) -> bool {
-        self.dest_files == UNKNOWN
+        self.dest_files == FileHash::Unknown
     }
 }
 
@@ -329,26 +357,32 @@ pub fn check_foreign_links(
 )]
 pub struct ForeignLinks(Vec<String>);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileReceipt {
-    source: String,
-    dest: String,
+    source: FileHash,
+    dest: FileHash,
 }
 
 impl FileReceipt {
     fn of(marker: &Marker) -> Self {
         Self {
-            source: marker.source_files.clone(),
-            dest: marker.dest_files.clone(),
+            source: marker.source_files,
+            dest: marker.dest_files,
         }
     }
 
     fn unknown() -> Self {
         Self {
-            source: UNKNOWN.into(),
-            dest: UNKNOWN.into(),
+            source: FileHash::Unknown,
+            dest: FileHash::Unknown,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileAction {
+    Copy,
+    Keep(FileReceipt),
 }
 
 /// What a write tells the copy's marker about its attachments.
@@ -373,9 +407,7 @@ pub struct Entry {
     /// What a copy that holds the source item and its files carries.
     pub marker: Marker,
     order_floor: u64,
-    /// The attachment receipt a copy keeps when the run leaves its
-    /// attachments alone. None when the run copies them.
-    kept: Option<FileReceipt>,
+    files: FileAction,
 }
 
 /// What changed in a copy since vault-mirror last wrote it, and the run
@@ -513,7 +545,7 @@ impl Plan {
 impl Entry {
     /// Whether the run copies the source item's attachments to the copy.
     pub fn copies_files(&self) -> bool {
-        self.kept.is_none()
+        matches!(self.files, FileAction::Copy)
     }
 
     /// What to write to the destination for this entry: the source item's
@@ -533,11 +565,14 @@ impl Entry {
         let receipt = match files {
             FileWrite::Pending => FileReceipt::unknown(),
             FileWrite::Copied(files) => FileReceipt {
-                source: self.marker.source_files.clone(),
+                source: self.marker.source_files,
                 dest: dest_files(files),
             },
             // A copy whose files were due to be copied has nothing to keep.
-            FileWrite::Kept => self.kept.clone().unwrap_or_else(FileReceipt::unknown),
+            FileWrite::Kept => match self.files {
+                FileAction::Keep(receipt) => receipt,
+                FileAction::Copy => FileReceipt::unknown(),
+            },
         };
         let generation = self
             .order_floor
@@ -589,10 +624,13 @@ impl Entry {
     /// in the source item's archive state, with the files the run leaves it
     /// or else the source item's.
     pub fn marks(&self, copy: &Item) -> bool {
-        let receipt = self.kept.clone().unwrap_or_else(|| FileReceipt {
-            source: self.marker.source_files.clone(),
-            dest: dest_files(&copy.attachments),
-        });
+        let receipt = match self.files {
+            FileAction::Keep(receipt) => receipt,
+            FileAction::Copy => FileReceipt {
+                source: self.marker.source_files,
+                dest: dest_files(&copy.attachments),
+            },
+        };
         let wanted = Marker {
             source_files: receipt.source,
             dest_files: receipt.dest,
@@ -739,7 +777,7 @@ impl Known {
             archived: Some(marker.archived),
             // A copy made while attachments were skipped knows its own files
             // but not which source files they stand for.
-            files: if marker.dest_files == UNKNOWN {
+            files: if marker.dest_files == FileHash::Unknown {
                 Files::Unknown
             } else if marker.dest_files != dest_files(&dest.attachments) {
                 Files::Changed
@@ -754,15 +792,16 @@ impl Known {
     }
 
     fn link(marker: &Marker, source: &Item, dest: &Item) -> Self {
-        let files = if marker.source_files == UNKNOWN || marker.dest_files == UNKNOWN {
-            Files::Unknown
-        } else if marker.source_files != source_files(dest) {
-            Files::Changed
-        } else {
-            Files::Unchanged {
-                current: marker.dest_files == dest_files(&source.attachments),
-            }
-        };
+        let files =
+            if marker.source_files == FileHash::Unknown || marker.dest_files == FileHash::Unknown {
+                Files::Unknown
+            } else if marker.source_files != source_files(dest) {
+                Files::Changed
+            } else {
+                Files::Unchanged {
+                    current: marker.dest_files == dest_files(&source.attachments),
+                }
+            };
         // The marker hashes each side as the other way round. Only files it
         // proves unchanged can be hashed again for this direction.
         let receipt = match files {
@@ -770,7 +809,7 @@ impl Known {
                 source: if current {
                     source_files(source)
                 } else {
-                    UNKNOWN.into()
+                    FileHash::Unknown
                 },
                 dest: dest_files(&dest.attachments),
             },
@@ -833,7 +872,7 @@ pub fn plan(
             content: content_hash(item, folder.as_deref(), &collections, mode),
             archived: item.archived,
             source_files: source_files(item),
-            dest_files: NO_FILES.to_string(),
+            dest_files: FileHash::Empty,
             history: History::Unordered,
         };
         let link = marker_of(item, pair);
@@ -847,20 +886,24 @@ pub fn plan(
         entry_by_source_id.insert(&item.id, plan.entries.len());
         // What a new copy that gets no attachments vouches for. Skipped
         // files leave it empty, and still due.
-        let kept = (skip_attachments || item.attachments.is_empty()).then(|| FileReceipt {
-            source: match item.attachments.is_empty() {
-                true => NO_FILES.into(),
-                false => UNKNOWN.into(),
-            },
-            dest: NO_FILES.into(),
-        });
+        let files = if skip_attachments || item.attachments.is_empty() {
+            FileAction::Keep(FileReceipt {
+                source: match item.attachments.is_empty() {
+                    true => FileHash::Empty,
+                    false => FileHash::Unknown,
+                },
+                dest: FileHash::Empty,
+            })
+        } else {
+            FileAction::Copy
+        };
         plan.entries.push(Entry {
             source: index,
             order_floor,
             folder,
             collections,
             marker,
-            kept,
+            files,
         });
     }
     let known = |entry: usize, dest_index: usize, own: Option<&Marker>| {
@@ -951,7 +994,7 @@ pub fn plan(
                 && matches!(baseline.files, Files::Unchanged { .. })
                 && own.is_some_and(|own| {
                     !own.files_pending()
-                        && own.source_files != UNKNOWN
+                        && own.source_files != FileHash::Unknown
                         && own
                             .history
                             .source_archived()
@@ -1037,13 +1080,15 @@ pub fn plan(
             },
             files => files,
         };
-        entry.kept = if skip_attachments {
-            Some(known.receipt)
-        } else {
-            (files == Files::Unchanged { current: true }).then(|| FileReceipt {
-                source: entry.marker.source_files.clone(),
+        entry.files = if skip_attachments {
+            FileAction::Keep(known.receipt)
+        } else if files == (Files::Unchanged { current: true }) {
+            FileAction::Keep(FileReceipt {
+                source: entry.marker.source_files,
                 dest: dest_files(&dest_item.attachments),
             })
+        } else {
+            FileAction::Copy
         };
         let sync_attachments = entry.copies_files();
         changed_in_dest.files =
@@ -1161,9 +1206,9 @@ fn content_hash(item: &Item, folder: Option<&str>, collections: &[String], mode:
 
 /// Identifies a source item's attachments. Attachment ids never get reused,
 /// so a file replaced under the same name changes this.
-fn source_files(item: &Item) -> String {
+fn source_files(item: &Item) -> FileHash {
     if item.attachments.is_empty() {
-        return NO_FILES.to_string();
+        return FileHash::Empty;
     }
     let mut files: Vec<(&str, &str, u64)> = item
         .attachments
@@ -1171,21 +1216,21 @@ fn source_files(item: &Item) -> String {
         .map(|a| (a.id.as_str(), a.file_name.as_str(), a.size))
         .collect();
     files.sort_unstable();
-    hash(&json!(files))
+    FileHash::of(&json!(files))
 }
 
 /// Identifies a copy's attachments. File content is immutable under an id,
 /// but its name can change without replacing the attachment.
-fn dest_files(files: &[Attachment]) -> String {
+fn dest_files(files: &[Attachment]) -> FileHash {
     if files.is_empty() {
-        return NO_FILES.to_string();
+        return FileHash::Empty;
     }
     let mut files: Vec<(&str, &str)> = files
         .iter()
         .map(|a| (a.id.as_str(), a.file_name.as_str()))
         .collect();
     files.sort_unstable();
-    hash(&json!(files))
+    FileHash::of(&json!(files))
 }
 
 fn hash(value: &Value) -> String {
