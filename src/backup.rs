@@ -58,13 +58,24 @@ pub async fn backup<'k>(
         );
         store.list()?.pop().context("the newest snapshot is gone")?
     } else {
+        let newest = store.list()?.pop().map(|id| store.snapshot(&id));
         let writer = store.begin(options.now)?;
         let files: Vec<_> = (live.iter())
             .flat_map(|item| item.attachments.iter().map(move |a| (*item, a)))
             .collect();
-        let downloads = Tally::new(reporter, "Downloading", files.len(), "attachments");
+        let mut missing = Vec::new();
+        for (item, attachment) in &files {
+            let reused = match &newest {
+                Some(newest) => writer.reuse_attachment(newest, &attachment.id)?,
+                None => false,
+            };
+            if !reused {
+                missing.push((*item, *attachment));
+            }
+        }
+        let downloads = Tally::new(reporter, "Downloading", missing.len(), "attachments");
         let (to, downloads) = (&writer, &downloads);
-        stream::iter(files.iter().map(|(item, attachment)| async move {
+        stream::iter(missing.iter().map(|(item, attachment)| async move {
             let data = account
                 .download_attachment(scope, item, attachment)
                 .await
@@ -90,7 +101,7 @@ pub async fn backup<'k>(
             &format!("snapshot {id} with {}", count(live.len(), "item")),
         );
         report.snapshot = Some(id.clone());
-        report.attachments_downloaded = files.len();
+        report.attachments_downloaded = missing.len();
         id
     };
 

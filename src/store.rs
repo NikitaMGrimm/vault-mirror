@@ -10,7 +10,8 @@
 //! A snapshot's id is the UTC time it was made, such as `20261014T030000Z`,
 //! with a counter for a second snapshot in the same second. A snapshot is
 //! written into a temporary directory and renamed into place, so one that is
-//! there is complete. Vault content is encrypted with [age](https://age-encryption.org),
+//! there is complete. An attachment file that the snapshot before it holds
+//! too is a hard link to that one. Vault content is encrypted with [age](https://age-encryption.org),
 //! so a backup can be read with the stock `age` tool and no part of this program.
 
 use std::{
@@ -415,6 +416,20 @@ impl SnapshotWriter<'_> {
         write_private(&path, &self.store.keys.encrypt(data)?)
     }
 
+    /// Takes an attachment's file from `from`, an earlier snapshot, as a
+    /// hard link, since an attachment's content never changes under one id.
+    /// Returns false, having written nothing, when `from` has no file for it
+    /// that opens or the file system cannot link.
+    pub fn reuse_attachment(&self, from: &Snapshot<'_>, attachment_id: &str) -> Result<bool> {
+        let stored = attachment_path(&from.directory, attachment_id)?;
+        let path = attachment_path(self.temp.path(), attachment_id)?;
+        if from.attachment(attachment_id).is_err() || fs::hard_link(&stored, &path).is_err() {
+            return Ok(false);
+        }
+        sync_dir(&self.temp.path().join(ATTACHMENTS_DIR))?;
+        Ok(true)
+    }
+
     /// Writes `document` and moves the snapshot into place. Returns its id.
     pub fn finish(self, document: &Value) -> Result<String> {
         let data = self
@@ -747,6 +762,50 @@ mod tests {
         assert_eq!(ids[0], "20261014T013000Z");
         assert_eq!(ids[10], "20261014T013000Z-10");
         assert_eq!(store.list().unwrap(), ids);
+    }
+
+    #[test]
+    fn a_snapshot_takes_the_attachment_files_an_earlier_one_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), "p").unwrap();
+        let store = Store::new(dir.path(), "source", &keys);
+        let now = datetime!(2026-10-14 00:00 UTC);
+        let first = write(
+            &store,
+            now,
+            "a",
+            &[("att-1", b"kept"), ("att-2", b"damaged")],
+        );
+        let first_files = dir.path().join("source").join(&first);
+        fs::write(attachment_path(&first_files, "att-2").unwrap(), b"x").unwrap();
+
+        let writer = store.begin(now + Duration::days(40)).unwrap();
+        let earlier = store.snapshot(&first);
+        assert!(writer.reuse_attachment(&earlier, "att-1").unwrap());
+        // A file that does not open, or is not there, has to be fetched again.
+        assert!(!writer.reuse_attachment(&earlier, "att-2").unwrap());
+        assert!(!writer.reuse_attachment(&earlier, "att-3").unwrap());
+        assert!(writer.reuse_attachment(&earlier, "../key").is_err());
+        let second = writer.finish(&document("b", &["att-1"])).unwrap();
+        let second_files = dir.path().join("source").join(&second);
+        assert!(!attachment_path(&second_files, "att-2").unwrap().exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let inode = |files: &Path| {
+                let path = attachment_path(files, "att-1").unwrap();
+                fs::metadata(path).unwrap().ino()
+            };
+            assert_eq!(inode(&first_files), inode(&second_files));
+        }
+
+        // The file outlives the snapshot it was first written for.
+        assert_eq!(store.prune(30, now + Duration::days(40)).unwrap(), 1);
+        assert_eq!(store.list().unwrap(), [second.as_str()]);
+        assert_eq!(
+            store.snapshot(&second).attachment("att-1").unwrap(),
+            b"kept"
+        );
     }
 
     #[test]

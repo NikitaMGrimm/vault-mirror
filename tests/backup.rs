@@ -122,7 +122,8 @@ async fn a_backup_holds_the_whole_vault() -> Result<()> {
 }
 
 #[tokio::test]
-async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked() -> Result<()> {
+async fn changed_backups_download_only_new_attachments_and_unchanged_vaults_are_checked()
+-> Result<()> {
     let Some(sandbox) = sandbox().await else {
         return Ok(());
     };
@@ -156,10 +157,9 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
         .await?;
     let (third, _) = backup(&source, &PERSONAL, &store, &options(), &quiet).await?;
     assert!(third.snapshot.is_some());
-    assert_eq!(third.attachments_downloaded, 5);
+    assert_eq!(third.attachments_downloaded, 1);
     assert_eq!(store.list()?.len(), 2);
 
-    // Pruning removes both older independent attachment sets.
     source
         .delete_items(&[by_name(&vault, "Visa").id.clone()])
         .await?;
@@ -168,8 +168,17 @@ async fn changed_backups_own_their_attachments_and_unchanged_vaults_are_checked(
         now: OffsetDateTime::now_utc() + time::Duration::days(60),
     };
     let (fourth, _) = backup(&source, &PERSONAL, &store, &later, &quiet).await?;
-    assert_eq!(fourth.snapshots_pruned, 2);
+    assert_eq!(
+        (fourth.snapshots_pruned, fourth.attachments_downloaded),
+        (2, 0)
+    );
     assert_eq!(store.list()?.len(), 1);
+    // The files outlive the pruned snapshots they were downloaded for.
+    let (kept, snapshot) = latest(&store)?;
+    assert_eq!(kept.attachments().count(), 4);
+    for attachment in kept.attachments() {
+        snapshot.attachment(&attachment.attachment_id)?;
+    }
     Ok(())
 }
 
