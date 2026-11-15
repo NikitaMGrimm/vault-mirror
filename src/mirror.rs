@@ -12,11 +12,11 @@ use sha2::{Digest, Sha256};
 use crate::{
     node::Node,
     plan::{
-        self, FileWrite, FolderCleanup, Mode, Places, Plan, Receipt, Safety, Summary, comparable,
-        differing_paths,
+        self, DeleteReason, FileWrite, FolderCleanup, Mode, Places, Plan, Receipt, Safety, Summary,
+        comparable, differing_paths,
     },
     store::{FolderReceipts, Receipts, Snapshot},
-    text::count,
+    text::{count, listed},
     vault::{Account, Attachment, Item, Scope, ServerTraits, Vault, VaultRead, WRITES_AT_ONCE},
 };
 
@@ -427,6 +427,28 @@ fn same_state(left: &Item, right: &Item) -> bool {
     canonical(left) == canonical(right)
 }
 
+/// Fails if the plan deletes a copy of an item type the source server does
+/// not show. Its source item is missing from the source vault, but may still
+/// exist.
+fn check_source_shows(plan: &Plan, dest: &Vault, traits: &ServerTraits) -> Result<()> {
+    let hidden: Vec<&str> = (plan.deletes.iter())
+        .filter(|delete| delete.reason == DeleteReason::Stale)
+        .map(|delete| &dest.items[delete.dest])
+        .filter(|item| traits.hides(item))
+        .map(|item| item.id.as_str())
+        .collect();
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the source server does not show bank accounts, driver's licences or passports yet, so \
+         the source items of {} of them may still exist ({}). If they were deleted, delete \
+         those copies in the destination yourself",
+        count(hidden.len(), "copy"),
+        listed(&hidden)
+    );
+}
+
 /// Fails if the destination cannot hold everything the run would copy. A
 /// run that left something out would look complete, and the next run would
 /// treat what is missing as deleted.
@@ -438,6 +460,15 @@ fn check_dest_holds(
     mode: Mode,
 ) -> Result<()> {
     let live = || source.items.iter().filter(|item| !item.in_trash);
+    let hidden = live().filter(|item| traits.hides(item)).count();
+    if hidden > 0 {
+        bail!(
+            "the destination server does not show bank accounts, driver's licences or passports \
+             yet, so it cannot hold {} of the source. Leave them out with a filter, or use a \
+             destination that shows them",
+            count(hidden, "item")
+        );
+    }
     if mode == Mode::Organization && traits.items_need_collections {
         let homeless = live().filter(|item| item.collection_ids.is_empty()).count();
         if homeless > 0 {
@@ -642,6 +673,7 @@ impl<'a> Run<'a> {
             self.options.skip_attachments,
         );
         self.planned = Some(plan.summary(&source_vault));
+        check_source_shows(&plan, dest_vault, source_read.traits())?;
         check_dest_holds(
             &source_vault,
             &plan,
@@ -1374,6 +1406,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn copies_of_a_type_the_source_hides_are_not_taken_for_copies_of_deleted_items() {
+        let mut copy = item("copy", None, &[]);
+        copy.content
+            .insert("type".into(), crate::node::Node::Number(8.into()));
+        let dest = Vault {
+            items: vec![copy],
+            ..Vault::default()
+        };
+        let plan = |reason| Plan {
+            deletes: vec![plan::Delete {
+                dest: 0,
+                reason,
+                changed_in_dest: plan::Changes::default(),
+            }],
+            ..Plan::default()
+        };
+        let traits = |hidden_item_types| ServerTraits {
+            hidden_item_types,
+            items_need_collections: false,
+            organization_updates_safe: true,
+        };
+        let refused = check_source_shows(&plan(DeleteReason::Stale), &dest, &traits(vec![6, 7, 8]));
+        assert!(format!("{:#}", refused.unwrap_err()).contains("(copy)"));
+        assert!(check_source_shows(&plan(DeleteReason::Stale), &dest, &traits(vec![])).is_ok());
+        let duplicate = plan(DeleteReason::Duplicate);
+        assert!(check_source_shows(&duplicate, &dest, &traits(vec![6, 7, 8])).is_ok());
+    }
+
     mod visibility {
         use super::*;
         use std::{
@@ -1403,7 +1464,6 @@ mod tests {
             AfterFolder,
             AmbiguousDelete,
             Verification,
-            HiddenVerification,
             Cleanup,
         }
 
@@ -1506,10 +1566,6 @@ mod tests {
                                     json!({"server": null, "featureStates": {
                                         "pm-32009-new-item-types": shown
                                     }})
-                                } else if state.failure == Failure::HiddenVerification
-                                    && state.delete_attempts > 0
-                                {
-                                    json!({"server": null, "featureStates": {}})
                                 } else {
                                     json!({"server": {"name": "Vaultwarden"}})
                                 }
@@ -1531,10 +1587,7 @@ mod tests {
                                     json!({"message":"synthetic verification failure"})
                                 } else {
                                     let mut sync = state.dest.clone();
-                                    if state.dest_hidden
-                                        || (state.failure == Failure::HiddenVerification
-                                            && state.delete_attempts > 0)
-                                    {
+                                    if state.dest_hidden {
                                         sync["ciphers"].as_array_mut().unwrap().retain(|item| {
                                             !matches!(item["type"].as_u64(), Some(6..=8))
                                         });
@@ -2046,79 +2099,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn stable_hidden_backup_preserves_the_prior_full_snapshot() {
-            for destination in [false, true] {
-                let server = Server::start(&[true]);
-                let (source, dest) = server.accounts().await;
-                if !destination {
-                    let mut state = server.state.lock().unwrap();
-                    let mut passport = state.source["ciphers"][0].clone();
-                    passport["id"] = json!("passport");
-                    passport["type"] = json!(8);
-                    state.source["ciphers"]
-                        .as_array_mut()
-                        .unwrap()
-                        .push(passport);
-                }
-                let account = if destination { &dest } else { &source };
-                let full = account.load_with_traits(&Scope::Personal).await.unwrap();
-                let (dir, keys) = &*BACKUPS;
-                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
-                let document = snapshot::build(full.vault(), &Scope::Personal).unwrap();
-                let prior = store
-                    .begin(OffsetDateTime::UNIX_EPOCH)
-                    .unwrap()
-                    .finish(&document)
-                    .unwrap();
-                {
-                    let mut state = server.state.lock().unwrap();
-                    if destination {
-                        state.dest_shown = Some([false].into());
-                    } else {
-                        state.shown = [false].into();
-                    }
-                }
-                let result =
-                    backup(account, &Scope::Personal, &store, &backup_options(), &Quiet).await;
-                let recovered = store.snapshot(&prior).document().unwrap();
-                assert!(recovered == document);
-                assert_eq!(snapshot::parse(&recovered).unwrap().items().len(), 3);
-                assert_eq!(store.list().unwrap(), [prior]);
-                assert!(result.is_err(), "a stable hidden backup was accepted");
-            }
-        }
-
-        #[tokio::test]
-        async fn stable_hidden_unchanged_backup_does_not_prune_a_full_snapshot() {
-            let server = Server::start(&[true]);
-            let (_, dest) = server.accounts().await;
-            let full = dest.load_with_traits(&Scope::Personal).await.unwrap();
-            let (dir, keys) = &*BACKUPS;
-            let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
-            let document = snapshot::build(full.vault(), &Scope::Personal).unwrap();
-            let prior = store
-                .begin(OffsetDateTime::UNIX_EPOCH)
-                .unwrap()
-                .finish(&document)
-                .unwrap();
-            let mut partial = full.vault().clone();
-            partial.items.retain(|item| item.id != "copy-passport");
-            // A prior version may already have accepted an incomplete snapshot.
-            let latest = store
-                .begin(OffsetDateTime::UNIX_EPOCH + time::Duration::days(1))
-                .unwrap()
-                .finish(&snapshot::build(&partial, &Scope::Personal).unwrap())
-                .unwrap();
-            server.state.lock().unwrap().dest_shown = Some([false].into());
-            let result = backup(&dest, &Scope::Personal, &store, &backup_options(), &Quiet).await;
-            let recovered = store.snapshot(&prior).document().unwrap();
-            assert!(recovered == document);
-            assert_eq!(snapshot::parse(&recovered).unwrap().items().len(), 3);
-            assert_eq!(store.list().unwrap(), [prior, latest]);
-            assert!(result.is_err(), "an unchanged hidden backup was accepted");
-        }
-
-        #[tokio::test]
         async fn destination_hidden_read_cannot_create_duplicates_after_enablement() {
             let mut outcomes = Vec::new();
             for run in [false, true] {
@@ -2218,26 +2198,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn final_verification_refuses_stable_hidden_item_types() {
-            let server = Server::start(&[true]);
-            server.state.lock().unwrap().failure = Failure::HiddenVerification;
-            let (source, dest) = server.accounts().await;
-            let (dir, keys) = &*BACKUPS;
-            let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
-            let (_, source_read) =
-                backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
-                    .await
-                    .unwrap();
-            let result = evaluate(&source, &dest, &source_read, &store, true).await;
-            assert_eq!(server.state.lock().unwrap().delete_attempts, 1);
-            let error = result.expect_err("an incomplete final verification was accepted");
-            assert_eq!(
-                error.downcast::<MirrorError>().unwrap().stage,
-                "verifying the destination"
-            );
-        }
-
-        #[tokio::test]
         async fn observed_visibility_transitions_refuse_before_snapshot_commit_or_prune() {
             for shown in [[false, true], [true, false]] {
                 let server = Server::start(&shown);
@@ -2306,16 +2266,91 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn stable_hidden_source_read_is_rejected_even_without_new_item_types() {
-            let server = Server::start(&[false]);
-            let (source, _) = server.accounts().await;
-            let result = source.load_with_traits(&Scope::Personal).await;
-            let error = result
-                .err()
-                .expect("an incomplete source read was accepted");
-            assert!(format!("{error:#}").contains("cannot be read completely"));
-            assert!(!format!("{error:#}").contains("synthetic vault content"));
-            assert_eq!(server.requests(), source_order());
+        async fn servers_that_hide_item_types_are_backed_up_and_mirrored() {
+            for run in [false, true] {
+                let server = Server::start(&[false]);
+                server.state.lock().unwrap().dest_shown = Some([false].into());
+                let (source, dest) = server.accounts().await;
+                let (dir, keys) = &*BACKUPS;
+                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+                let (report, source_read) =
+                    backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                        .await
+                        .unwrap();
+                assert_eq!(report.items, 2);
+                let outcome = evaluate(&source, &dest, &source_read, &store, run)
+                    .await
+                    .unwrap();
+                assert_eq!(outcome.summary.items_unchanged, 2);
+                assert!(!outcome.changed);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_copy_of_a_type_the_source_hides_is_not_deleted() {
+            for run in [false, true] {
+                let server = Server::start(&[false]);
+                let (source, dest) = server.accounts().await;
+                let (dir, keys) = &*BACKUPS;
+                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+                let (_, source_read) =
+                    backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                        .await
+                        .unwrap();
+                let error = evaluate(&source, &dest, &source_read, &store, run)
+                    .await
+                    .unwrap_err()
+                    .downcast::<MirrorError>()
+                    .unwrap();
+                assert_eq!(error.stage, "planning");
+                assert_eq!(error.writes, DestinationWrites::NotStarted);
+                let message = format!("{:#}", error.source);
+                assert!(
+                    message.contains("may still exist (copy-passport)"),
+                    "{message}"
+                );
+                assert!(!message.contains("synthetic vault content"));
+                assert_eq!(server.state.lock().unwrap().delete_attempts, 0);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_destination_that_hides_item_types_gets_none_of_them() {
+            for run in [false, true] {
+                let server = Server::start(&[true]);
+                let (source, dest) = server.accounts().await;
+                {
+                    let mut state = server.state.lock().unwrap();
+                    let mut passport = state.source["ciphers"][0].clone();
+                    passport["id"] = json!("passport");
+                    passport["type"] = json!(8);
+                    state.source["ciphers"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(passport);
+                    state.dest_shown = Some([false].into());
+                }
+                let (dir, keys) = &*BACKUPS;
+                let store = Store::new(dir.path(), &uuid::Uuid::new_v4().to_string(), keys);
+                let (_, source_read) =
+                    backup(&source, &Scope::Personal, &store, &backup_options(), &Quiet)
+                        .await
+                        .unwrap();
+                let error = evaluate(&source, &dest, &source_read, &store, run)
+                    .await
+                    .unwrap_err()
+                    .downcast::<MirrorError>()
+                    .unwrap();
+                assert_eq!(error.writes, DestinationWrites::NotStarted);
+                let message = format!("{:#}", error.source);
+                assert!(message.contains("cannot hold 1 item"), "{message}");
+                assert!(
+                    !server
+                        .requests()
+                        .iter()
+                        .any(|request| request.starts_with("POST "))
+                );
+            }
         }
 
         #[tokio::test]
