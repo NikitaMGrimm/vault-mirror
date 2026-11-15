@@ -26,9 +26,6 @@ and run-failure messages start with a UTC timestamp and a level. Snapshot ids,
 health-check output, and top-level command errors stay plain. Set `NO_COLOR`
 to turn colours off.
 
-At a terminal, long messages wrap at word boundaries and progress counts stay
-aligned. In logs, each message stays on one line.
-
 ### Exit codes and output
 
 - `0`: the command succeeded. Warnings can still be printed.
@@ -50,16 +47,10 @@ The container's `daemon` command runs once when it starts, then at the times
 `SCHEDULE` names. The image's health check gives the first run 26 hours. To
 use your own scheduler instead, have it start `vault-mirror run`.
 
-A schedule with no future occurrence stops the daemon before its first run.
-
 Only one `run` or `daemon` run can use a backup directory at a time. While a
 run holds the directory's `run.lock`, `export` and `snapshots` stop straight
 away. These recovery commands can share the lock with each other and block
-runs until they finish. Keep `run.lock` when copying backups for
-[read-only recovery](backups.md#restore-with-vault-mirror).
-
-A run refused by the lock sends no notification. Other backup-directory
-failures send the configured failure notification.
+runs until they finish.
 
 The generated `compose.yaml` gives a run five minutes to finish when the
 container stops. Raise `stop_grace_period` for large vaults.

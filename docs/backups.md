@@ -72,9 +72,6 @@ attach the file again.
 Delete `backups/recovered` when done, before resuming backup copies or syncs.
 Bitwarden imports do not restore the time a password last changed.
 
-If the export fails, unencrypted files may remain in the output directory.
-Inspect them and choose a new `--output` directory to retry.
-
 The export leaves out the hidden `vault-mirror` fields, so imported items are
 not copies. To rebuild a lost destination, mirror into an empty one instead.
 
@@ -98,11 +95,6 @@ vault-mirror --env-file vault-mirror.env export --output ./recovered
 
 The native export writes to `recovered` in your working directory. This output
 also contains unencrypted vault data; delete it when done.
-
-You can list and export backups from a read-only directory if it contains a
-readable `run.lock`. Keep that file when copying backups. If it is missing,
-the commands create it in a writable backup directory. Otherwise, copy the
-backups to a writable directory before recovering them.
 
 If you restored into the same source account, the imported items have new ids.
 The next run can stop because it would replace more than half of the old copies.

@@ -27,12 +27,6 @@ Without a destination, a run only backs up the source.
 
 In `last-run.json`, `mirror.state` is `complete` or `incomplete`. Failed runs
 keep counts in `mirror.planned` and write uncertainty in `mirror.writes`.
-The first run after upgrading replaces the old status format. Until then,
-`healthcheck` cannot read an older untagged status file.
-
-Folder cleanup is best effort. If a deletion cannot be confirmed, required
-mirroring can still succeed. The result then records `changed: null` and the
-notification reports the cleanup uncertainty.
 
 ## How copies are recognized
 
@@ -97,11 +91,6 @@ Before replacing destination changes, a run backs up their current state.
 See [Backups and restoring](backups.md).
 
 ### Switching the source and destination
-
-Use the updated vault-mirror binary for runs in both directions. Do not use an
-older version after upgrading. Unchanged copies keep their existing markers.
-If older markers leave the last copied state unclear, a run may need
-`--allow-overwrite`.
 
 To make the destination your main vault, swap the `SOURCE_` and `DEST_`
 settings. The first run after the swap stops, because swapped settings are
