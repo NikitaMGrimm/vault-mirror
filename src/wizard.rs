@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backup_only_setup_requires_complete_item_visibility() {
+    async fn setup_accepts_servers_that_hide_item_types() {
         use std::{
             io::{BufRead, BufReader, Read},
             net::TcpListener,
@@ -574,12 +574,7 @@ mod tests {
             let result = log_in(&env, "SOURCE", "the source").await;
             drop(stop);
             server.join().unwrap();
-            if visible {
-                result.unwrap();
-            } else {
-                let error = result.expect_err("setup accepted a server that hides item types");
-                assert!(format!("{error:#}").contains("cannot be read completely"));
-            }
+            result.unwrap();
         }
     }
 

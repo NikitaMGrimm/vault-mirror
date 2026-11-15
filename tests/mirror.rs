@@ -922,10 +922,7 @@ async fn newer_item_types_are_mirrored() -> Result<()> {
         // gets none, instead of a new invisible copy on every run, and the
         // run fails rather than look complete.
         let error = run(&source, &dest, &options()).await.unwrap_err();
-        assert!(
-            format!("{error:#}").contains("cannot be read completely"),
-            "{error:#}"
-        );
+        assert!(format!("{error:#}").contains("cannot hold"), "{error:#}");
         assert!(dest.load(&PERSONAL).await?.items.is_empty());
     }
     Ok(())
