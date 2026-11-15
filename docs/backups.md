@@ -25,9 +25,9 @@ backups/
 ```
 
 A **snapshot** contains the configured personal vault or organization without
-the trash, with its own copy of every attachment, so ten snapshots of a vault
-with 1 GiB of attachments take about 10 GiB. An unchanged vault gets no new
-snapshot.
+the trash, with every attachment. On file systems with hard links, a new
+snapshot shares the attachment files the one before it holds instead of
+downloading and storing them again. An unchanged vault gets no new snapshot.
 
 Snapshots are kept like this:
 
