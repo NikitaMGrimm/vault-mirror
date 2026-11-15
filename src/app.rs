@@ -141,9 +141,21 @@ pub enum BackupAccess {
 )]
 struct BackupBusy(PathBuf);
 
+/// A lock on the backup directory, released when dropped.
+#[derive(Debug)]
+pub struct BackupLock(fs::File);
+
+impl Drop for BackupLock {
+    fn drop(&mut self) {
+        // Closing the file would leave the lock held for as long as a child
+        // process that was starting meanwhile still has the descriptor.
+        let _ = self.0.unlock();
+    }
+}
+
 /// Keeps readers apart from a run that writes or prunes snapshots until the
-/// returned file is closed. Recovery readers can share the directory.
-pub fn lock_backups_dir(backups_dir: &Path, access: BackupAccess) -> Result<fs::File> {
+/// returned lock is dropped. Recovery readers can share the directory.
+pub fn lock_backups_dir(backups_dir: &Path, access: BackupAccess) -> Result<BackupLock> {
     if matches!(access, BackupAccess::Write) {
         store::create_private_dir(backups_dir)?;
     }
@@ -183,7 +195,7 @@ pub fn lock_backups_dir(backups_dir: &Path, access: BackupAccess) -> Result<fs::
         BackupAccess::Write => file.try_lock(),
     };
     match locked {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(BackupLock(file)),
         Err(fs::TryLockError::WouldBlock) => Err(BackupBusy(backups_dir.to_path_buf()).into()),
         Err(fs::TryLockError::Error(error)) => {
             Err(error).with_context(|| format!("locking {}", path.display()))
@@ -586,8 +598,11 @@ mod tests {
         drop(notified);
         assert!(!dir.path().join("key.age").exists());
 
+        // A descriptor a starting child process still has keeps no lock.
+        let inherited = running.0.try_clone().unwrap();
         drop(running);
         lock_backups_dir(dir.path(), BackupAccess::Write).unwrap();
+        drop(inherited);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
