@@ -4,6 +4,17 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.9.3](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.9.2...v0.9.3) - 2026-11-15
+
+### Fixed
+
+- work with Bitwarden's cloud while it hides newer item types ([#117](https://github.com/NikitaMGrimm/vault-mirror/pull/117))
+- *(cli)* improve terminal output and recovery guidance
+
+### Performance
+
+- download and store an attachment once across snapshots ([#118](https://github.com/NikitaMGrimm/vault-mirror/pull/118))
+
 ## [0.9.2](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.9.1...v0.9.2) - 2026-10-26
 
 ### Fixed
