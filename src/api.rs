@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 
 /// Sent as `Bitwarden-Client-Version`. Servers hide newer item types from
 /// clients that report an old version, so this has to track current releases.
-const CLIENT_VERSION: &str = "2026.9.0";
+const CLIENT_VERSION: &str = "2026.10.1";
 
 /// The Linux CLI device type, the client this tool stands in for.
 const DEVICE_TYPE: &str = "25";
