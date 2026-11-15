@@ -25,9 +25,9 @@ backups/
 ```
 
 A **snapshot** contains the configured personal vault or organization without
-the trash, with every attachment. An attachment that several snapshots hold
-is downloaded and stored once, on file systems with hard links. An unchanged
-vault gets no new snapshot.
+the trash, with every attachment. On file systems with hard links, a new
+snapshot shares the attachment files the one before it holds instead of
+downloading and storing them again. An unchanged vault gets no new snapshot.
 
 Snapshots are kept like this:
 
