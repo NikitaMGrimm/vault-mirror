@@ -29,12 +29,6 @@ the trash, with every attachment. On file systems with hard links, a new
 snapshot shares the attachment files the one before it holds instead of
 downloading and storing them again. An unchanged vault gets no new snapshot.
 
-If the newest snapshot is dated in the future, check the system clock. If the
-clock is already correct, stop the daemon and make a separate copy of the
-entire backup directory, including `key.age`. Verify you can export the
-future-dated snapshots from that copy before moving those directories out of
-the active `source` or `dest` directory. Then resume runs.
-
 Snapshots are kept like this:
 
 - everything from the last 24 hours,
@@ -47,6 +41,12 @@ The first run creates a random backup key and stores it in `key.age`, encrypted
 with `BACKUP_PASSPHRASE`. You need **both** to read the backups, so keep copies
 of both somewhere other than the backup disk. If `key.age` goes missing, runs
 stop until you put it back.
+
+If the newest snapshot is dated in the future, check the system clock. If the
+clock is already correct, stop the daemon and make a separate copy of the
+entire backup directory, including `key.age`. Verify you can export the
+future-dated snapshots from that copy before moving those directories out of
+the active `source` or `dest` directory. Then resume runs.
 
 ## Restore with vault-mirror
 

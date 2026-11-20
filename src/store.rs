@@ -441,7 +441,8 @@ impl SnapshotWriter<'_> {
         let base = (self.now.to_offset(UtcOffset::UTC))
             .format(ID_TIME)
             .context("formatting the snapshot id")?;
-        let mut id = match scan(&self.store.directory)?.pop() {
+        let latest = self.store.list()?.pop();
+        let mut id = match latest.and_then(|id| parse_id(&id).map(|(stamp, _)| (stamp, id))) {
             Some((stamp, _)) if stamp > self.now => {
                 bail!("the newest snapshot is dated in the future. Check the system clock");
             }
