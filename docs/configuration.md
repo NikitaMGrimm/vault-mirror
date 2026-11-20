@@ -12,7 +12,8 @@ Each line is `NAME=value`. Lines starting with `#` are comments. When the
 binary reads the file with `--env-file`, a name outside the
 [variables](#variables) below stops the command. The generated Compose file
 uses this check too. Unknown names passed only through the environment, such
-as with `docker run --env-file`, are ignored.
+as with `docker run --env-file`, are ignored. Settings a command reads must
+be valid UTF-8.
 
 Values are taken literally, without quote or `$VARIABLES` expansion. Quotes,
 spaces, and dollar signs stay part of the value:

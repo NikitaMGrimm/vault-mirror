@@ -143,21 +143,29 @@ fn main() -> ExitCode {
 /// Settings read with `--env-file`.
 static ENV_FILE: OnceLock<HashMap<String, String>> = OnceLock::new();
 
-/// The environment, over the settings read with `--env-file`.
-fn settings() -> HashMap<String, String> {
+/// Read only environment settings used by this command. A setting that
+/// overrides the file must be readable before the command can use it.
+fn settings(used: impl Fn(&str) -> bool) -> Result<HashMap<String, String>> {
     let mut env = ENV_FILE.get().cloned().unwrap_or_default();
-    // `std::env::vars` panics on a variable that is not UTF-8, even one that
-    // vault-mirror never reads. Such a variable cannot be a valid setting.
-    env.extend(
-        std::env::vars_os().filter_map(|(name, value)| {
-            Some((name.into_string().ok()?, value.into_string().ok()?))
-        }),
-    );
-    env
+    for (name, value) in std::env::vars_os() {
+        let Some(name) = name.to_str().filter(|name| used(name)) else {
+            continue;
+        };
+        let value = value.into_string().map_err(|_| {
+            anyhow!("configuration: {name} is not valid UTF-8. Set it to a UTF-8 value")
+        })?;
+        env.insert(name.to_string(), value);
+    }
+    Ok(env)
+}
+
+fn uses_backup_directory(name: &str) -> bool {
+    matches!(name, "BACKUPS_DIR" | "VAULT_MIRROR_DEFAULT_BACKUPS_DIR")
 }
 
 fn config() -> Result<Config> {
-    Config::from_env(&settings()).map_err(|error| anyhow!("configuration: {error}"))
+    let settings = settings(|name| config::is_setting(name) || uses_backup_directory(name))?;
+    Config::from_env(&settings).map_err(|error| anyhow!("configuration: {error}"))
 }
 
 /// Reads `NAME=value` lines literally, as Docker Compose's `format: raw`
@@ -418,7 +426,7 @@ fn read_keys(backups: &Path, env: &HashMap<String, String>) -> Result<Keys> {
 }
 
 fn snapshots(vault: Role) -> Result<ExitCode> {
-    let backups = config::backups_dir(&settings());
+    let backups = config::backups_dir(&settings(uses_backup_directory)?);
     let _lock = app::lock_backups_dir(&backups, app::BackupAccess::Read)?;
     let ids = store::list(&backups, vault.name())?;
     if ids.is_empty() {
@@ -446,7 +454,10 @@ fn locate_snapshot<'a>(store: &Store<'a>, role: Role, name: &str) -> Result<Snap
 }
 
 fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
-    let env = settings();
+    let env = settings(|name| {
+        uses_backup_directory(name)
+            || matches!(name, "BACKUP_PASSPHRASE" | "BACKUP_PASSPHRASE_FILE")
+    })?;
     let backups = config::backups_dir(&env);
     let _lock = app::lock_backups_dir(&backups, app::BackupAccess::Read)?;
     let keys = read_keys(&backups, &env)?;
@@ -530,7 +541,7 @@ fn healthcheck(max_age_hours: u64) -> Result<ExitCode> {
             .checked_mul(3600)
             .ok_or_else(|| anyhow!("--max-age-hours is too large"))?,
     );
-    let backups = config::backups_dir(&settings());
+    let backups = config::backups_dir(&settings(uses_backup_directory)?);
     let status = match app::read_status(&backups) {
         Ok(status) => status,
         Err(error)

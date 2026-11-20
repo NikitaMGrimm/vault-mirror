@@ -316,7 +316,7 @@ fn env_file(settings: &[(&str, String)]) -> String {
 /// logins read it, so the settings file and Compose's bind mount find it
 /// from the generated directory too.
 fn configured_ca_cert() -> Result<Option<PathBuf>> {
-    crate::settings()
+    crate::settings(|name| name == "CA_CERT_FILE")?
         .get("CA_CERT_FILE")
         .filter(|value| !value.trim().is_empty())
         .map(|value| ca_cert_file(value.trim()))
