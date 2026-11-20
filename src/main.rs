@@ -462,7 +462,7 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
     }
     // A damaged backup exports nothing.
     for attachment in restorable.attachments() {
-        backup.attachment(&attachment.attachment_id)?;
+        backup.copy_attachment(&attachment.attachment_id, &mut std::io::sink())?;
     }
 
     if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
@@ -492,9 +492,8 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
             let directory = output.join("attachments").join(&attachment.attachment_id);
             fs::create_dir_all(&directory)
                 .with_context(|| format!("creating {}", directory.display()))?;
-            let path = directory.join("attachment");
-            fs::write(&path, backup.attachment(&attachment.attachment_id)?)
-                .with_context(|| format!("writing {}", path.display()))?;
+            export_attachment(&backup, &attachment.attachment_id, &directory)
+                .with_context(|| format!("writing an attachment in {}", directory.display()))?;
             written += 1;
         }
         Ok(written)
@@ -515,6 +514,14 @@ fn export(args: SnapshotArgs, output: &Path) -> Result<ExitCode> {
         true,
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// Publish the file only once age has authenticated even its last chunk.
+fn export_attachment(backup: &Snapshot<'_>, id: &str, directory: &Path) -> Result<()> {
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    backup.copy_attachment(id, &mut file)?;
+    file.persist_noclobber(directory.join("attachment"))?;
+    Ok(())
 }
 
 fn healthcheck(max_age_hours: u64) -> Result<ExitCode> {
@@ -555,6 +562,31 @@ fn healthcheck(max_age_hours: u64) -> Result<ExitCode> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn a_damaged_final_chunk_never_publishes_a_partial_attachment() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), "synthetic passphrase").unwrap();
+        let store = Store::new(dir.path(), "source", &keys);
+        let writer = store.begin(OffsetDateTime::now_utc()).unwrap();
+        writer
+            .write_attachment("file", &vec![0; 160 * 1024])
+            .unwrap();
+        let id = writer.finish(&serde_json::json!({})).unwrap();
+        let path = dir
+            .path()
+            .join("source")
+            .join(&id)
+            .join("attachments/file.age");
+        let encrypted = fs::OpenOptions::new().write(true).open(path).unwrap();
+        encrypted
+            .set_len(encrypted.metadata().unwrap().len() - 1)
+            .unwrap();
+        drop(encrypted);
+        let output = tempfile::tempdir().unwrap();
+        assert!(export_attachment(&store.snapshot(&id), "file", output.path()).is_err());
+        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn help_wraps_to_the_terminal_width() {
