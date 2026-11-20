@@ -253,8 +253,13 @@ fn scan(directory: &Path) -> Result<Vec<(OffsetDateTime, String)>> {
     };
     let mut found = Vec::new();
     for entry in entries {
-        let name = entry?.file_name();
-        if let Some((created, counter)) = name.to_str().and_then(parse_id) {
+        let entry = entry?;
+        let name = entry.file_name();
+        if let Some((created, counter)) = name.to_str().and_then(parse_id)
+            && fs::metadata(entry.path())
+                .with_context(|| format!("checking {}", entry.path().display()))?
+                .is_dir()
+        {
             found.push((created, counter, name.to_string_lossy().into_owned()));
         }
     }
@@ -350,16 +355,16 @@ impl<'a> Store<'a> {
             }
         }
         let snapshots = scan(&self.directory)?;
-        let recent = now - Duration::days(1);
-        let cutoff = now - Duration::days(i64::from(retention_days));
+        let retention = Duration::days(i64::from(retention_days));
         let newest_of_day: HashMap<time::Date, usize> = (snapshots.iter().enumerate())
             .map(|(index, (created, _))| (created.date(), index))
             .collect();
         let mut removed = 0;
         for (index, (created, id)) in snapshots.iter().enumerate() {
+            let age = now - *created;
             let keep = index + 1 == snapshots.len()
-                || *created >= recent
-                || (*created >= cutoff && newest_of_day[&created.date()] == index);
+                || age <= Duration::days(1)
+                || (age <= retention && newest_of_day[&created.date()] == index);
             if keep {
                 continue;
             }
@@ -828,6 +833,32 @@ mod tests {
         let file = attachment_path(&dir.path().join("source").join(&id), "att-1").unwrap();
         fs::write(&file, b"damaged").unwrap();
         assert!(!store.unchanged(&document("a", &["att-1"])).unwrap());
+    }
+
+    #[test]
+    fn retention_accepts_the_full_range_of_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), "p").unwrap();
+        let store = Store::new(dir.path(), "source", &keys);
+        let now = datetime!(2026-10-14 12:00 UTC);
+        let oldest = write(&store, now - Duration::days(400), "a", &[]);
+        let newest = write(&store, now, "b", &[]);
+        assert_eq!(store.prune(u32::MAX, now).unwrap(), 0);
+        assert_eq!(store.list().unwrap(), [oldest, newest]);
+    }
+
+    #[test]
+    fn pruning_leaves_a_date_named_file_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), "p").unwrap();
+        let store = Store::new(dir.path(), "source", &keys);
+        let now = datetime!(2026-10-14 12:00 UTC);
+        let newest = write(&store, now, "a", &[]);
+        let other = store.directory.join("20200101T000000Z");
+        fs::write(&other, b"keep").unwrap();
+        assert_eq!(store.prune(30, now).unwrap(), 0);
+        assert_eq!(store.list().unwrap(), [newest]);
+        assert_eq!(fs::read(other).unwrap(), b"keep");
     }
 
     #[test]
