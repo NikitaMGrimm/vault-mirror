@@ -13,6 +13,7 @@ mod wizard;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use console::Console;
+use jiff::Timestamp;
 use time::OffsetDateTime;
 use vault_mirror::{
     app::{self, RunFlags},
@@ -262,26 +263,23 @@ async fn daemon() -> Result<ExitCode> {
     let schedule = (config.schedule.as_deref())
         .ok_or_else(|| anyhow!("configuration: the daemon needs SCHEDULE, a cron expression"))?;
     let timetable = Timetable::new(schedule, config.timezone.as_deref())?;
-    timetable.next(chrono::Utc::now())?;
+    timetable.next(Timestamp::now())?;
     let mut stop = Stop::new()?;
     loop {
         // A run in progress is finished, not interrupted. A stop request that
         // arrives during it is kept, and ends the daemon right after.
         run_and_report(&config, RunFlags::default()).await;
-        let next = timetable.next(chrono::Utc::now())?;
+        let next = timetable.next(Timestamp::now())?;
         tokio::select! {
             biased;
             () = stop.recv() => break,
             () = async {
                 Console::status(
                     "Waiting",
-                    &format!(
-                        "for the next run at {}",
-                        next.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                    ),
+                    &format!("for the next run at {next:.0}"),
                 );
-                let wait = (next - chrono::Utc::now())
-                    .to_std()
+                let wait = next.duration_since(Timestamp::now())
+                    .try_into()
                     .unwrap_or(Duration::ZERO);
                 tokio::time::sleep(wait).await;
             } => {}

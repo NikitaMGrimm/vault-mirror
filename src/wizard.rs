@@ -110,7 +110,7 @@ pub async fn init(dir: &Path) -> Result<ExitCode> {
         .with_prompt("Time zone")
         .default(local_timezone())
         .validate_with(|zone: &String| {
-            zone.parse::<chrono_tz::Tz>()
+            jiff::tz::TimeZone::get(zone)
                 .map(|_| ())
                 .map_err(|_| "not a time zone name, such as Europe/Berlin")
         })
@@ -455,7 +455,7 @@ fn local_timezone() -> String {
                 .map(|zone| zone.trim().to_string())
         })
         .or_else(from_link)
-        .filter(|zone| zone.parse::<chrono_tz::Tz>().is_ok())
+        .filter(|zone| jiff::tz::TimeZone::get(zone).is_ok())
         .unwrap_or_else(|| "UTC".to_string())
 }
 

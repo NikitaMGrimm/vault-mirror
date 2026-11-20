@@ -3,21 +3,22 @@
 use std::str::FromStr;
 
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Utc};
-use chrono_tz::Tz;
 use croner::Cron;
+use jiff::{Timestamp, tz::TimeZone};
 
 /// A validated cron schedule, ready to be asked for run times.
 pub struct Timetable {
     cron: Cron,
-    zone: Tz,
+    zone: TimeZone,
 }
 
 impl Timetable {
     pub fn new(expression: &str, timezone: Option<&str>) -> Result<Self> {
         let zone = match timezone {
-            Some(name) => Tz::from_str(name).map_err(|_| anyhow!("TZ is not a known time zone"))?,
-            None => Tz::UTC,
+            Some(name) => {
+                TimeZone::get(name).map_err(|_| anyhow!("TZ is not a known time zone"))?
+            }
+            None => TimeZone::UTC,
         };
         let cron = Cron::from_str(expression)
             .map_err(|_| anyhow!("SCHEDULE is an invalid cron schedule"))?;
@@ -25,22 +26,24 @@ impl Timetable {
     }
 
     /// The first run strictly after `after`.
-    pub fn next(&self, after: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    pub fn next(&self, after: Timestamp) -> Result<Timestamp> {
         self.cron
-            .find_next_occurrence(&after.with_timezone(&self.zone), false)
-            .map(|next| next.with_timezone(&Utc))
+            .find_next_occurrence(&after.to_zoned(self.zone.clone()), false)
+            .map(|next| next.timestamp())
             .map_err(|error| anyhow!("the cron schedule never runs again: {error}"))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
-
     use super::*;
 
-    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
+    fn utc(y: i16, mo: i8, d: i8, h: i8, mi: i8) -> Timestamp {
+        jiff::civil::date(y, mo, d)
+            .at(h, mi, 0, 0)
+            .to_zoned(TimeZone::UTC)
+            .unwrap()
+            .timestamp()
     }
 
     #[test]
