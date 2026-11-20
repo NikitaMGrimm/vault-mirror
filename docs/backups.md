@@ -27,8 +27,13 @@ backups/
 A **snapshot** contains the configured personal vault or organization without
 the trash, with every attachment. On file systems with hard links, a new
 snapshot shares the attachment files the one before it holds instead of
-downloading and storing them again. An unchanged vault gets no new snapshot. If the clock moves behind the newest
-snapshot, correct it before saving another.
+downloading and storing them again. An unchanged vault gets no new snapshot.
+
+If the newest snapshot is dated in the future, check the system clock. If the
+clock is already correct, stop the daemon and make a separate copy of the
+entire backup directory, including `key.age`. Verify you can export the
+future-dated snapshots from that copy before moving those directories out of
+the active `source` or `dest` directory. Then resume runs.
 
 Snapshots are kept like this:
 
