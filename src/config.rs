@@ -68,13 +68,18 @@ impl Env<'_> {
             ))),
             (Some(value), None) => Ok(Some(value)),
             (None, Some(path)) => {
+                // A secret pasted into a _FILE setting is treated as a path here.
                 let content = fs::read_to_string(&path).map_err(|error| {
-                    ConfigError(format!("{file_var}: cannot read {path}: {error}"))
+                    ConfigError(format!(
+                        "cannot read the file set by {file_var} ({error}). Check its path and read permissions"
+                    ))
                 })?;
                 // A trailing newline is an artefact of how the file was written.
                 let value = content.trim_end_matches(['\r', '\n']).to_string();
                 if value.is_empty() {
-                    return Err(ConfigError(format!("{file_var}: {path} is empty")));
+                    return Err(ConfigError(format!(
+                        "the file set by {file_var} is empty. Put the secret in the file"
+                    )));
                 }
                 Ok(Some(value))
             }

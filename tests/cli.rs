@@ -100,6 +100,34 @@ fn backup_directory_precedence_includes_the_image_default() {
 }
 
 #[test]
+fn secret_file_errors_do_not_echo_the_configured_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("synthetic-secret-file-setting");
+    let output_path = dir.path().join("recovered");
+    for (contents, reason) in [(None, "cannot read"), (Some("\n"), "is empty")] {
+        if let Some(contents) = contents {
+            fs::write(&path, contents).unwrap();
+        }
+        let output = vault_mirror()
+            .env("BACKUPS_DIR", dir.path())
+            .env("BACKUP_PASSPHRASE_FILE", &path)
+            .args(["export", "--output"])
+            .arg(&output_path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("synthetic-secret-file-setting"),
+            "the diagnostic printed the secret-file setting value"
+        );
+        assert!(stderr.contains("BACKUP_PASSPHRASE_FILE") && stderr.contains(reason));
+        assert!(!output_path.exists());
+    }
+}
+
+#[test]
 fn an_export_needs_only_the_backup_passphrase() {
     use serde_json::json;
     use vault_mirror::store::{Keys, Store};
