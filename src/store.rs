@@ -65,7 +65,7 @@ impl Keys {
             return Self::from_key_file(backups, passphrase);
         }
         for role in ROLES {
-            if !list(backups, role)?.is_empty() {
+            if !scan(&backups.join(role), true)?.is_empty() {
                 bail!(
                     "{} is missing, but {} holds backups that need it. Put the key file back \
                      from your copy of it, or set BACKUPS_DIR to an empty directory to start \
@@ -246,7 +246,9 @@ fn parse_id(id: &str) -> Option<(OffsetDateTime, u64)> {
 }
 
 /// The snapshots in `directory`, oldest first, with when each was made.
-fn scan(directory: &Path) -> Result<Vec<(OffsetDateTime, String)>> {
+/// When checking for a lost key, count even damaged snapshots: their
+/// surviving attachment files can still need the original key.
+fn scan(directory: &Path, include_incomplete: bool) -> Result<Vec<(OffsetDateTime, String)>> {
     let entries = match fs::read_dir(directory) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         entries => entries.with_context(|| format!("listing {}", directory.display()))?,
@@ -255,13 +257,28 @@ fn scan(directory: &Path) -> Result<Vec<(OffsetDateTime, String)>> {
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
-        if let Some((created, counter)) = name.to_str().and_then(parse_id)
-            && fs::metadata(entry.path())
-                .with_context(|| format!("checking {}", entry.path().display()))?
-                .is_dir()
-        {
-            found.push((created, counter, name.to_string_lossy().into_owned()));
+        let Some((created, counter)) = name.to_str().and_then(parse_id) else {
+            continue;
+        };
+        if !include_incomplete {
+            let document = entry.path().join(DOCUMENT_FILE);
+            match fs::metadata(&document) {
+                Ok(metadata) if metadata.is_file() => {}
+                Ok(_) => continue,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("checking {}", document.display()));
+                }
+            }
         }
+        found.push((created, counter, name.to_string_lossy().into_owned()));
     }
     found.sort();
     Ok(found
@@ -273,7 +290,7 @@ fn scan(directory: &Path) -> Result<Vec<(OffsetDateTime, String)>> {
 /// The ids of the snapshots of `role` in `backups`, oldest first. Needs no
 /// key and creates nothing.
 pub fn list(backups: &Path, role: &str) -> Result<Vec<String>> {
-    Ok(scan(&backups.join(role))?
+    Ok(scan(&backups.join(role), false)?
         .into_iter()
         .map(|(_, id)| id)
         .collect())
@@ -297,7 +314,7 @@ impl<'a> Store<'a> {
 
     /// Snapshot ids, oldest first.
     pub fn list(&self) -> Result<Vec<String>> {
-        Ok(scan(&self.directory)?
+        Ok(scan(&self.directory, false)?
             .into_iter()
             .map(|(_, id)| id)
             .collect())
@@ -354,7 +371,7 @@ impl<'a> Store<'a> {
                 let _ = fs::remove_dir_all(entry.path());
             }
         }
-        let snapshots = scan(&self.directory)?;
+        let snapshots = scan(&self.directory, false)?;
         let retention = Duration::days(i64::from(retention_days));
         let newest_of_day: HashMap<time::Date, usize> = (snapshots.iter().enumerate())
             .map(|(index, (created, _))| (created.date(), index))
@@ -859,6 +876,30 @@ mod tests {
         assert_eq!(store.prune(30, now).unwrap(), 0);
         assert_eq!(store.list().unwrap(), [newest]);
         assert_eq!(fs::read(other).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn an_incomplete_directory_never_takes_a_daily_snapshot_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), "p").unwrap();
+        let store = Store::new(dir.path(), "source", &keys);
+        let now = datetime!(2026-10-14 00:00 UTC);
+        let first = write(&store, now, "a", &[]);
+        let incomplete = store.directory.join("20261014T010000Z");
+        fs::create_dir(&incomplete).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("missing", store.directory.join("20261014T020000Z")).unwrap();
+        let later = now + Duration::days(2);
+        let last = write(&store, later, "b", &[]);
+        assert_eq!(store.prune(30, later).unwrap(), 0);
+        assert_eq!(store.list().unwrap(), [first.clone(), last.clone()]);
+        assert!(incomplete.is_dir());
+
+        fs::remove_dir_all(store.directory.join(first)).unwrap();
+        fs::remove_dir_all(store.directory.join(last)).unwrap();
+        fs::remove_file(dir.path().join(KEY_FILE)).unwrap();
+        assert!(Keys::open(dir.path(), "p").is_err());
+        assert!(!dir.path().join(KEY_FILE).exists());
     }
 
     #[test]
