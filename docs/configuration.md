@@ -38,6 +38,8 @@ To keep a secret out of the settings file, put it in a file of its own and set
 `NAME_FILE` to that file's path, for example
 `SOURCE_PASSWORD_FILE=/run/secrets/source_password`. This works with Docker
 secrets and systemd credentials. Trailing newlines in the file are ignored.
+If a command reports a file error, use the setting it names to find the path
+in your configuration.
 
 ## Variables
 
