@@ -840,6 +840,33 @@ fn a_variable_that_is_not_utf8_does_not_crash_the_command() {
     assert_eq!(output.status.code(), Some(1), "{stderr}");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_used_setting_with_invalid_utf8_is_refused_without_showing_its_value() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let fallback = dir.path().join("backups");
+    fs::create_dir(&fallback).unwrap();
+    let value = OsStr::from_bytes(b"synthetic-value\xff");
+    for (command, setting) in [("snapshots", "BACKUPS_DIR"), ("run", "INCLUDE_FOLDERS")] {
+        let output = vault_mirror()
+            .current_dir(dir.path())
+            .env(setting, value)
+            .arg(command)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{command} succeeded");
+        assert!(
+            stderr.contains(setting) && stderr.contains("UTF-8"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("synthetic-value"), "{stderr}");
+        assert!(!fallback.join("run.lock").exists());
+    }
+}
+
 #[test]
 fn a_misspelt_setting_in_the_settings_file_is_refused() {
     let dir = tempfile::tempdir().unwrap();
