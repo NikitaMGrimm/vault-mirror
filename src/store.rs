@@ -119,17 +119,15 @@ impl Keys {
         Ok(out)
     }
 
-    fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let decryptor = age::Decryptor::new_buffered(data)
+    fn decrypt_to(&self, path: &Path, output: &mut impl Write) -> Result<()> {
+        let file = fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+        let decryptor = age::Decryptor::new_buffered(io::BufReader::new(file))
             .map_err(|error| anyhow!("not a readable backup file: {error}"))?;
         let mut reader = decryptor
             .decrypt(iter::once(&self.identity as &dyn age::Identity))
             .map_err(|error| anyhow!("the backup key does not open this file: {error}"))?;
-        let mut out = Vec::new();
-        reader
-            .read_to_end(&mut out)
-            .context("the backup file is corrupt")?;
-        Ok(out)
+        io::copy(&mut reader, output)?;
+        Ok(())
     }
 }
 
@@ -337,9 +335,11 @@ impl<'a> Store<'a> {
         };
         let newest = self.snapshot(&id);
         Ok(newest.document().is_ok_and(|stored| stored == *document)
-            && snapshot::parse(document)?
-                .attachments()
-                .all(|attachment| newest.attachment(&attachment.attachment_id).is_ok()))
+            && snapshot::parse(document)?.attachments().all(|attachment| {
+                newest
+                    .copy_attachment(&attachment.attachment_id, &mut io::sink())
+                    .is_ok()
+            }))
     }
 
     /// Starts a snapshot made at `now`.
@@ -406,21 +406,26 @@ pub struct Snapshot<'a> {
 impl Snapshot<'_> {
     pub fn document(&self) -> Result<Value> {
         let path = self.directory.join(DOCUMENT_FILE);
-        let data = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        let plain = self
-            .keys
-            .decrypt(&data)
+        let mut plain = Vec::new();
+        self.keys
+            .decrypt_to(&path, &mut plain)
             .with_context(|| format!("decrypting {}", path.display()))?;
         serde_json::from_slice(&plain)
             .with_context(|| format!("{} does not hold JSON", path.display()))
     }
 
     pub fn attachment(&self, attachment_id: &str) -> Result<Vec<u8>> {
+        let mut data = Vec::new();
+        self.copy_attachment(attachment_id, &mut data)?;
+        Ok(data)
+    }
+
+    /// Decrypts and authenticates the complete attachment as it is copied.
+    pub fn copy_attachment(&self, attachment_id: &str, output: &mut impl Write) -> Result<()> {
         let path = attachment_path(&self.directory, attachment_id)?;
-        let data = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         self.keys
-            .decrypt(&data)
-            .with_context(|| format!("decrypting {}", path.display()))
+            .decrypt_to(&path, output)
+            .with_context(|| format!("copying attachment {attachment_id} from {}", path.display()))
     }
 }
 
@@ -445,7 +450,11 @@ impl SnapshotWriter<'_> {
     pub fn reuse_attachment(&self, from: &Snapshot<'_>, attachment_id: &str) -> Result<bool> {
         let stored = attachment_path(&from.directory, attachment_id)?;
         let path = attachment_path(self.temp.path(), attachment_id)?;
-        if from.attachment(attachment_id).is_err() || fs::hard_link(&stored, &path).is_err() {
+        if from
+            .copy_attachment(attachment_id, &mut io::sink())
+            .is_err()
+            || fs::hard_link(&stored, &path).is_err()
+        {
             return Ok(false);
         }
         sync_dir(&self.temp.path().join(ATTACHMENTS_DIR))?;

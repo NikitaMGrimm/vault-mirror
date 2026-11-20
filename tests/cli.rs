@@ -109,9 +109,8 @@ fn an_export_needs_only_the_backup_passphrase() {
     let keys = Keys::open(dir.path(), passphrase).unwrap();
     let store = Store::new(dir.path(), "source", &keys);
     let writer = store.begin(time::OffsetDateTime::now_utc()).unwrap();
-    writer
-        .write_attachment("attachment-id", b"synthetic attachment bytes")
-        .unwrap();
+    let bytes = vec![0x5a; 160 * 1024];
+    writer.write_attachment("attachment-id", &bytes).unwrap();
     let id = writer
         .finish(&json!({"encrypted":false,"folders":[],"items":[{"id":"item-id","type":2,"name":"synthetic item","notes":"synthetic note"}],"vaultMirror":{"scope":"personal","plainStrings":{},"attachments":[{"itemId":"item-id","attachmentId":"attachment-id","fileName":"../recovered.txt"}]}}))
         .unwrap();
@@ -150,15 +149,16 @@ fn an_export_needs_only_the_backup_passphrase() {
     assert_eq!(exported["items"][0]["notes"], "synthetic note");
     assert_eq!(
         fs::read(output_dir.join("attachments/attachment-id/attachment")).unwrap(),
-        b"synthetic attachment bytes"
+        bytes
     );
 
-    fs::write(
-        dir.path()
-            .join(format!("source/{id}/attachments/attachment-id.age")),
-        b"damaged encrypted attachment",
-    )
-    .unwrap();
+    // Earlier age chunks still open; preflight must also check the last one.
+    let stored = dir
+        .path()
+        .join(format!("source/{id}/attachments/attachment-id.age"));
+    let file = fs::OpenOptions::new().write(true).open(stored).unwrap();
+    file.set_len(file.metadata().unwrap().len() - 1).unwrap();
+    drop(file);
     let damaged_output = dir.path().join("damaged-recovery");
     let output = command(&damaged_output).output().unwrap();
     assert!(!output.status.success());
