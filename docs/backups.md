@@ -154,17 +154,21 @@ delete the files when done.
    age -d -o key.txt backups/key.age
    ```
 
-2. Decrypt a snapshot:
+2. Set `snapshot` to the directory name you want from `backups/source`,
+   then decrypt it:
 
    ```sh
-   age -d -i key.txt -o vault.json backups/source/20261014T030000Z/vault.json.age
+   snapshot=20261014T030000Z
+   age -d -i key.txt -o vault.json "backups/source/$snapshot/vault.json.age"
    ```
 
 3. Import `vault.json` as **Bitwarden (json)**.
 
 4. `vaultMirror.attachments` in `vault.json` lists each attachment's item,
-   id and file name. Decrypt each file and attach it to its item in a client:
+   id and file name. Set `attachment_id` to the entry's `attachmentId` and
+   decrypt it. Attach the recovered file to that item under its original name:
 
    ```sh
-   age -d -i key.txt -o recovered-file backups/source/20261014T030000Z/attachments/<attachment id>.age
+   attachment_id=3cf7629e91ba42c1
+   age -d -i key.txt -o recovered-file "backups/source/$snapshot/attachments/$attachment_id.age"
    ```
