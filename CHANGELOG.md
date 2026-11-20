@@ -4,6 +4,18 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.9.4](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.9.3...v0.9.4) - 2026-11-20
+
+### Fixed
+
+- *(config)* reject unreadable environment overrides ([#131](https://github.com/NikitaMGrimm/vault-mirror/pull/131))
+- keep snapshot order and health reports accurate after clock changes ([#127](https://github.com/NikitaMGrimm/vault-mirror/pull/127))
+- *(backup)* protect daily snapshots when pruning ([#126](https://github.com/NikitaMGrimm/vault-mirror/pull/126))
+
+### Performance
+
+- stream stored attachments during backup and export ([#128](https://github.com/NikitaMGrimm/vault-mirror/pull/128))
+
 ## [0.9.3](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.9.2...v0.9.3) - 2026-11-15
 
 ### Fixed
