@@ -44,6 +44,12 @@ with `BACKUP_PASSPHRASE`. You need **both** to read the backups, so keep copies
 of both somewhere other than the backup disk. If `key.age` goes missing, runs
 stop until you put it back.
 
+If the newest snapshot is dated in the future, check the system clock. If the
+clock is already correct, stop the daemon and make a separate copy of the
+entire backup directory, including `key.age`. Verify you can export the
+future-dated snapshots from that copy before moving those directories out of
+the active `source` or `dest` directory. Then resume runs.
+
 ## Restore with vault-mirror
 
 Stop the daemon first, so no run changes the vaults while you recover:

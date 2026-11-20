@@ -463,11 +463,21 @@ impl SnapshotWriter<'_> {
         let base = (self.now.to_offset(UtcOffset::UTC))
             .format(ID_TIME)
             .context("formatting the snapshot id")?;
-        let mut id = base.clone();
-        for counter in 1.. {
-            if !self.store.directory.join(&id).try_exists()? {
-                break;
+        let latest = self.store.list()?.pop();
+        let mut id = match latest.and_then(|id| parse_id(&id).map(|(stamp, _)| (stamp, id))) {
+            Some((stamp, _)) if stamp > self.now => {
+                bail!("the newest snapshot is dated in the future. Check the system clock");
             }
+            // Start at the last id so removing an older snapshot cannot make
+            // a new one sort before the one it supersedes.
+            Some((stamp, id)) if stamp.unix_timestamp() == self.now.unix_timestamp() => id,
+            _ => base.clone(),
+        };
+        let mut counter = parse_id(&id).context("invalid snapshot time")?.1;
+        while self.store.directory.join(&id).try_exists()? {
+            counter = counter
+                .checked_add(1)
+                .context("too many snapshots in one second")?;
             id = format!("{base}-{counter}");
         }
         let temp = self.temp.keep();
@@ -784,6 +794,24 @@ mod tests {
         assert_eq!(ids[0], "20261014T013000Z");
         assert_eq!(ids[10], "20261014T013000Z-10");
         assert_eq!(store.list().unwrap(), ids);
+    }
+
+    #[test]
+    fn a_new_snapshot_cannot_sort_before_the_previous_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Keys::open(dir.path(), "p").unwrap();
+        let store = Store::new(dir.path(), "source", &keys);
+        let now = datetime!(2026-10-14 00:00 UTC);
+        let first = write(&store, now, "a", &[]);
+        let second = write(&store, now, "b", &[]);
+        fs::remove_dir_all(store.directory.join(first)).unwrap();
+        let third = write(&store, now, "c", &[]);
+        assert_eq!(store.list().unwrap(), [second, third.clone()]);
+        let result = store
+            .begin(now - Duration::seconds(1))
+            .and_then(|writer| writer.finish(&document("d", &[])));
+        assert!(result.is_err());
+        assert_eq!(store.list().unwrap().last(), Some(&third));
     }
 
     #[test]

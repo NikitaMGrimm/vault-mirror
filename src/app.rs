@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -259,6 +259,7 @@ struct Progress {
 /// Runs once and records the result. Never returns an error: a failed run is
 /// a `Status` with `RunResult::Failed`.
 pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter) -> Status {
+    let timer = Instant::now();
     let started = OffsetDateTime::now_utc();
     let mut progress = Progress {
         stage: "configuration",
@@ -280,7 +281,7 @@ pub async fn run_once(config: &Config, flags: RunFlags, reporter: &dyn Reporter)
     let mut status = progress.status;
     status.started_at = started.format(&Rfc3339).unwrap_or_default();
     status.finished_at = finished.format(&Rfc3339).unwrap_or_default();
-    status.duration_seconds = ((finished - started).as_seconds_f64() * 1000.0).round() / 1000.0;
+    status.duration_seconds = (timer.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
     match result {
         Ok(()) => status.status = RunResult::Success,
         Err(error) => {
@@ -514,6 +515,9 @@ pub fn health(
     let finished = OffsetDateTime::parse(&status.finished_at, &Rfc3339)
         .map_err(|_| "the status file has no valid finish time".to_string())?;
     let age = now - finished;
+    if age.is_negative() {
+        return Err("the last run finished in the future. Check the system clock".into());
+    }
     if age > max_age {
         return Err(format!(
             "the last successful run finished {} ago",
@@ -725,6 +729,9 @@ mod tests {
             health(&success(), day, datetime!(2026-10-14 20:00:00 UTC)),
             Ok(())
         );
+        let future = health(&success(), day, datetime!(2026-10-14 01:59:59 UTC)).unwrap_err();
+        assert!(future.contains("future"), "{future}");
+        assert!(health(&success(), day, datetime!(2026-10-14 02:00 UTC)).is_ok());
         let stale = health(&success(), day, datetime!(2026-10-16 02:00:00 UTC)).unwrap_err();
         assert!(stale.contains("48 hour"), "{stale}");
         let failed = Status {

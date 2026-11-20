@@ -35,8 +35,9 @@ to turn colours off.
 Progress and results go to stdout. Warnings and errors go to stderr.
 `snapshots` writes one snapshot id per line to stdout, oldest first. With no
 snapshots, stdout is empty and a message goes to stderr. `healthcheck` prints
-`healthy:` or `unhealthy:`; before a run has been recorded it is unhealthy.
-A damaged or unreadable status file is an error.
+`healthy:` or `unhealthy:`. It reports unhealthy before the first recorded run
+or when the finish time is in the future. A damaged or unreadable status file
+is an error.
 
 The daemon keeps running after a failed run and exits `0` when stopped
 cleanly. Use `healthcheck` or `last-run.json` to check the last run's outcome.
