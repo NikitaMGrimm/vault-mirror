@@ -10,6 +10,8 @@ targets = [
 [advisories]
 # Every RustSec advisory fails the check unless listed here with a reason.
 ignore = [
+  # Bitwarden SDK 4 requires chrono through its logging and schema crates.
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained; restricted to the SDK dependencies below" },
   # The Marvin timing attack on RSA decryption needs an attacker who can time
   # many decryptions of ciphertexts they choose. vault-mirror decrypts a few
   # organization keys per run, locally. No fixed `rsa` release exists.
@@ -40,6 +42,7 @@ confidence-threshold = 0.9
 multiple-versions = "allow"
 wildcards = "deny"
 deny = [
+  { name = "chrono", wrappers = ["bitwarden-logging", "schemars"], reason = "only the Bitwarden SDK dependencies may bring in chrono" },
   { name = "crypto-bigint", version = "<0.7.6", wrappers = ["elliptic-curve"], reason = "RUSTSEC-2026-0387: only age's unused P-256 path may use an unpatched version" },
 ]
 
