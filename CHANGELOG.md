@@ -4,6 +4,12 @@ Notable changes for users. The format follows
 [Keep a Changelog](https://keepachangelog.com), and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [0.9.5](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.9.4...v0.9.5) - 2026-11-20
+
+### Fixed
+
+- *(config)* hide secret-file setting values in errors ([#132](https://github.com/NikitaMGrimm/vault-mirror/pull/132))
+
 ## [0.9.4](https://github.com/NikitaMGrimm/vault-mirror/compare/v0.9.3...v0.9.4) - 2026-11-20
 
 ### Fixed
